@@ -5,7 +5,7 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 ## Channel Map Generation
 
 ```{eval-rst}
-.. module:: channelmap_generator.utils.imro
+.. module:: pixelmap.utils.imro
 
 .. autofunction:: generate_imro_channelmap
 
@@ -21,7 +21,7 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 ## Electrode Selection
 
 ```{eval-rst}
-.. module:: channelmap_generator.backend
+.. module:: pixelmap.backend
 
 .. autofunction:: get_electrodes
 
@@ -35,7 +35,7 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 ## Types
 
 ```{eval-rst}
-.. module:: channelmap_generator.types
+.. module:: pixelmap.types
 
 .. autoclass:: Electrode
    :members:
@@ -43,7 +43,7 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 
 ## Constants
 
-The following constants are defined in `channelmap_generator.constants`:
+The following constants are defined in `pixelmap.constants`:
 
 `PROBE_TYPE_MAP`
 : Mapping from probe type names (`"1.0"`, `"2.0-1shank"`, `"2.0-4shanks"`) to lists of SpikeGLX subtype numbers.
@@ -62,7 +62,7 @@ The following constants are defined in `channelmap_generator.constants`:
 ### Generate a channelmap from a preset
 
 ```python
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 imro_list = cmg.generate_imro_channelmap(
     probe_type="2.0-4shanks",
@@ -77,7 +77,7 @@ cmg.save_to_imro_file(imro_list, "my_channelmap.imro")
 
 ```python
 import numpy as np
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 # Custom electrode selection: array of (shank_id, electrode_id) pairs
 custom = np.array([[0, i] for i in range(384)])
@@ -94,7 +94,7 @@ cmg.save_to_imro_file(imro_list, "custom_channelmap.imro")
 ### Read and inspect an existing IMRO file
 
 ```python
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 imro_list = cmg.read_imro_file("my_channelmap.imro")
 (

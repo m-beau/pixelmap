@@ -3,18 +3,18 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "channelmap-generator"
+name = "pixelmap"
 dynamic = ["version"]
 description = "Browser-based Neuropixels channelmap generator."
 readme = "README.md"
-license = {text = "GPL-3.0-or-later"}
+license = "GPL-3.0-or-later"
+license-files = ['LICENSE.txt']
 authors = [
     {name = "Maxime Beau", email = "maxime@princeton.edu"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -35,23 +35,23 @@ dependencies = [
 ]
 
 [project.gui-scripts]
-cmap_gui = "channelmap_generator.gui.app_util:main"
+pixelmap = "pixelmap.gui.app_util:main"
 
 [project.urls]
-Homepage = "https://github.com/m-beau/channelmap_generator"
-Documentation = "https://channelmap_generator.readthedocs.io"
-Repository = "https://github.com/m-beau/channelmap_generator"
-Issues = "https://github.com/m-beau/channelmap_generator/issues"
+Homepage = "https://github.com/m-beau/pixelmap"
+Documentation = "https://pixelmap.readthedocs.io"
+Repository = "https://github.com/m-beau/pixelmap"
+Issues = "https://github.com/m-beau/pixelmap/issues"
 
 [tool.setuptools.dynamic]
-version = {attr = "channelmap_generator.__version__"}
+version = {attr = "pixelmap.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["channelmap_generator*"]
+include = ["pixelmap*"]
 
 [tool.setuptools.package-data]
-channelmap_generator = [
+pixelmap = [
     "wiring_maps/*.csv",
     "gui/*/*.png",
     "gui/*/*.svg",

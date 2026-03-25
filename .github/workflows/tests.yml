@@ -31,7 +31,7 @@ jobs:
 
     - name: Run tests with coverage
       run: |
-        pytest tests/ -v --cov=channelmap_generator --cov-report=xml --cov-report=term
+        pytest tests/ -v --cov=pixelmap --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

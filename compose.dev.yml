@@ -1,15 +1,22 @@
 services:
-  channelmap-generator:
+  pixelmap:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: channelmap-generator
+    container_name: pixelmap
     env_file:
       - .env
     ports:
       - "${EXTERNAL_PORT}:${INTERNAL_PORT}"
     volumes:
       - ./output:/app/output
+    environment:
+      - ANALYTICS_DB_PATH=${ANALYTICS_DB_PATH:-/app/output/visitor_analytics.sqlite3}
+      - ANALYTICS_TRUST_PROXY_HEADERS=${ANALYTICS_TRUST_PROXY_HEADERS:-false}
+      - ANALYTICS_COOKIE_NAME=${ANALYTICS_COOKIE_NAME:-pixelmap_visitor_id}
+      - ANALYTICS_COOKIE_MAX_AGE_DAYS=${ANALYTICS_COOKIE_MAX_AGE_DAYS:-365}
+      - ANALYTICS_COOKIE_SAMESITE=${ANALYTICS_COOKIE_SAMESITE:-Lax}
+      - ANALYTICS_COOKIE_SECURE=${ANALYTICS_COOKIE_SECURE:-false}
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:${INTERNAL_PORT}/"]
       interval: 30s

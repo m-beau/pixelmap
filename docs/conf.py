@@ -1,11 +1,11 @@
 # Configuration file for the Sphinx documentation builder.
 
-import channelmap_generator
+import pixelmap
 
 project = "PixelMap"
 copyright = "2024, Maxime Beau"
 author = "Maxime Beau"
-version = channelmap_generator.__version__
+version = pixelmap.__version__
 release = version
 
 # -- General configuration ---------------------------------------------------
@@ -52,7 +52,7 @@ html_logo = "_static/npix_map_logo.png"
 html_static_path = ["_static"]
 
 html_theme_options = {
-    "source_repository": "https://github.com/m-beau/channelmap_generator",
+    "source_repository": "https://github.com/m-beau/pixelmap",
     "source_branch": "main",
     "source_directory": "docs/",
 }

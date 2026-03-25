@@ -5,17 +5,18 @@ Provides common test data including wiring DataFrames for all probe types
 and sample electrode selections for testing.
 """
 
-import pytest
-import pandas as pd
 from pathlib import Path
 
-from channelmap_generator.constants import WIRING_FILE_MAP, PROBE_TYPE_MAP
+import pandas as pd
+import pytest
+
+from pixelmap.constants import WIRING_FILE_MAP
 
 
 @pytest.fixture
 def wiring_maps_dir():
     """Path to wiring maps directory."""
-    return Path(__file__).parent.parent / "channelmap_generator" / "wiring_maps"
+    return Path(__file__).parent.parent / "pixelmap" / "wiring_maps"
 
 
 @pytest.fixture

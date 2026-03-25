@@ -23,7 +23,7 @@ This is **expected behavior** for non-canonical IMRO tables. SpikeGLX disables i
 
 To make further edits:
 
-1. Open the [PixelMap GUI](https://neuropixels-channelmap-generator.pni.princeton.edu) (or launch it locally).
+1. Open the [PixelMap GUI](https://pixelmap.pni.princeton.edu/app) (or launch it locally).
 2. Upload your `.imro` file as a starting point.
 3. Make your modifications.
 4. Download the updated `.imro` file.
@@ -45,7 +45,7 @@ To make further edits:
 
 ## Still stuck?
 
-[Open an issue](https://github.com/m-beau/channelmap_generator/issues) on GitHub with:
+[Open an issue](https://github.com/m-beau/pixelmap/issues) on GitHub with:
 
 - Your operating system and Python version
 - The full error message or traceback

@@ -66,7 +66,7 @@ pytest tests/ -v
 
 ### Run with coverage report:
 ```bash
-pytest tests/ --cov=channelmap_generator --cov-report=term
+pytest tests/ --cov=pixelmap --cov-report=term
 ```
 
 ### Run specific test class:

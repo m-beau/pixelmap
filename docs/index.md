@@ -59,7 +59,7 @@ Contributing, architecture, and adding new probes.
 | Quadbase      | Planned |
 | NXT           | Planned |
 
-UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/channelmap_generator/issues) if you need support for these.
+UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/pixelmap/issues) if you need support for these.
 
 ```{toctree}
 :maxdepth: 2

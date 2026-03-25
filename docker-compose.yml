@@ -1,12 +1,18 @@
 services:
-  channelmap-generator:
-    image: ghcr.io/m-beau/channelmap_generator:latest
-    container_name: channelmap-generator
+  pixelmap:
+    image: ghcr.io/m-beau/pixelmap:latest
+    container_name: pixelmap
     pull_policy: always
     ports:
       - "5008:5008"
     environment:
       - INTERNAL_PORT=5008 #This number should reflect the port after the `:` above
+      - ANALYTICS_DB_PATH=/app/output/visitor_analytics.sqlite3
+      - ANALYTICS_TRUST_PROXY_HEADERS=false
+      - ANALYTICS_COOKIE_NAME=pixelmap_visitor_id
+      - ANALYTICS_COOKIE_MAX_AGE_DAYS=365
+      - ANALYTICS_COOKIE_SAMESITE=Lax
+      - ANALYTICS_COOKIE_SECURE=false
     volumes:
       - ./output:/app/output
     healthcheck:

@@ -11,9 +11,9 @@
 [uv](https://docs.astral.sh/uv/) handles virtual environments and dependencies automatically:
 
 ```bash
-git clone https://github.com/m-beau/channelmap_generator.git
-cd channelmap_generator
-uv run cmap_gui  # installs dependencies and launches the GUI
+git clone https://github.com/m-beau/pixelmap.git
+cd pixelmap
+uv run pixelmap  # installs dependencies and launches the GUI
 ```
 
 To install dependencies without launching the GUI:
@@ -41,7 +41,7 @@ docker run --rm \
   --name channelmap-app \
   -p 5008:5008 \
   --pull=always \
-  ghcr.io/m-beau/channelmap_generator:latest
+  ghcr.io/m-beau/pixelmap:latest
 ```
 
 The application will be available at `http://localhost:5008`.
@@ -59,10 +59,10 @@ For production deployments, use **Docker Compose** — see the included `docker-
 Launch the GUI locally:
 
 ```bash
-uv run cmap_gui   # or just: cmap_gui (if installed with pip)
+uv run pixelmap   # or just: pixelmap (if installed with pip)
 ```
 
-Or use the [online version](https://neuropixels-channelmap-generator.pni.princeton.edu) directly — no installation required.
+Or use the [online version](https://pixelmap.pni.princeton.edu/app) directly — no installation required.
 
 1. **Select your probe type** from the dropdown.
 2. **Choose a preset** or select electrodes manually.
@@ -72,7 +72,7 @@ Or use the [online version](https://neuropixels-channelmap-generator.pni.princet
 ### Option 2: Python API
 
 ```python
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 # Generate a channel map using a preset
 imro_list = cmg.generate_imro_channelmap(

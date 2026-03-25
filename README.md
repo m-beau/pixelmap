@@ -1,9 +1,9 @@
-<img src="https://raw.githubusercontent.com/m-beau/channelmap_generator/main/channelmap_generator/gui/assets/npix_map_logo.png" width="150" align="right" vspace="0">
+<img src="https://raw.githubusercontent.com/m-beau/pixelmap/main/pixelmap/gui/assets/npix_map_logo.png" width="150" align="right" vspace="0">
 
 # PixelMap: a browser-based GUI to generate Neuropixels channelmaps
 
-[![Tests](https://github.com/m-beau/channelmap_generator/actions/workflows/tests.yml/badge.svg)](https://github.com/m-beau/channelmap_generator/actions/workflows/tests.yml)
-[![Documentation](https://readthedocs.org/projects/channelmap-generator/badge/?version=latest)](https://channelmap-generator.readthedocs.io)
+[![Tests](https://github.com/m-beau/pixelmap/actions/workflows/tests.yml/badge.svg)](https://github.com/m-beau/pixelmap/actions/workflows/tests.yml)
+[![Documentation](https://readthedocs.org/projects/pixelmap/badge/?version=latest)](https://pixelmap.readthedocs.io)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
@@ -11,7 +11,7 @@
 
 **Generate IMRO channelmaps for Neuropixels probes that respect electrode-ADC wiring constraints.**
 
-[Online GUI](https://neuropixels-channelmap-generator.pni.princeton.edu) | [Documentation](https://channelmap-generator.readthedocs.io) | [Paper](#citation)
+[Online GUI](https://pixelmap.pni.princeton.edu/app) | [Documentation](https://pixelmap.readthedocs.io) | [Paper](#citation)
 
 </div>
 
@@ -25,26 +25,26 @@
 > [!NOTE]
 > This tool is in **beta**. The IMRO editor tools in SpikeGLX and Open Ephys work correctly — what we provide here are tools to specify IMRO tables more easily. If you import one of our tables into SpikeGLX or Open Ephys, please double-check that all site selections, referencing, gains, and filter settings are what you intended.
 
-![GUI screenshot](channelmap_generator/gui/assets/GUI_screenshot.png)
+![GUI screenshot](pixelmap/gui/assets/GUI_screenshot.png)
 
 ## Installation
 
 ```bash
-git clone https://github.com/m-beau/channelmap_generator.git
-cd channelmap_generator
-uv run cmap_gui  # installs dependencies automatically and launches the GUI
+git clone https://github.com/m-beau/pixelmap.git
+cd pixelmap
+uv run pixelmap  # installs dependencies automatically and launches the GUI
 ```
 
-Also available via [pip, conda, or Docker](https://channelmap-generator.readthedocs.io/en/latest/getting-started.html).
+Also available via [pip, conda, or Docker](https://pixelmap.readthedocs.io/en/latest/getting-started.html).
 
 ## Quick Start
 
-Use the [online GUI](https://neuropixels-channelmap-generator.pni.princeton.edu) directly in your browser — no installation required.
+Use the [online GUI](https://pixelmap.pni.princeton.edu/app) directly in your browser — no installation required.
 
 Or launch it locally:
 
 ```bash
-uv run cmap_gui   # or: cmap_gui (if installed with pip)
+uv run pixelmap   # or: pixelmap (if installed with pip)
 ```
 
 1. **Select your probe type** from the dropdown.
@@ -55,7 +55,7 @@ uv run cmap_gui   # or: cmap_gui (if installed with pip)
 ### Python API
 
 ```python
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 imro_list = cmg.generate_imro_channelmap(
     probe_type="2.0-4shanks",
@@ -65,7 +65,7 @@ imro_list = cmg.generate_imro_channelmap(
 cmg.save_to_imro_file(imro_list, "my_channelmap.imro")
 ```
 
-See the [full documentation](https://channelmap-generator.readthedocs.io) for the complete API reference, GUI guide, preset reference, and troubleshooting.
+See the [full documentation](https://pixelmap.readthedocs.io) for the complete API reference, GUI guide, preset reference, and troubleshooting.
 
 ## Supported Probes
 
@@ -77,11 +77,11 @@ See the [full documentation](https://channelmap-generator.readthedocs.io) for th
 | Quadbase      | Planned |
 | NXT           | Planned |
 
-UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/channelmap_generator/issues) if you need support for these.
+UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/pixelmap/issues) if you need support for these.
 
 ## Contributing
 
-Bug reports and feature requests are welcome via [GitHub Issues](https://github.com/m-beau/channelmap_generator/issues). Pull requests are also welcome — please open an issue first to discuss significant changes.
+Bug reports and feature requests are welcome via [GitHub Issues](https://github.com/m-beau/pixelmap/issues). Pull requests are also welcome — please open an issue first to discuss significant changes.
 
 ## Citation
 

@@ -86,7 +86,7 @@ Select a preset from the dropdown menu. The probe visualization will update to s
 ### In Python
 
 ```python
-import channelmap_generator as cmg
+import pixelmap as cmg
 
 imro_list = cmg.generate_imro_channelmap(
     probe_type="2.0-4shanks",

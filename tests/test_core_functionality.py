@@ -12,17 +12,17 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-from channelmap_generator.backend import (
+from pixelmap.backend import (
     get_electrodes,
     find_forbidden_electrodes,
     _verify_hardware_violations,
 )
-from channelmap_generator.utils.imro import (
+from pixelmap.utils.imro import (
     save_to_imro_file,
     read_imro_file,
     generate_imro_channelmap,
 )
-from channelmap_generator.constants import (
+from pixelmap.constants import (
     PROBE_N,
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
