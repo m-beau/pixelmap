@@ -29,6 +29,7 @@ from bokeh.models import (
     Range1d,
     ResetTool,
     TapTool,
+    Title,
     WheelZoomTool,
 )
 from bokeh.palettes import Viridis256
@@ -175,6 +176,7 @@ class ChannelmapGUI(param.Parameterized):
         self.survey_values: dict[Electrode, float] | None = None
         self.survey_cmap = LinearColorMapper(palette=Viridis256, low=0.0, high=1.0)
         self.survey_color_bar = None
+        self.survey_color_bar_title = None
         self._survey_range_suspend = False
 
         # Load initial data
@@ -874,6 +876,7 @@ class ChannelmapGUI(param.Parameterized):
         self._set_survey_range_inputs(vmin, vmax, enabled=True)
         if self.survey_color_bar is not None:
             self.survey_color_bar.visible = True
+            self.survey_color_bar_title.visible = True
 
         self.update_electrode_colors()
 
@@ -892,6 +895,7 @@ class ChannelmapGUI(param.Parameterized):
         self._set_survey_range_inputs(None, None, enabled=False)
         if self.survey_color_bar is not None:
             self.survey_color_bar.visible = False
+            self.survey_color_bar_title.visible = False
         self.update_electrode_colors()
 
     def _set_survey_range_inputs(self, vmin, vmax, enabled: bool):
@@ -978,20 +982,27 @@ class ChannelmapGUI(param.Parameterized):
         self.setup_electrode_visualization()
         self.setup_interactions()  # Only necessary for the tap tool
 
-        # Survey overlay color bar (hidden until a survey is loaded)
+        # Survey overlay color bar (hidden until a survey is loaded).
+        # Title is a separate annotation so text_align="center" is honored
+        # over the full bar width.
         self.survey_color_bar = ColorBar(
             color_mapper=self.survey_cmap,
             label_standoff=6,
             location="bottom",
-            title="Survey Val",
-            title_text_align="center",
-            title_standoff=5,
             orientation="horizontal",
             height=15,
             width=300,
             visible=self.survey_values is not None,
         )
+        self.survey_color_bar_title = Title(
+            text="Survey value",
+            align="center",
+            text_font_size="11px",
+            text_font_style="normal",
+            visible=self.survey_values is not None,
+        )
         self.plot.add_layout(self.survey_color_bar, "above")
+        self.plot.add_layout(self.survey_color_bar_title, "above")
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
