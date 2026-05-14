@@ -265,14 +265,22 @@ class ChannelmapGUI(param.Parameterized):
             "line_width": [],
             "status": [],
             "val": [],
+            "bar_x": [],
+            "bar_height": [],
+            "bar_color": [],
+            "bar_alpha": [],
         }
 
         # Parameters for visualization
+        BAR_WIDTH = 16
+        BAR_GAP = 4  # gap between shank outline and survey bar
+
         if self.probe_type in ["1.0", "2.0-1shank"]:
             # Single shank
             shank_width = 100
             electrode_width = 15
             electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
+            shank_spacing = None
         else:
             # Multi-shank
             shank_width = 100
@@ -280,26 +288,39 @@ class ChannelmapGUI(param.Parameterized):
             electrode_width = 12
             electrode_height = 8
 
+        # Bars sit just outside the shank outline, mirroring the column the
+        # electrode lives in: left-column contacts → bar on the left of the
+        # outline, right-column contacts → bar on the right.
+        bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+
         for shank_id, electrode_id, orig_x, y in positions:
 
             # Map x position to shank width
             if self.probe_type == "1.0":
                 x_norm = (orig_x - 35) / 24
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             elif self.probe_type == "2.0-1shank":
                 x_norm = (orig_x - 16) / 16
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             else: # 4-shanks 2.0 or NXT
                 # Calculate shank center
-                x_center = shank_id * shank_spacing
+                x_center_shank = shank_id * shank_spacing
                 # Map electrode position within shank
-                x_norm = (orig_x - x_center - 16) / 16
-                x = x_center + x_norm * (shank_width * 0.7) / 2
+                x_norm = (orig_x - x_center_shank - 16) / 16
+                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
+
+            # Bar x: just outside the shank outline, on the side matching
+            # the electrode's column relative to the shank center.
+            side = 1 if (x - x_center_shank) >= 0 else -1
+            bar_x = x_center_shank + side * bar_offset
 
             # Determine electrode status and color
             electrode = Electrode(shank_id, electrode_id)
             status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
             val = self._get_survey_val(electrode)
+            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
 
             electrode_data["x"].append(x)
             electrode_data["y"].append(y)
@@ -313,33 +334,22 @@ class ChannelmapGUI(param.Parameterized):
             electrode_data["line_width"].append(line_width)
             electrode_data["status"].append(status)
             electrode_data["val"].append(val)
+            electrode_data["bar_x"].append(bar_x)
+            electrode_data["bar_height"].append(electrode_height * 1.5)
+            electrode_data["bar_color"].append(bar_color)
+            electrode_data["bar_alpha"].append(bar_alpha)
 
         # Create ColumnDataSource
         self.electrode_source = ColumnDataSource(data=electrode_data)
 
 
     def get_electrode_plotting_params(self, electrode: Electrode):
-        """
-        Get electrode appearance based on its status.
-
-        When a survey overlay is loaded, the fill is the survey colormap
-        value for that electrode; selection state is conveyed through the
-        border (red, width 2) and unavailable electrodes are dimmed.
-        """
-        survey_active = self.survey_values is not None
-        survey_color = self._get_survey_color(electrode) if survey_active else None
-
+        """Get electrode fill/border appearance based on selection state."""
         if electrode in self.electrodes.selected:
-            if survey_active:
-                return "Selected", survey_color, 1.0, "red", 2
             return "Selected", "red", 1.0, "darkred", 0
         elif electrode in self.electrodes.unavailable:
-            if survey_active:
-                return "Unavailable", survey_color, 0.4, "darkgray", 0
             return "Unavailable", "black", 1.0, "darkgray", 0
         else:
-            if survey_active:
-                return "Unselected", survey_color, 1.0, "gray", 0
             return "Unselected", "lightgray", 0.8, "gray", 0
 
     def _get_survey_val(self, electrode: Electrode) -> float:
@@ -363,6 +373,14 @@ class ChannelmapGUI(param.Parameterized):
         idx = int(round(frac * (len(Viridis256) - 1)))
         return Viridis256[idx]
 
+    def _get_bar_color_alpha(self, electrode: Electrode) -> tuple[str, float]:
+        """Return (fill_color, fill_alpha) for the survey sidebar of an electrode."""
+        if self.survey_values is None:
+            return "#000000", 0.0
+        color = self._get_survey_color(electrode)
+        alpha = 0.4 if electrode in self.electrodes.unavailable else 1.0
+        return color, alpha
+
 
     def setup_electrode_visualization(self):
         """Setup the electrode rectangles in Bokeh"""
@@ -380,6 +398,19 @@ class ChannelmapGUI(param.Parameterized):
             hover_fill_color="yellow",
             hover_line_color="orange",
             hover_line_width=3,
+        )
+
+        # Survey sidebar bars: thin rectangles flanking each electrode contact,
+        # colored by survey Val. Invisible (alpha=0) until a survey is loaded.
+        self.survey_bar_renderer = self.plot.rect(
+            x="bar_x",
+            y="y",
+            width=16,
+            height="bar_height",
+            fill_color="bar_color",
+            fill_alpha="bar_alpha",
+            line_alpha=0,
+            source=self.electrode_source,
         )
 
         # Add shank outlines and labels
@@ -413,7 +444,7 @@ class ChannelmapGUI(param.Parameterized):
                         [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
                     )
                     self.plot.text(
-                        [shank_width / 2 + 3],
+                        [shank_width / 2 + 17],
                         [bank_y],
                         text=[f"Bank {bank_i // 384}"],
                         text_font_size="10pt",
@@ -471,7 +502,7 @@ class ChannelmapGUI(param.Parameterized):
                         )
                         if shank_id == 3:  # Bank labels (only on rightmost shank)
                             self.plot.text(
-                                [x_center + shank_width / 2 + 5],
+                                [x_center + shank_width / 2 + 17],
                                 [bank_y],
                                 text=[f"Bank {bank_i // 384}"],
                                 text_font_size="10pt",
@@ -494,6 +525,8 @@ class ChannelmapGUI(param.Parameterized):
         line_widths = np.empty(n_electrodes, dtype=np.int32)
         statuses = np.empty(n_electrodes, dtype=object)
         vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = np.empty(n_electrodes, dtype=object)
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
 
         for i in range(n_electrodes):
             shank_id = self.electrode_source.data["shank_id"][i]
@@ -508,12 +541,14 @@ class ChannelmapGUI(param.Parameterized):
             line_widths[i] = line_width
             statuses[i] = status
             vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
 
         # Update the data source with new data, replacing old arrays
         self.electrode_source.data.update(
             {"color": colors.tolist(), "alpha": alphas.tolist(),
              "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist(), "val": vals.tolist()}
+             "status": statuses.tolist(), "val": vals.tolist(),
+             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
         )
 
 
