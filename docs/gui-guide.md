@@ -45,6 +45,37 @@ Upload an existing `.imro` file to use as a starting point. This is useful for:
 - Modifying an existing channelmap
 - Visualizing what electrodes a given `.imro` file selects
 
+### Load a SpikeGLX Survey File
+
+SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a  survey recording. PixelMap can overlay these values as a heatmap on the shank viewer so you can visually identify the most active contacts before committing to a channelmap.
+
+**Steps:**
+
+1. In SpikeGLX, run a survey recording. Offline, load the recording and open up the graphical shank viewer. Under the **View** tab, select *Sample whole survey* and click the update button to have SpikeGLX compute activity across all contacts. Use the **Export Map** button to save a survey `.txt` file.
+2. In PixelMap, expand the **Survey overlay** section in the left panel.
+3. Click the file picker and choose your survey `.txt` file.
+4. Press **Load survey overlay**. The shank viewer will immediately color all contacts by `Val` using a Viridis colormap, and a colorbar labeled *Survey Val* will appear above the plot.
+
+**Reading the overlay:**
+
+- All contacts are colored by `Val`. The colorbar shows the current min/max range.
+- **Selected contacts** retain a red border so your current selection stays visible on top of the heatmap.
+- **Unavailable contacts** (ADC conflicts) render at reduced opacity so they remain distinguishable.
+- Hover over any contact to see its exact `Survey value` in the tooltip.
+
+**Adjusting the colormap range:**
+
+The **vmin** and **vmax** inputs are auto-populated from the file's minimum and maximum values. Edit either input to rescale the colormap live — useful for bringing out contrast in a narrow activity band.
+
+**Clearing the overlay:**
+
+Click **Clear overlay** to remove the heatmap and return to the standard electrode coloring. The overlay is also cleared automatically when you switch probe types, since electrode positions differ across probe types.
+
+:::{note}
+The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
+:::
+
+
 ## Downloading Your Channelmap
 
 Once you've selected the **target number of electrodes** for your probe type (384 for NP 1.0 and NP 2.0 probes), you can download:
