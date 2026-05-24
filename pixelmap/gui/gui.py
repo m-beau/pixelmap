@@ -45,6 +45,8 @@ from pixelmap.constants import (
 from pixelmap.types import Electrode
 from pixelmap.utils import imro
 from pixelmap.utils import url_share
+from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.visualization import compute_region_bands
 
 ## Configure logging
 basicConfig(level=logging.ERROR)  # no warnings
@@ -58,6 +60,14 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions
 pn.extension("tabulator", notifications=True)
+
+
+def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
+    """Return ``hex_color`` darkened by ``factor`` (0=black, 1=unchanged)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 ###################################
@@ -845,6 +855,221 @@ class ChannelmapGUI(param.Parameterized):
         self.update_electrode_counter()
         self.refresh_undo_buttons()
 
+    ###################################
+    ##### Anatomical overlay logic ####
+    ###################################
+
+    def setup_region_bands(self):
+        """Initialize the empty Bokeh sources + glyphs for the anatomy overlay.
+
+        Three layers, drawn back-to-front so labels stay on top of bands:
+          - colored band rectangles (fill behind the shank),
+          - boundary tick marks (horizontal lines at region transitions),
+          - region acronym text labels next to each band.
+        """
+        self.region_band_source = ColumnDataSource(
+            data={"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        )
+        self.region_band_renderer = self.plot.rect(
+            x="x", y="y", width="width", height="height",
+            fill_color="color", fill_alpha=0.25, line_color=None,
+            source=self.region_band_source,
+        )
+
+        self.region_boundary_source = ColumnDataSource(
+            data={"x0": [], "x1": [], "y0": [], "y1": []}
+        )
+        self.region_boundary_renderer = self.plot.segment(
+            x0="x0", y0="y0", x1="x1", y1="y1",
+            line_color="#444444", line_width=1, line_dash="dashed",
+            source=self.region_boundary_source,
+        )
+
+        self.region_label_source = ColumnDataSource(
+            data={"x": [], "y": [], "text": [], "color": []}
+        )
+        self.region_label_renderer = self.plot.text(
+            x="x", y="y", text="text", text_color="color",
+            text_font_size="10pt", text_baseline="middle", text_align="left",
+            source=self.region_label_source,
+        )
+
+    def _available_atlases(self) -> tuple[list[str], str]:
+        """List atlases known to brainglobe; fall back to a single default."""
+        default = "allen_mouse_25um"
+        if not anatomy_atlas.is_available():
+            return [default], default
+        try:
+            atlases = anatomy_atlas.list_atlases()
+        except Exception:
+            return [default], default
+        if not atlases:
+            return [default], default
+        if default not in atlases:
+            atlases = [default] + list(atlases)
+        return list(atlases), default
+
+    def _shank_probe_xs(self) -> dict[int, float]:
+        """Probe-local x (µm) at the *median* of each shank's electrodes."""
+        return {
+            int(s): float(self.positions_df[self.positions_df["shank"] == s]["x"].median())
+            for s in sorted(self.positions_df["shank"].unique())
+        }
+
+    def _shank_plot_centers(self) -> dict[int, float]:
+        """Bokeh-plot x at the center of each shank's drawn outline."""
+        if self.probe_type in ["1.0", "2.0-1shank"]:
+            return {0: 0.0}
+        return {sid: sid * 250.0 for sid in self._shank_probe_xs()}
+
+    def _shank_plot_width(self) -> float:
+        """Width (in plot units) to draw region bands at, narrower than the shank."""
+        return 90.0  # shank outlines are 100 wide
+
+    def compute_anatomy_overlay(self):
+        """Compute region bands for the current pose and render them."""
+        if not anatomy_atlas.is_available():
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(
+                    "Anatomy support not installed. Run: pip install 'pixelmap[anatomy]'",
+                    duration=10_000,
+                )
+            return
+
+        probe_xs = self._shank_probe_xs()
+        plot_centers = self._shank_plot_centers()
+        y_max = float(self.positions_df["y"].max())
+
+        tip = (
+            float(self.tip_ap_input.value),
+            float(self.tip_ml_input.value),
+            float(self.tip_dv_input.value),
+        )
+
+        try:
+            bands = compute_region_bands(
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                atlas_name=str(self.atlas_name_input.value).strip(),
+                step_um=25.0,
+            )
+        except ImportError as exc:
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(str(exc), duration=10_000)
+            return
+        except Exception as exc:
+            print(f"Anatomy lookup failed: {exc}")
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(f"Anatomy lookup failed: {exc}", duration=10_000)
+            return
+
+        width = self._shank_plot_width()
+        half_width = width / 2
+        # Pull label text slightly outside the shank outline so it doesn't
+        # overlap the electrode rects.
+        label_offset = half_width + 6
+
+        band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        label_data = {"x": [], "y": [], "text": [], "color": []}
+        boundary_data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        # Track which boundaries we've already drawn per shank so adjacent
+        # bands sharing a transition don't double up on the line.
+        seen_boundaries: set[tuple[int, float]] = set()
+
+        for band in bands:
+            plot_center = plot_centers.get(band.shank_id)
+            if plot_center is None:
+                continue
+            y_mid = (band.y_min + band.y_max) / 2
+            color_hex = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+
+            band_data["x"].append(plot_center)
+            band_data["y"].append(y_mid)
+            band_data["width"].append(width)
+            band_data["height"].append(band.y_max - band.y_min)
+            band_data["color"].append(color_hex)
+            band_data["acronym"].append(band.acronym)
+
+            label_data["x"].append(plot_center + label_offset)
+            label_data["y"].append(y_mid)
+            label_data["text"].append(band.acronym)
+            # Slightly darker than the swatch so labels stay readable on white.
+            label_data["color"].append(_darken_hex(color_hex, factor=0.6))
+
+            for boundary_y in (band.y_min, band.y_max):
+                key = (band.shank_id, round(boundary_y, 3))
+                if key in seen_boundaries:
+                    continue
+                seen_boundaries.add(key)
+                boundary_data["x0"].append(plot_center - half_width)
+                boundary_data["x1"].append(plot_center + half_width)
+                boundary_data["y0"].append(boundary_y)
+                boundary_data["y1"].append(boundary_y)
+
+        self.region_band_source.data = band_data
+        self.region_label_source.data = label_data
+        self.region_boundary_source.data = boundary_data
+
+        self._update_anatomy_legend(bands)
+
+        if pn.state.notifications is not None and bands:
+            n_regions = len({b.atlas_id for b in bands})
+            pn.state.notifications.success(
+                f"Found {n_regions} region(s) across {len(probe_xs)} shank(s).",
+                duration=4_000,
+            )
+
+    def clear_anatomy_overlay(self):
+        """Wipe the region bands, labels, boundaries and reset the legend."""
+        self.region_band_source.data = {
+            "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
+        }
+        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
+        self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        self.anatomy_legend.object = self._empty_legend_html()
+
+    def _empty_legend_html(self) -> str:
+        return (
+            '<div style="font-size: 12px; color: #666; padding: 4px 12px;">'
+            "No anatomical overlay computed yet."
+            "</div>"
+        )
+
+    def _update_anatomy_legend(self, bands: list):
+        """Render a deduplicated region legend on the right-side panel."""
+        if not bands:
+            self.anatomy_legend.object = (
+                '<div style="font-size: 12px; color: #b00; padding: 4px 12px;">'
+                "No regions found at the given pose (probe outside atlas volume?)."
+                "</div>"
+            )
+            return
+
+        # Deduplicate by atlas_id, preserve a stable display order.
+        seen: dict[int, "RegionBand"] = {}
+        for band in bands:
+            seen.setdefault(band.atlas_id, band)
+
+        rows = []
+        for band in seen.values():
+            swatch = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+            rows.append(
+                f'<div style="display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px;">'
+                f'<span style="display: inline-block; width: 14px; height: 14px; '
+                f'background: {swatch}; border: 1px solid #888;"></span>'
+                f'<span style="font-weight: bold; min-width: 60px;">{band.acronym}</span>'
+                f'<span style="color: #444;">{band.name}</span>'
+                f"</div>"
+            )
+        self.anatomy_legend.object = (
+            '<div style="padding: 4px 12px; max-height: 280px; overflow-y: auto;">'
+            + "".join(rows)
+            + "</div>"
+        )
+
     def apply_url_state(self, encoded: str) -> bool:
         """Restore a selection previously serialized via build_share_link.
 
@@ -1000,6 +1225,10 @@ class ChannelmapGUI(param.Parameterized):
             title=f"Neuropixels {self.probe_type} Electrode Layout",
             toolbar_location="right",
         )
+
+        # Region bands must be added *before* the electrode rects so they
+        # render behind everything else.
+        self.setup_region_bands()
 
         # Create electrode data and visualization
         self.create_electrode_data()
@@ -1275,6 +1504,51 @@ class ChannelmapGUI(param.Parameterized):
         )
         self.share_link_button.on_click(lambda event: self.update_share_link())
 
+        # Anatomy widgets
+        atlas_options, atlas_default = self._available_atlases()
+        self.atlas_name_input = pn.widgets.Select(
+            name="Atlas",
+            value=atlas_default,
+            options=atlas_options,
+            width=300,
+        )
+        self.tip_ap_input = pn.widgets.FloatInput(
+            name="Tip AP (µm)", value=5000.0, step=10.0, width=95
+        )
+        self.tip_ml_input = pn.widgets.FloatInput(
+            name="Tip ML (µm)", value=2500.0, step=10.0, width=95
+        )
+        self.tip_dv_input = pn.widgets.FloatInput(
+            name="Tip DV (µm)", value=3000.0, step=10.0, width=95
+        )
+        self.pitch_input = pn.widgets.FloatInput(
+            name="Pitch (deg)", value=0.0, step=1.0, start=-90.0, end=90.0, width=140
+        )
+        self.yaw_input = pn.widgets.FloatInput(
+            name="Yaw (deg)", value=0.0, step=1.0, start=-180.0, end=180.0, width=140
+        )
+        self.compute_anatomy_button = pn.widgets.Button(
+            name="Compute anatomical overlay 🧠", button_type="primary", width=250
+        )
+        self.clear_anatomy_button = pn.widgets.Button(
+            name="Clear overlay", button_type="default", width=120
+        )
+        self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
+        self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
+        self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), width=320)
+
+        if not anatomy_atlas.is_available():
+            install_hint = (
+                "<i>Optional: install with </i><code>pip install 'pixelmap[anatomy]'</code>"
+                "<i> to enable atlas lookups.</i>"
+            )
+            self.anatomy_install_hint = pn.pane.HTML(
+                f'<div style="font-size: 12px; color: #b00; padding: 4px 0;">{install_hint}</div>',
+                width=300,
+            )
+        else:
+            self.anatomy_install_hint = pn.Spacer(height=0)
+
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
         self.apply_uploaded_imro_button = pn.widgets.Button(
@@ -1348,6 +1622,9 @@ class ChannelmapGUI(param.Parameterized):
                 self.share_link_output,
                 margin=(0, 0, 0, 20),
             ),
+
+            pn.pane.Markdown("## Region legend", margin=(15, 0, -5, 30)),
+            self.anatomy_legend,
 
             pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
@@ -1426,6 +1703,13 @@ class ChannelmapGUI(param.Parameterized):
             self.imro_file_loader,
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
+            pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 10)),
+            self.anatomy_install_hint,
+            self.atlas_name_input,
+            pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
+            pn.Row(self.pitch_input, self.yaw_input, sizing_mode="stretch_width"),
+            self.compute_anatomy_button,
+            self.clear_anatomy_button,
             styles={
                 "position": "fixed",
                 "top": "0px",

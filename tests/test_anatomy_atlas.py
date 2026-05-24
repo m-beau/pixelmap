@@ -1,0 +1,121 @@
+"""Tests for the brainglobe atlas wrapper.
+
+We don't want the test suite to download a real atlas — that's tens of MB
+and CI-hostile. We patch the brainglobe entry points with a tiny fake atlas
+that exercises the indexing logic.
+"""
+
+from __future__ import annotations
+
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+import pytest
+
+from pixelmap.anatomy import atlas as atlas_module
+from pixelmap.anatomy import regions as regions_module
+
+
+class _FakeAtlas:
+    """A 3-voxel-cube fake atlas: half is region 1, half is region 2."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.resolution = (25.0, 25.0, 25.0)  # µm per voxel
+        # 4×4×4 volume; left ML half = region 1, right half = region 2; 0 = outside
+        ann = np.zeros((4, 4, 4), dtype=np.int32)
+        ann[:, :, :2] = 1
+        ann[:, :, 2:] = 2
+        self.annotation = ann
+        self.structures = {
+            1: {"acronym": "LEFT", "name": "Left hemisphere", "rgb_triplet": [200, 0, 0]},
+            2: {"acronym": "RIGHT", "name": "Right hemisphere", "rgb_triplet": [0, 200, 0]},
+        }
+
+
+@pytest.fixture(autouse=True)
+def _reset_atlas_cache():
+    """Make sure no real atlas leaks across tests via the lru_cache."""
+    atlas_module.get_atlas.cache_clear()
+    atlas_module._region_info_from_id.cache_clear()
+    yield
+    atlas_module.get_atlas.cache_clear()
+    atlas_module._region_info_from_id.cache_clear()
+
+
+@pytest.fixture
+def fake_brainglobe(monkeypatch):
+    """Inject a fake brainglobe_atlasapi module so _import_brainglobe succeeds."""
+    fake_module = SimpleNamespace(BrainGlobeAtlas=_FakeAtlas)
+    monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", fake_module)
+    yield
+
+
+class TestAvailability:
+    def test_is_available_true_when_brainglobe_present(self, fake_brainglobe):
+        assert atlas_module.is_available() is True
+
+    def test_is_available_false_when_brainglobe_missing(self, monkeypatch):
+        # Hide any installed copy so the import fails reliably.
+        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", None)
+        assert atlas_module.is_available() is False
+
+    def test_lookup_raises_install_hint_when_missing(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", None)
+        with pytest.raises(ImportError, match="pixelmap\\[anatomy\\]"):
+            atlas_module.get_atlas("allen_mouse_25um")
+
+
+class TestLookup:
+    def test_voxel_indexing_resolves_left_vs_right(self, fake_brainglobe):
+        # ML=10 (voxel 0, in left half) vs ML=60 (voxel 2, in right half)
+        coords = np.array([
+            [0.0,  10.0, 0.0],   # left
+            [0.0,  60.0, 0.0],   # right
+        ])
+        out = atlas_module.lookup_regions("fake", coords)
+        assert out[0].acronym == "LEFT"
+        assert out[1].acronym == "RIGHT"
+        assert out[0].rgb == (200, 0, 0)
+
+    def test_out_of_bounds_returns_none(self, fake_brainglobe):
+        coords = np.array([
+            [-100.0, 0.0, 0.0],
+            [9999.0, 9999.0, 9999.0],
+        ])
+        out = atlas_module.lookup_regions("fake", coords)
+        assert out == [None, None]
+
+    def test_zero_label_returns_none(self, fake_brainglobe, monkeypatch):
+        # Override the fake atlas to have all zeros (outside-brain everywhere).
+        class Zeros(_FakeAtlas):
+            def __init__(self, name):
+                super().__init__(name)
+                self.annotation = np.zeros((4, 4, 4), dtype=np.int32)
+
+        monkeypatch.setitem(
+            sys.modules,
+            "brainglobe_atlasapi",
+            SimpleNamespace(BrainGlobeAtlas=Zeros),
+        )
+        atlas_module.get_atlas.cache_clear()
+
+        coords = np.array([[0.0, 0.0, 0.0]])
+        assert atlas_module.lookup_regions("zeros", coords) == [None]
+
+
+class TestRegionsForPositions:
+    def test_end_to_end_lookup_with_pose(self, fake_brainglobe):
+        # Place the tip at the very corner of the volume; both electrodes are
+        # at probe (0, 0) and (xp=50, 0). With default pose (vertical, +xp=+ML),
+        # the second electrode is 50 µm to the right — voxel 2 → "RIGHT".
+        electrode_xy = np.array([[0.0, 0.0], [50.0, 0.0]])
+        regions = regions_module.regions_for_positions(
+            electrode_xy,
+            tip_atlas=(0.0, 0.0, 0.0),
+            atlas_name="fake",
+        )
+        assert regions[0].acronym == "LEFT"
+        assert regions[1].acronym == "RIGHT"
