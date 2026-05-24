@@ -44,6 +44,7 @@ from pixelmap.constants import (
 )
 from pixelmap.types import Electrode
 from pixelmap.utils import imro
+from pixelmap.utils import url_share
 
 ## Configure logging
 basicConfig(level=logging.ERROR)  # no warnings
@@ -776,6 +777,88 @@ class ChannelmapGUI(param.Parameterized):
         self.update_electrode_colors()
         self.update_electrode_counter()
 
+    def apply_url_state(self, encoded: str) -> bool:
+        """Restore a selection previously serialized via build_share_link.
+
+        Returns True if the state was applied, False if the payload was
+        invalid or the embedded probe/subtype is unknown.
+        """
+        state = url_share.decode_state(encoded)
+        if state is None:
+            return False
+        if state["probe_type"] not in PROBE_TYPE_MAP:
+            return False
+
+        # Setting probe_type triggers on_probe_type_change which rebuilds
+        # widgets and clears the selection — must be set first.
+        if state["probe_type"] != self.probe_type:
+            self.probe_type = state["probe_type"]
+
+        subtype = state["probe_subtype"]
+        if subtype is not None and subtype in self.param.probe_subtype.objects:
+            self.probe_subtype = subtype
+
+        ref = state["reference_id"]
+        if ref is not None and ref in self.param.reference_id.objects:
+            self.reference_id = ref
+
+        if state["ap_gain"] is not None:
+            self.ap_gain_input.value = float(state["ap_gain"])
+        if state["lf_gain"] is not None:
+            self.lf_gain_input.value = float(state["lf_gain"])
+        if state["hp_filter"] in self.param.hardware_hp_filter_on.objects:
+            self.hardware_hp_filter_on = state["hp_filter"]
+
+        self.electrodes.clear_selection()
+        for shank_id, electrode_id in state["electrodes"]:
+            self.electrodes.select(Electrode(shank_id, electrode_id))
+
+        self.update_electrode_colors()
+        self.update_electrode_counter()
+        return True
+
+    def update_share_link(self):
+        """Refresh the share-link text field and update the URL bar."""
+        query = self.build_share_link()
+        full_url = query
+        try:
+            location = pn.state.location
+            if location is not None:
+                origin = (getattr(location, "protocol", "") or "") + "//" + (getattr(location, "hostname", "") or "")
+                port = getattr(location, "port", "") or ""
+                if port and port not in ("80", "443"):
+                    origin = f"{origin}:{port}"
+                pathname = getattr(location, "pathname", "") or ""
+                if origin.startswith("//"):  # no protocol info available
+                    full_url = pathname + query
+                else:
+                    full_url = origin + pathname + query
+                # Reflect the new state in the address bar so it's also copyable from there.
+                location.search = query
+        except Exception:
+            pass
+        self.share_link_output.value = full_url
+        if pn.state.notifications is not None:
+            pn.state.notifications.success("Share link ready — copy from the field below.", duration=5_000)
+
+    def build_share_link(self) -> str:
+        """Encode the current selection as a query string fragment.
+
+        Returns just the query string (e.g. ``?cfg=...``) — the GUI prepends
+        the live origin + path on the client side so this method stays
+        independent of how the app is being served.
+        """
+        encoded = url_share.encode_state(
+            probe_type=self.probe_type,
+            probe_subtype=self.probe_subtype,
+            reference_id=self.reference_id,
+            ap_gain=self.ap_gain_input.value,
+            lf_gain=self.lf_gain_input.value,
+            hp_filter=self.hardware_hp_filter_on,
+            electrodes=[(e.shank_id, e.electrode_id) for e in self.electrodes.selected],
+        )
+        return f"?{url_share.QUERY_PARAM}={encoded}"
+
     ######################
     ##### GUI layout #####
     ######################
@@ -789,14 +872,14 @@ class ChannelmapGUI(param.Parameterized):
         deselect_box_string = "Deselect Electrodes"
         zigzagselect_box_string = "Zigzag-select Electrodes"
 
-        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=str(GUI_ASSETS_DIR / "selector.png"))
+        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
 
         self.box_deselect_tool = BoxSelectTool(
-            description=deselect_box_string, icon=str(GUI_ASSETS_DIR / "deselector.png")
+            description=deselect_box_string, icon=GUI_ASSETS_DIR / "deselector.png"
         )
 
         self.box_zigzagselect_tool = BoxSelectTool(
-            description=zigzagselect_box_string, icon=str(GUI_ASSETS_DIR / "zigzag_selector.png")
+            description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
         )
 
         # Create figure with proper tools
@@ -1039,6 +1122,18 @@ class ChannelmapGUI(param.Parameterized):
             show_name=False,
         )
 
+        # Share-link widgets
+        self.share_link_button = pn.widgets.Button(
+            name="Get shareable link 🔗", button_type="primary", width=250
+        )
+        self.share_link_output = pn.widgets.TextInput(
+            name="Share link (copy to clipboard)",
+            value="",
+            disabled=True,
+            width=300,
+        )
+        self.share_link_button.on_click(lambda event: self.update_share_link())
+
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
         self.apply_uploaded_imro_button = pn.widgets.Button(
@@ -1103,6 +1198,13 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.Markdown("## Export IMRO table", margin=(10, 0, -5, 30)),
             self.filename_input,
             self.get_download_buttons,
+
+            pn.pane.Markdown("## Share this layout", margin=(15, 0, -5, 30)),
+            pn.Column(
+                self.share_link_button,
+                self.share_link_output,
+                margin=(0, 0, 0, 20),
+            ),
 
             pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
@@ -1297,9 +1399,35 @@ class ChannelmapGUI(param.Parameterized):
 
 
 ## App creation utilities
+def _extract_cfg_from_session_args() -> str | None:
+    """Pull the ``cfg`` query param out of pn.state.session_args, if any."""
+    try:
+        args = pn.state.session_args or {}
+    except Exception:
+        return None
+    raw = args.get(url_share.QUERY_PARAM)
+    if not raw:
+        return None
+    # session_args values come back as lists of bytes; take the first entry.
+    value = raw[0] if isinstance(raw, list) else raw
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value or None
+
+
 def create_app():
     """Create and configure the Panel app"""
     gui = ChannelmapGUI()
+
+    cfg = _extract_cfg_from_session_args()
+    if cfg:
+        try:
+            applied = gui.apply_url_state(cfg)
+            if not applied:
+                print("Ignored invalid or unsupported ?cfg= share link.")
+        except Exception as e:
+            print(f"Failed to apply shared layout from URL: {e}")
+
     analytics_tracker = AnalyticsSessionTracker()
     layout = gui.create_layout()
 
