@@ -74,6 +74,11 @@ class Electrodes:
     available: set[Electrode] = field(default_factory=set)
     selected: set[Electrode] = field(default_factory=set)
     unavailable: set[Electrode] = field(default_factory=set)
+    # Undo/redo stacks store frozen snapshots of `selected`; available and
+    # unavailable are re-derived on restore so we never store stale views.
+    _undo_stack: list[frozenset[Electrode]] = field(default_factory=list)
+    _redo_stack: list[frozenset[Electrode]] = field(default_factory=list)
+    _max_history: int = 100
 
     def __post_init__(self):
         self.available = set(self.wiring_map.keys())
@@ -103,6 +108,54 @@ class Electrodes:
         self.available = set(self.wiring_map.keys())
         self.selected = set()
         self.unavailable = set()
+
+    # --- undo / redo --------------------------------------------------
+
+    def push_undo_snapshot(self):
+        """Snapshot the current selection so the next mutation is undoable.
+
+        Must be called *before* any mutation that should be one undo step.
+        The redo stack is cleared because any new action invalidates the
+        previously-undone branch of history.
+        """
+        self._undo_stack.append(frozenset(self.selected))
+        if len(self._undo_stack) > self._max_history:
+            del self._undo_stack[0]
+        self._redo_stack.clear()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo_stack)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo_stack)
+
+    def undo(self) -> bool:
+        if not self._undo_stack:
+            return False
+        self._redo_stack.append(frozenset(self.selected))
+        self._restore_selection(self._undo_stack.pop())
+        return True
+
+    def redo(self) -> bool:
+        if not self._redo_stack:
+            return False
+        self._undo_stack.append(frozenset(self.selected))
+        self._restore_selection(self._redo_stack.pop())
+        return True
+
+    def _restore_selection(self, target: frozenset[Electrode]):
+        """Replace `selected` with `target` and recompute derived sets."""
+        self.available = set(self.wiring_map.keys())
+        self.selected = set()
+        self.unavailable = set()
+        for electrode in target:
+            if electrode in self.available:
+                self.selected.add(electrode)
+                self.available.discard(electrode)
+                conflicting = self.wiring_map[electrode]
+                newly_unavailable = conflicting & self.available
+                self.available -= newly_unavailable
+                self.unavailable |= newly_unavailable
 
 
 #################
@@ -479,6 +532,9 @@ class ChannelmapGUI(param.Parameterized):
 
         print(f"Selection changed: {old} -> {new}")
 
+        # One interactive gesture (tap, box drag, zigzag drag) = one undo step.
+        self.electrodes.push_undo_snapshot()
+
         # Single electrode selection - toggle
         if len(new) == 1:
             shank_id = self.electrode_source.data["shank_id"][new[0]]
@@ -521,6 +577,7 @@ class ChannelmapGUI(param.Parameterized):
         # Update electrode visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
 
         # Clear the selection to allow for new interactions
         self.electrode_source.selected.indices = []
@@ -546,6 +603,7 @@ class ChannelmapGUI(param.Parameterized):
     def apply_preset(self):
         """Apply selected preset configuration"""
         if self.preset:
+            self.electrodes.push_undo_snapshot()
             self.electrodes.clear_selection()
             preset_electrodes = backend.get_preset_candidates(self.preset, self.probe_type, self.wiring_df)
             for shank_id, electrode_id in preset_electrodes:
@@ -554,6 +612,7 @@ class ChannelmapGUI(param.Parameterized):
             # Update visualization
             self.update_electrode_colors()
             self.update_electrode_counter()
+            self.refresh_undo_buttons()
 
 
     def parse_electrode_input(self, text):
@@ -594,13 +653,17 @@ class ChannelmapGUI(param.Parameterized):
         try:
             text = self.electrode_input.value
             electrodes = self.parse_electrode_input(text)
+            if not electrodes:
+                return
 
+            self.electrodes.push_undo_snapshot()
             for (shank_id, electrode_id) in electrodes:
                 self.electrodes.select(Electrode(shank_id, electrode_id))
 
             # Update visualization
             self.update_electrode_colors()
             self.update_electrode_counter()
+            self.refresh_undo_buttons()
 
         except Exception as e:
             print(f"Error parsing electrode input: {e}")
@@ -608,11 +671,14 @@ class ChannelmapGUI(param.Parameterized):
 
     def clear_selection(self):
         """Clear all selected electrodes"""
+        if self.electrodes.selected:
+            self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
 
         # Update visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
 
 
     ###############################
@@ -770,12 +836,14 @@ class ChannelmapGUI(param.Parameterized):
             pn.state.notifications.error("Failed to parse uploaded imro file.")
             return
 
+        self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
         for shank_id, electrode_id in imro_electrodes:
             self.electrodes.select(Electrode(shank_id, electrode_id))
 
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
 
     def apply_url_state(self, encoded: str) -> bool:
         """Restore a selection previously serialized via build_share_link.
@@ -809,12 +877,15 @@ class ChannelmapGUI(param.Parameterized):
         if state["hp_filter"] in self.param.hardware_hp_filter_on.objects:
             self.hardware_hp_filter_on = state["hp_filter"]
 
+        if self.electrodes.selected:
+            self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
         for shank_id, electrode_id in state["electrodes"]:
             self.electrodes.select(Electrode(shank_id, electrode_id))
 
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
         return True
 
     def update_share_link(self):
@@ -840,6 +911,27 @@ class ChannelmapGUI(param.Parameterized):
         self.share_link_output.value = full_url
         if pn.state.notifications is not None:
             pn.state.notifications.success("Share link ready — copy from the field below.", duration=5_000)
+
+    def do_undo(self):
+        """Roll back to the previous selection snapshot."""
+        if self.electrodes.undo():
+            self.update_electrode_colors()
+            self.update_electrode_counter()
+            self.refresh_undo_buttons()
+
+    def do_redo(self):
+        """Re-apply a previously-undone selection snapshot."""
+        if self.electrodes.redo():
+            self.update_electrode_colors()
+            self.update_electrode_counter()
+            self.refresh_undo_buttons()
+
+    def refresh_undo_buttons(self):
+        """Sync the disabled flag of the undo/redo buttons with stack state."""
+        if hasattr(self, "undo_button"):
+            self.undo_button.disabled = not self.electrodes.can_undo()
+        if hasattr(self, "redo_button"):
+            self.redo_button.disabled = not self.electrodes.can_redo()
 
     def build_share_link(self) -> str:
         """Encode the current selection as a query string fragment.
@@ -1122,6 +1214,55 @@ class ChannelmapGUI(param.Parameterized):
             show_name=False,
         )
 
+        # Undo / redo widgets
+        self.undo_button = pn.widgets.Button(
+            name="↶ Undo",
+            button_type="default",
+            disabled=True,
+            width=120,
+            margin=(0, 5, 5, 10),
+            css_classes=["pixelmap-undo"],
+        )
+        self.redo_button = pn.widgets.Button(
+            name="↷ Redo",
+            button_type="default",
+            disabled=True,
+            width=120,
+            margin=(0, 10, 5, 5),
+            css_classes=["pixelmap-redo"],
+        )
+        self.undo_button.on_click(lambda event: self.do_undo())
+        self.redo_button.on_click(lambda event: self.do_redo())
+
+        # Keyboard shortcuts (Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z) trigger the buttons
+        # via a one-time document-level keydown listener. Wrapped in a guard so
+        # repeated session loads do not stack listeners.
+        self.undo_keyboard_pane = pn.pane.HTML(
+            """
+            <script>
+            (function() {
+              if (window._pixelmapUndoBound) return;
+              window._pixelmapUndoBound = true;
+              const clickFirst = (sel) => {
+                const el = document.querySelector(sel + " button");
+                if (el && !el.disabled) el.click();
+              };
+              document.addEventListener("keydown", (e) => {
+                const tag = (e.target && e.target.tagName) || "";
+                if (tag === "INPUT" || tag === "TEXTAREA") return;
+                if (!(e.metaKey || e.ctrlKey)) return;
+                if (!e.key || e.key.toLowerCase() !== "z") return;
+                e.preventDefault();
+                clickFirst(e.shiftKey ? ".pixelmap-redo" : ".pixelmap-undo");
+              });
+            })();
+            </script>
+            """,
+            width=0,
+            height=0,
+            margin=0,
+        )
+
         # Share-link widgets
         self.share_link_button = pn.widgets.Button(
             name="Get shareable link 🔗", button_type="primary", width=250
@@ -1190,8 +1331,10 @@ class ChannelmapGUI(param.Parameterized):
 
         # Counter and Downloader (fixed on the right)
         counter_downloader = pn.Column(
+            self.undo_keyboard_pane,
             pn.Column(
                 self.electrode_counter,
+                pn.Row(self.undo_button, self.redo_button, margin=(0, 0, 0, 10)),
                 self.clear_button,
                 margin=(0, 0, -10, 20),
             ),
