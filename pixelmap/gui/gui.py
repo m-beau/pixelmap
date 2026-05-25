@@ -1126,10 +1126,28 @@ class ChannelmapGUI(param.Parameterized):
         )
 
     def _on_atlas_change(self, *events):
-        """Atlas changed: reset bregma/squish/tilt first, then tip + note."""
+        """Atlas changed: reset bregma/squish/tilt first, then tip + notes."""
         self._update_reference_params(*events)
         self._update_tip_to_atlas_center(*events)
         self._update_anatomy_origin_note(*events)
+        self.bregma_estimate_header.object = self._bregma_header_html()
+
+    def _bregma_header_html(self) -> str:
+        """Banner above the bregma fields: explain the estimate, or prompt for one."""
+        ref = anatomy_atlas.reference_params(self.atlas_name_input.value)
+        if ref is None:
+            body = ("<b>No bregma estimate</b> for this atlas — set the bregma "
+                    "coordinate (and any squish / tilt) yourself below.")
+            bg, border, color = "#fdecec", "#e3a5a5", "#8a3a3a"
+        else:
+            body = (f"<b>Bregma estimate (rough)</b> — from {ref['source']}. "
+                    "Edit if you have better values.")
+            bg, border, color = "#fff6df", "#f0d27a", "#8a5a00"
+        return (
+            f'<div style="font-size: 11px; color: {color}; background: {bg}; '
+            f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
+            f'margin: 8px 10px 2px 10px;">⚠ {body}</div>'
+        )
 
     def _update_anatomy_origin_note(self, *events):
         """Refresh the coordinate note when the atlas selection changes."""
@@ -1765,14 +1783,7 @@ class ChannelmapGUI(param.Parameterized):
             name="AP tilt°", value=ref["tilt_deg"], step=0.5, width=78, margin=(5, 2), disabled=True
         )
         self.bregma_estimate_header = pn.pane.HTML(
-            (
-                '<div style="font-size: 11px; color: #8a5a00; background: #fff6df; '
-                'border: 1px solid #f0d27a; border-radius: 4px; padding: 4px 7px; '
-                'margin: 8px 10px 2px 10px;">⚠ <b>Bregma estimate</b> — rough, '
-                "editable values; there is no true bregma in these atlases."
-                "</div>"
-            ),
-            width=320,
+            self._bregma_header_html(), width=320
         )
         self.anatomy_coord_note = pn.pane.HTML(
             self._anatomy_coord_note_html(), width=320

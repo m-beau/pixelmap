@@ -149,10 +149,17 @@ _ATLAS_REFERENCE = {
     "allen_mouse": {
         "bregma_um": (5200.0, 5705.0, 440.0),
         "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 0.885, "tilt_deg": 15.0,
+        "source": ("the cortex-lab / IBL estimate + Toronto-MRI scaling "
+                   "(Neuropixels Trajectory Explorer), modified empirically by "
+                   "Julie Fabre. The Allen CCF has no true bregma, so this is "
+                   "approximate"),
     },
     "whs_sd_rat": {
         "bregma_um": (14469.0, 10374.0, 2808.0),
         "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 1.0, "tilt_deg": 0.0,
+        "source": ("the Waxholm atlas (Papp et al. 2014), mapped into this "
+                   "atlas's frame and checked against the anterior-commissure "
+                   "decussation (AP/DV within ~0.1 mm)"),
     },
 }
 
