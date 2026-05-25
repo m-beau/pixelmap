@@ -84,6 +84,44 @@ def list_atlases() -> list[str]:
     return sorted(get_all_atlases_lastversions().keys())
 
 
+# brainglobe orientation codes (e.g. "asr") spell the (0,0,0) origin corner:
+# one letter per array axis, naming the anatomical side the axis starts from.
+_ORIGIN_WORDS = {
+    "a": "anterior", "p": "posterior",
+    "s": "superior", "i": "inferior",
+    "l": "left", "r": "right",
+}
+
+
+def is_downloaded(name: str = _DEFAULT_ATLAS) -> bool:
+    """True if the atlas is already on disk, so reading it won't download.
+
+    Lets the GUI fetch an atlas's origin only when that's free — picking an
+    un-downloaded atlas from a dropdown should not kick off a tens-of-MB
+    download just to label the coordinate space.
+    """
+    try:
+        from brainglobe_atlasapi.list_atlases import get_downloaded_atlases
+    except ImportError as exc:
+        raise ImportError(_BRAINGLOBE_INSTALL_HINT) from exc
+    return name in get_downloaded_atlases()
+
+
+def origin_corner(name: str = _DEFAULT_ATLAS) -> str:
+    """Return the atlas volume's (0,0,0) origin corner in words.
+
+    e.g. ``"anterior-superior-right"`` for the Allen mouse atlas
+    (orientation ``"asr"``). Coordinates increase away from this corner.
+    The origin differs between atlases, so this is read from the atlas's own
+    ``orientation`` metadata rather than assumed.
+
+    Reading the orientation triggers a download if the atlas is not cached;
+    gate on :func:`is_downloaded` when the caller must stay cheap.
+    """
+    orientation = str(get_atlas(name).orientation)  # e.g. "asr"
+    return "-".join(_ORIGIN_WORDS.get(c, c) for c in orientation)
+
+
 def lookup_regions(
     atlas_name: str,
     atlas_coords_um: np.ndarray,

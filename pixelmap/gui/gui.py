@@ -1015,6 +1015,8 @@ class ChannelmapGUI(param.Parameterized):
         self.region_boundary_source.data = boundary_data
 
         self._update_anatomy_legend(bands)
+        # The atlas is now downloaded, so the origin corner can be shown.
+        self._update_anatomy_origin_note()
 
         if pn.state.notifications is not None and bands:
             n_regions = len({b.atlas_id for b in bands})
@@ -1038,6 +1040,43 @@ class ChannelmapGUI(param.Parameterized):
             "No anatomical overlay computed yet."
             "</div>"
         )
+
+    def _anatomy_coord_note_html(self) -> str:
+        """Coordinate-space note, including the selected atlas's origin corner.
+
+        The origin differs per atlas, so it's fetched from the atlas itself —
+        but only when already downloaded, to keep dropdown changes cheap.
+        """
+        name = str(self.atlas_name_input.value).strip()
+        origin = None
+        if anatomy_atlas.is_available():
+            try:
+                if anatomy_atlas.is_downloaded(name):
+                    origin = anatomy_atlas.origin_corner(name)
+            except Exception:
+                origin = None
+        if origin:
+            origin_line = (
+                f"For <b>{name}</b>, (0,0,0) is the <b>{origin}</b> corner of the "
+                "volume; coordinates increase away from it."
+            )
+        else:
+            origin_line = (
+                f"The (0,0,0) origin corner for <b>{name}</b> is shown once the "
+                "atlas is downloaded (on first overlay compute)."
+            )
+        return (
+            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+            "Tip coordinates are in <b>CCF / atlas space</b> — µm from the atlas "
+            "volume's origin corner, <i>not</i> bregma-relative stereotaxic "
+            "coordinates. Brainglobe atlases don't define a bregma, so there's no "
+            f"built-in conversion.<br>{origin_line}"
+            "</div>"
+        )
+
+    def _update_anatomy_origin_note(self, *events):
+        """Refresh the coordinate note when the atlas selection changes."""
+        self.anatomy_coord_note.object = self._anatomy_coord_note_html()
 
     def _update_anatomy_legend(self, bands: list):
         """Render a deduplicated region legend on the right-side panel."""
@@ -1200,10 +1239,16 @@ class ChannelmapGUI(param.Parameterized):
             description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
         )
 
-        # Create figure with proper tools
+        # Create figure with proper tools.
+        # We keep explicit references to PanTool and WheelZoomTool so we can
+        # mark them as the default active drag and scroll tools. Without
+        # this, Bokeh would require the user to click the toolbar icon first
+        # before click-drag could pan or wheel could zoom.
+        pan_tool = PanTool()
+        wheel_zoom_tool = WheelZoomTool()
         tools = [
-            PanTool(),
-            WheelZoomTool(),
+            pan_tool,
+            wheel_zoom_tool,
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
@@ -1225,6 +1270,8 @@ class ChannelmapGUI(param.Parameterized):
             tools=tools,
             title=f"Neuropixels {self.probe_type} Electrode Layout",
             toolbar_location="right",
+            active_drag=pan_tool,
+            active_scroll=wheel_zoom_tool,
         )
 
         # Region bands must be added *before* the electrode rects so they
@@ -1534,6 +1581,10 @@ class ChannelmapGUI(param.Parameterized):
             name="Shank orientation (deg)", value=0.0, step=1.0,
             start=-180.0, end=360.0, width=200,
         )
+        self.anatomy_coord_note = pn.pane.HTML(
+            self._anatomy_coord_note_html(), width=320
+        )
+        self.atlas_name_input.param.watch(self._update_anatomy_origin_note, "value")
         self.anatomy_help = pn.pane.HTML(
             (
                 '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
@@ -1724,6 +1775,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 10)),
             self.anatomy_install_hint,
             self.atlas_name_input,
+            self.anatomy_coord_note,
             pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
             pn.Row(self.pitch_input, self.yaw_input, sizing_mode="stretch_width"),
             self.shank_orientation_input,
