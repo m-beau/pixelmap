@@ -22,9 +22,9 @@ Have an idea? [Open an issue](https://github.com/m-beau/channelmap_generator/iss
 For significant changes, please open an issue first to discuss your approach.
 
 1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature-name`
+2. Create a branch with a descriptive name (e.g., `feature/your-feature-name` or `fix/bug-description`)
 3. Make your changes and run tests: `pytest`
-4. Push and open a pull request
+4. Push to your fork and open a pull request **to the `dev` branch**
 
 ## Code Style
 
