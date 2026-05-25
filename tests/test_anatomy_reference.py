@@ -22,7 +22,7 @@ def test_reference_params_matches_by_prefix():
     # every allen_mouse_* variant resolves to the same entry
     assert reference_params("allen_mouse_bluebrain_barrels_25um") is not None
     rat = reference_params("whs_sd_rat_39um")
-    assert rat["bregma_um"] == (14469.0, 9594.0, 2808.0)
+    assert rat["bregma_um"] == (14469.0, 10374.0, 2808.0)
     assert rat["dv_squish"] == 1.0  # WHS already stereotaxically aligned
     # atlases without a published estimate
     assert reference_params("azba_zfish_4um") is None
