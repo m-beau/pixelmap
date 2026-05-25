@@ -18,6 +18,7 @@ import functools
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
 from pixelmap.anatomy.transform import probe_to_atlas
@@ -105,6 +106,7 @@ def render_locator(
     shank_orientation_deg: float,
     shank_positions: dict[int, float],
     y_range: tuple[float, float],
+    bregma_um: tuple[float, float, float] | None = None,
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
 
@@ -158,13 +160,16 @@ def render_locator(
                fallback_mask=inside.any(axis=1),
                title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm")
 
-    # Probe overlay per view: (axis, x-column, y-column) into (AP, ML, DV).
+    # Probe (red) + bregma estimate (black) per view: (axis, x-col, y-col)
+    # indexing into (AP, ML, DV).
     for ax, x_col, y_col in ((ax_sag, 0, 2), (ax_cor, 1, 2), (ax_hor, 1, 0)):
         for pts in trajectories:
             ax.plot(pts[:, x_col], pts[:, y_col], "-", color=_PROBE, lw=1.3, zorder=5)
         if trajectories:  # tip = lowest electrode of shank 0
             tip = trajectories[0][0]
             ax.plot(tip[x_col], tip[y_col], "o", color=_PROBE, ms=3, zorder=6)
+        if bregma_um is not None:
+            ax.plot(bregma_um[x_col], bregma_um[y_col], "o", color="black", ms=3, zorder=7)
 
     for ax in (ax_sag, ax_cor, ax_hor):
         ax.set_aspect("equal")
@@ -172,4 +177,14 @@ def render_locator(
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
+
+    # Legend in the empty 4th quadrant.
+    ax_leg = fig.add_subplot(2, 2, 4)
+    ax_leg.axis("off")
+    handles = [Line2D([0], [0], marker="o", color="none", markerfacecolor=_PROBE,
+                      markersize=6, label="probe tip")]
+    if bregma_um is not None:
+        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="black",
+                              markersize=6, label="bregma (est.)"))
+    ax_leg.legend(handles=handles, loc="center", frameon=False, fontsize=8)
     return fig

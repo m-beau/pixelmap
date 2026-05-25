@@ -39,6 +39,45 @@ from __future__ import annotations
 import numpy as np
 
 
+def bregma_to_atlas_um(
+    coords_bregma: tuple[float, float, float],
+    *,
+    bregma_um: tuple[float, float, float],
+    dv_squish: float = 1.0,
+    tilt_deg: float = 0.0,
+) -> tuple[float, float, float]:
+    """Map a bregma-relative stereotaxic coordinate to canonical atlas µm.
+
+    This is the optional bregma-coordinate mode: instead of absolute atlas
+    µm, the user gives a position relative to bregma, and we fold in the
+    atlas's bregma location, DV "squish" and nose-up tilt (see
+    :func:`pixelmap.anatomy.atlas.reference_params`).
+
+    Args:
+        coords_bregma: ``(ap, ml, dv)`` µm from bregma, with ``ap`` positive
+            anterior, ``ml`` positive left (matching the atlas +ML direction),
+            ``dv`` positive ventral (deeper).
+        bregma_um: bregma position in canonical atlas ``(AP, ML, DV)`` µm.
+        dv_squish: DV scale — atlas DV displacement = real DV / ``dv_squish``
+            (corrects the Allen CCF's dorsoventral compression). ``1.0`` = none.
+        tilt_deg: nose-up tilt of the stereotaxic frame about the ML axis,
+            applied before placing the point. ``0`` = none.
+
+    Returns:
+        ``(AP, ML, DV)`` in canonical atlas µm, ready for
+        :func:`probe_to_atlas` / region lookup.
+    """
+    ap_b, ml_b, dv_b = (float(c) for c in coords_bregma)
+    b_ap, b_ml, b_dv = (float(c) for c in bregma_um)
+    dv_s = dv_b / dv_squish if dv_squish else dv_b
+    theta = np.deg2rad(tilt_deg)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    # Rotate the (AP, DV) offset nose-up about ML, then place relative to bregma.
+    ap_r = ap_b * cos_t + dv_s * sin_t
+    dv_r = -ap_b * sin_t + dv_s * cos_t
+    return (b_ap - ap_r, b_ml + ml_b, b_dv + dv_r)
+
+
 def _R_pitch(pitch_rad: float) -> np.ndarray:
     """AP tilt — rotation around world ML axis. ``probe-y`` rotates -DV → +AP."""
     cp, sp = np.cos(pitch_rad), np.sin(pitch_rad)

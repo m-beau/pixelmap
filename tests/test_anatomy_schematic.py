@@ -65,12 +65,21 @@ def _render(shank_positions=None):
     )
 
 
-def test_render_returns_three_axis_figure_with_a_probe_per_shank(fake_brainglobe):
+def test_render_has_three_slices_plus_legend_with_a_probe_per_shank(fake_brainglobe):
     fig = _render()
-    assert len(fig.axes) == 3                    # sagittal, coronal, horizontal
-    for ax in fig.axes:
+    assert len(fig.axes) == 4                    # 3 slices + 1 legend panel
+    for ax in fig.axes[:3]:                       # sagittal, coronal, horizontal
         assert len(ax.get_lines()) >= 2          # one Line2D per shank
         assert len(ax.images) >= 1               # region fill (+ outline) layer
+
+
+def test_bregma_dot_adds_one_marker_per_slice(fake_brainglobe):
+    common = dict(tip_atlas=(100.0, 100.0, 75.0), pitch_deg=0.0, yaw_deg=0.0,
+                  shank_orientation_deg=0.0, shank_positions={0: 0.0}, y_range=(0.0, 80.0))
+    without = render_locator("fake", **common)
+    with_bregma = render_locator("fake", bregma_um=(100.0, 100.0, 50.0), **common)
+    for a_no, a_yes in zip(without.axes[:3], with_bregma.axes[:3]):
+        assert len(a_yes.get_lines()) == len(a_no.get_lines()) + 1
 
 
 def test_region_fill_uses_atlas_colors(fake_brainglobe):
@@ -101,4 +110,4 @@ def test_falls_back_to_silhouette_when_tip_outside_volume(fake_brainglobe):
         shank_positions={0: 0.0},
         y_range=(0.0, 80.0),
     )
-    assert len(fig.axes) == 3  # renders without crashing
+    assert len(fig.axes) == 4  # 3 slices + legend; renders without crashing

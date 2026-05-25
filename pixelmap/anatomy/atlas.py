@@ -127,6 +127,39 @@ def orientation_code(name: str = _DEFAULT_ATLAS) -> str:
     return str(get_atlas(name).orientation)
 
 
+# Published bregma estimates + atlas-vs-stereotaxic corrections, per atlas family.
+# These let the GUI offer a bregma-relative coordinate mode; they are rough,
+# editable defaults (the Allen CCF has no true fiducial — see AtlasScaling.md).
+#
+# * allen_mouse_*: bregma, DV "squish" and nose-up tilt as baked into the
+#   Neuropixels Trajectory Explorer (Peters), which encodes the cortex-lab/IBL
+#   bregma estimate and the "Toronto MRI" scaling. bregma voxel [ML,AP,DV] =
+#   [570.5, 520, 44] @10µm; DV scale 0.885; AP tilt 5°.
+# * whs_sd_rat: bregma is *defined* by the Waxholm atlas (Papp et al. 2014,
+#   NIfTI voxel [653, 266, 440]); converted into brainglobe's reoriented frame.
+#   No squish/tilt — WHS is already stereotaxically aligned.
+#
+# bregma_um is (AP, ML, DV) µm in the canonical asr frame; atlas DV =
+# real DV / dv_squish; tilt_deg is nose-up rotation about the ML axis.
+_ATLAS_REFERENCE = {
+    "allen_mouse": {"bregma_um": (5200.0, 5705.0, 440.0), "dv_squish": 0.885, "tilt_deg": 5.0},
+    "whs_sd_rat": {"bregma_um": (14469.0, 9594.0, 2808.0), "dv_squish": 1.0, "tilt_deg": 0.0},
+}
+
+
+def reference_params(name: str = _DEFAULT_ATLAS) -> dict | None:
+    """Bregma + DV-squish + tilt estimates for an atlas, or ``None`` if unknown.
+
+    Matched by atlas-name prefix, so every ``allen_mouse_*`` resolution shares
+    one entry. Returned values are editable defaults, not ground truth.
+    """
+    name = str(name)
+    for prefix, params in _ATLAS_REFERENCE.items():
+        if name.startswith(prefix):
+            return dict(params)
+    return None
+
+
 # Which anatomical axis each orientation letter belongs to, and the letter that
 # marks the canonical (AP, DV, ML) origin: AP from anterior, DV from the dorsal
 # (superior) surface, ML from the right. pixelmap works in this fixed frame.
