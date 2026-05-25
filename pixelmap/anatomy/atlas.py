@@ -122,6 +122,88 @@ def origin_corner(name: str = _DEFAULT_ATLAS) -> str:
     return "-".join(_ORIGIN_WORDS.get(c, c) for c in orientation)
 
 
+def orientation_code(name: str = _DEFAULT_ATLAS) -> str:
+    """The atlas's native voxel orientation string (e.g. ``"asr"``)."""
+    return str(get_atlas(name).orientation)
+
+
+# Which anatomical axis each orientation letter belongs to, and the letter that
+# marks the canonical (AP, DV, ML) origin: AP from anterior, DV from the dorsal
+# (superior) surface, ML from the right. pixelmap works in this fixed frame.
+_AXIS_KIND = {"a": "AP", "p": "AP", "s": "DV", "i": "DV", "l": "ML", "r": "ML"}
+_CANONICAL_ORIGIN = {"AP": "a", "DV": "s", "ML": "r"}
+
+
+@dataclass(frozen=True)
+class _AnatAxis:
+    """Where one anatomical axis lives in the native annotation array."""
+
+    array_axis: int    # which array axis (0/1/2) this anatomical axis occupies
+    flip: bool         # True if the native axis runs opposite the canonical one
+    n: int             # voxel count along the axis
+    res_um: float      # µm per voxel along the axis
+
+
+def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
+    """Map ``"AP"``/``"DV"``/``"ML"`` to their place in the native array.
+
+    Read from ``atlas.orientation`` (e.g. ``"asr"``) so coordinate lookups
+    work for any brainglobe orientation, not just Allen's. See
+    :func:`canonical_annotation` for how this is applied.
+    """
+    orientation = str(atlas.orientation).lower()
+    shape = atlas.annotation.shape
+    res = np.asarray(atlas.resolution, dtype=float)
+    axes: dict[str, _AnatAxis] = {}
+    for axis, letter in enumerate(orientation):
+        kind = _AXIS_KIND[letter]
+        axes[kind] = _AnatAxis(
+            array_axis=axis,
+            flip=(letter != _CANONICAL_ORIGIN[kind]),
+            n=int(shape[axis]),
+            res_um=float(res[axis]),
+        )
+    if set(axes) != {"AP", "DV", "ML"}:
+        raise ValueError(f"Unsupported atlas orientation: {orientation!r}")
+    return axes
+
+
+@functools.lru_cache(maxsize=4)
+def canonical_annotation(atlas_name: str):
+    """Return ``(annotation, resolution)`` reoriented to canonical ``(AP, DV, ML)``.
+
+    The canonical layout is brainglobe ``"asr"``: axis 0 = AP (anterior→posterior),
+    axis 1 = DV (dorsal→ventral), axis 2 = ML (right→left), with µm measured from
+    the anterior-superior-right corner. The rest of :mod:`pixelmap.anatomy`
+    assumes this layout, so funnelling every atlas through here is what lets
+    non-Allen orientations work. For an already-``asr`` atlas this is a no-op
+    (identity transpose, no flips), so Allen behavior is unchanged.
+    """
+    atlas = get_atlas(atlas_name)
+    axes = anatomical_axes(atlas)
+    order = (axes["AP"].array_axis, axes["DV"].array_axis, axes["ML"].array_axis)
+    arr = np.transpose(atlas.annotation, order)
+    flip_axes = tuple(i for i, kind in enumerate(("AP", "DV", "ML")) if axes[kind].flip)
+    if flip_axes:
+        arr = np.flip(arr, axis=flip_axes)
+    res = np.array(
+        [axes["AP"].res_um, axes["DV"].res_um, axes["ML"].res_um], dtype=float
+    )
+    return arr, res
+
+
+def volume_center_um(name: str = _DEFAULT_ATLAS) -> tuple[float, float, float]:
+    """Geometric center of the atlas volume as ``(AP, ML, DV)`` µm.
+
+    Handy as a default insertion target — it lands mid-brain for any atlas.
+    Reads the atlas (downloads if not cached), so gate on
+    :func:`is_downloaded` where staying cheap matters.
+    """
+    ann, res = canonical_annotation(name)
+    n_ap, n_dv, n_ml = ann.shape
+    return (n_ap * res[0] / 2.0, n_ml * res[2] / 2.0, n_dv * res[1] / 2.0)
+
+
 def lookup_regions(
     atlas_name: str,
     atlas_coords_um: np.ndarray,
@@ -137,18 +219,19 @@ def lookup_regions(
         coordinate falls outside the volume.
     """
     atlas = get_atlas(atlas_name)
+    # Reorient to canonical (AP, DV, ML) so the indexing below holds for any
+    # atlas orientation, not just Allen's native "asr".
+    annotation, voxel_size = canonical_annotation(atlas_name)
 
     coords = np.asarray(atlas_coords_um, dtype=float)
     if coords.ndim != 2 or coords.shape[1] != 3:
         raise ValueError(f"atlas_coords_um must be (N, 3); got {coords.shape}")
 
-    # brainglobe annotation volumes are indexed (AP, DV, ML); convert µm → voxel.
-    voxel_size = np.asarray(atlas.resolution, dtype=float)  # (AP, DV, ML) µm/voxel
+    # canonical annotation is indexed (AP, DV, ML); convert µm → voxel.
     ap_idx = np.round(coords[:, 0] / voxel_size[0]).astype(int)
     dv_idx = np.round(coords[:, 2] / voxel_size[1]).astype(int)
     ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
 
-    annotation = atlas.annotation
     shape = annotation.shape
 
     results: list[RegionInfo | None] = []

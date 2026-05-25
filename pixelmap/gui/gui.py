@@ -1057,41 +1057,74 @@ class ChannelmapGUI(param.Parameterized):
         )
 
     def _anatomy_coord_note_html(self) -> str:
-        """Coordinate-space note, including the selected atlas's origin corner.
+        """Coordinate-space note: the fixed tip frame + the atlas's native code.
 
-        The origin differs per atlas, so it's fetched from the atlas itself —
-        but only when already downloaded, to keep dropdown changes cheap.
+        Tip coordinates use one fixed frame for every atlas; the atlas's own
+        voxel orientation is read and remapped under the hood. We surface that
+        native code as an FYI, but only when the atlas is already downloaded so
+        switching atlases in the dropdown stays cheap.
         """
         name = str(self.atlas_name_input.value).strip()
-        origin = None
+        native = None
         if anatomy_atlas.is_available():
             try:
                 if anatomy_atlas.is_downloaded(name):
-                    origin = anatomy_atlas.origin_corner(name)
+                    native = (
+                        anatomy_atlas.orientation_code(name),
+                        anatomy_atlas.origin_corner(name),
+                    )
             except Exception:
-                origin = None
-        if origin:
-            origin_line = (
-                f"For <b>{name}</b>, (0,0,0) is the <b>{origin}</b> corner of the "
-                "volume; coordinates increase away from it."
+                native = None
+        if native:
+            code, origin = native
+            native_line = (
+                f"<b>{name}</b> native voxel orientation: <code>{code}</code> "
+                f"(origin {origin})."
             )
         else:
-            origin_line = (
-                f"The (0,0,0) origin corner for <b>{name}</b> is shown once the "
-                "atlas is downloaded (on first overlay compute)."
+            native_line = (
+                f"<b>{name}</b>'s native orientation is shown once the atlas is "
+                "downloaded (on first overlay compute)."
             )
         return (
             '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
-            "Tip coordinates are in <b>CCF / atlas space</b> — µm from the atlas "
-            "volume's origin corner, <i>not</i> bregma-relative stereotaxic "
-            "coordinates. Brainglobe atlases don't define a bregma, so there's no "
-            f"built-in conversion.<br>{origin_line}"
+            "Tip coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
+            "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
+            "with AP increasing posteriorly, DV ventrally and ML from the right. "
+            "<i>Not</i> bregma-relative — brainglobe atlases define no bregma."
+            f"<br>{native_line}"
             "</div>"
         )
 
     def _update_anatomy_origin_note(self, *events):
         """Refresh the coordinate note when the atlas selection changes."""
         self.anatomy_coord_note.object = self._anatomy_coord_note_html()
+
+    def _atlas_tip_center(self, name: str):
+        """Atlas center as ``(AP, ML, DV)`` µm, or ``None`` if not readable cheaply.
+
+        Only computed for already-downloaded atlases so it can't trigger a
+        download (used on init and on every atlas-selection change).
+        """
+        name = str(name).strip()
+        if not anatomy_atlas.is_available():
+            return None
+        try:
+            if not anatomy_atlas.is_downloaded(name):
+                return None
+            return anatomy_atlas.volume_center_um(name)
+        except Exception:
+            return None
+
+    def _update_tip_to_atlas_center(self, *events):
+        """Seed the tip inputs with the selected atlas's center, when available."""
+        center = self._atlas_tip_center(self.atlas_name_input.value)
+        if center is None:
+            return
+        ap, ml, dv = center
+        self.tip_ap_input.value = round(ap, 1)
+        self.tip_ml_input.value = round(ml, 1)
+        self.tip_dv_input.value = round(dv, 1)
 
     def _update_anatomy_legend(self, bands: list):
         """Render a deduplicated region legend on the right-side panel."""
@@ -1575,14 +1608,19 @@ class ChannelmapGUI(param.Parameterized):
             options=atlas_options,
             width=300,
         )
+        # Default the tip to the atlas center (mid-brain) when we can read it
+        # cheaply; otherwise fall back to a reasonable fixed coordinate.
+        default_ap, default_ml, default_dv = (
+            self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
+        )
         self.tip_ap_input = pn.widgets.FloatInput(
-            name="Tip AP (µm)", value=5000.0, step=10.0, width=95
+            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, width=95
         )
         self.tip_ml_input = pn.widgets.FloatInput(
-            name="Tip ML (µm)", value=2500.0, step=10.0, width=95
+            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, width=95
         )
         self.tip_dv_input = pn.widgets.FloatInput(
-            name="Tip DV (µm)", value=3000.0, step=10.0, width=95
+            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, width=95
         )
         self.pitch_input = pn.widgets.FloatInput(
             name="Pitch (AP tilt, deg)", value=0.0, step=1.0,
@@ -1600,6 +1638,7 @@ class ChannelmapGUI(param.Parameterized):
             self._anatomy_coord_note_html(), width=320
         )
         self.atlas_name_input.param.watch(self._update_anatomy_origin_note, "value")
+        self.atlas_name_input.param.watch(self._update_tip_to_atlas_center, "value")
         self.anatomy_help = pn.pane.HTML(
             (
                 '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
@@ -1621,7 +1660,7 @@ class ChannelmapGUI(param.Parameterized):
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), width=320)
         self.anatomy_locator = pn.pane.Matplotlib(
-            object=None, width=360, height=215, tight=True, format="png",
+            object=None, width=320, height=290, tight=True, format="png",
         )
 
         if not anatomy_atlas.is_available():

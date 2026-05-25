@@ -17,6 +17,7 @@ class _LayeredAtlas:
 
     def __init__(self, name: str):
         self.name = name
+        self.orientation = "asr"
         self.resolution = (25.0, 25.0, 25.0)
         # 8 DV voxels = 200 µm of depth. First 4 → region 1, next 4 → region 2.
         ann = np.zeros((4, 8, 4), dtype=np.int32)
@@ -32,9 +33,11 @@ class _LayeredAtlas:
 @pytest.fixture(autouse=True)
 def _reset_cache():
     atlas_module.get_atlas.cache_clear()
+    atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     yield
     atlas_module.get_atlas.cache_clear()
+    atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
 
 
