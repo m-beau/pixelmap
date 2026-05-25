@@ -1136,17 +1136,24 @@ class ChannelmapGUI(param.Parameterized):
         """Banner above the bregma fields: explain the estimate, or prompt for one."""
         ref = anatomy_atlas.reference_params(self.atlas_name_input.value)
         if ref is None:
+            icon = "⚠"
             body = ("<b>No bregma estimate</b> for this atlas — set the bregma "
                     "coordinate (and any squish / tilt) yourself below.")
-            bg, border, color = "#fdecec", "#e3a5a5", "#8a3a3a"
+            bg, border, color = "#fdecec", "#e3a5a5", "#8a3a3a"  # red: action needed
+        elif ref.get("defined"):
+            icon = "✓"
+            body = (f"<b>Bregma (defined, not an estimate)</b> — from "
+                    f"{ref['source']}. Edit only if needed.")
+            bg, border, color = "#e7f6e7", "#9ccb9c", "#2e6b2e"  # green: real value
         else:
+            icon = "⚠"
             body = (f"<b>Bregma estimate (rough)</b> — from {ref['source']}. "
                     "Edit if you have better values.")
-            bg, border, color = "#fff6df", "#f0d27a", "#8a5a00"
+            bg, border, color = "#fff6df", "#f0d27a", "#8a5a00"  # amber: estimate
         return (
             f'<div style="font-size: 11px; color: {color}; background: {bg}; '
             f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
-            f'margin: 8px 10px 2px 10px;">⚠ {body}</div>'
+            f'margin: 8px 10px 2px 10px;">{icon} {body}</div>'
         )
 
     def _update_anatomy_origin_note(self, *events):

@@ -18,16 +18,33 @@ def test_reference_params_matches_by_prefix():
     assert allen["ap_squish"] == 1.0  # no trusted estimate → default 1
     assert allen["ml_squish"] == 1.0
     assert allen["dv_squish"] == 0.885
-    assert allen["tilt_deg"] == 15.0
+    assert allen["tilt_deg"] == 13.0
     # every allen_mouse_* variant resolves to the same entry
     assert reference_params("allen_mouse_bluebrain_barrels_25um") is not None
     assert isinstance(allen["source"], str) and allen["source"]  # provenance text
-    rat = reference_params("whs_sd_rat_39um")
-    assert rat["bregma_um"] == (14469.0, 10374.0, 2808.0)
-    assert isinstance(rat["source"], str) and rat["source"]
-    assert rat["dv_squish"] == 1.0  # WHS already stereotaxically aligned
-    # atlases without a published estimate
-    assert reference_params("azba_zfish_4um") is None
+    # both Waxholm-Space rats share the real, defined bregma
+    for name in ["whs_sd_rat_39um", "whs_sd_swc_female_rat_39um"]:
+        rat = reference_params(name)
+        assert rat["bregma_um"] == (14469.0, 10374.0, 2808.0)
+        assert rat["dv_squish"] == 1.0  # WHS already stereotaxically aligned
+        assert rat["defined"] is True   # real bregma, not an estimate
+        assert isinstance(rat["source"], str) and rat["source"]
+    assert "defined" not in reference_params("allen_mouse_10um")  # Allen is an estimate
+
+    # kim + ccfv2 are the same Allen adult template → Allen estimate transfers
+    for name in ["kim_mouse_25um", "kim_mouse_isotropic_20um",
+                 "ccfv2_mouse_25um", "ccfv2_fiber_mouse_25um",
+                 "allen_mouse_bluebrain_barrels_10um"]:
+        e = reference_params(name)
+        assert e["bregma_um"] == (5200.0, 5705.0, 440.0)
+        assert e["dv_squish"] == 0.885 and e["tilt_deg"] == 13.0
+
+    # independent / per-age spaces → no estimate (user defines it)
+    for name in ["azba_zfish_4um", "princeton_mouse_20um", "osten_mouse_25um",
+                 "perens_lsfm_mouse_20um", "perens_stereotaxic_mri_mouse_25um",
+                 "demba_allen_seg_dev_mouse_p14_25um", "ccfv2_dev_mouse_25um",
+                 "kim_dev_mouse_idisco_10um"]:
+        assert reference_params(name) is None
 
 
 def test_origin_maps_to_bregma():

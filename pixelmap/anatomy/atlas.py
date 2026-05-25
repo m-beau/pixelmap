@@ -135,31 +135,61 @@ def orientation_code(name: str = _DEFAULT_ATLAS) -> str:
 #   Neuropixels Trajectory Explorer (Peters), which encodes the cortex-lab/IBL
 #   bregma estimate and the "Toronto MRI" scaling. bregma voxel [ML,AP,DV] =
 #   [570.5, 520, 44] @10µm; DV squish 0.885 (AP/ML default to 1.0 — no trusted
-#   estimate); AP tilt 15° (~total disagreement with Franklin & Paxinos per
-#   AtlasScaling.md, vs the IBL ~5° estimate).
+#   estimate); AP tilt 13° (empirical, between the IBL ~5° estimate and the
+#   ~15° total disagreement with Franklin & Paxinos per AtlasScaling.md).
+# * kim_mouse, ccfv2_mouse, ccfv2_fiber, allen_mouse_bluebrain_barrels: these are
+#   the *same* Allen adult average template as allen_mouse (verified identical
+#   grid: asr, 13200×8000×11400 µm), so the Allen estimate transfers unchanged.
+#   The Kim atlas (Chon et al. 2019) shares Allen's reference image; CCFv2 is the
+#   same average-template grid as CCFv3 (and is where the IBL bregma was derived).
 # * whs_sd_rat: bregma is *defined* by the Waxholm atlas (Papp et al. 2014,
 #   source NIfTI voxel [coronal,sagittal,horizontal] = [653, 266, 440]),
 #   mapped into brainglobe's reoriented frame (AP & DV flipped, ML not) and
 #   validated against the measured anterior-commissure decussation (the WHS
 #   origin) to <100 µm in AP/DV. No squish/tilt — WHS is stereotaxically aligned.
+# * NOT included (independent / per-age spaces — user must define bregma): the
+#   developmental atlases (demba_*, kim_dev_*, ccfv2_dev), the LSFM templates
+#   (princeton_mouse, perens_lsfm/multimodal, osten_mouse) and the flat-skull
+#   perens_stereotaxic (stereotaxic, but its bregma voxel isn't recoverable from
+#   brainglobe's metadata).
 #
 # bregma_um is (AP, ML, DV) µm in the canonical asr frame; atlas DV =
 # real DV / dv_squish; tilt_deg is nose-up rotation about the ML axis.
+_ALLEN_BREGMA_UM = (5200.0, 5705.0, 440.0)
+_ALLEN_CALIB = {"ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 0.885, "tilt_deg": 13.0}
+
+
+def _ccf_ref(source: str) -> dict:
+    """A reference entry sharing the Allen CCF bregma + squish/tilt estimate."""
+    return {"bregma_um": _ALLEN_BREGMA_UM, **_ALLEN_CALIB, "source": source}
+
+
 _ATLAS_REFERENCE = {
-    "allen_mouse": {
-        "bregma_um": (5200.0, 5705.0, 440.0),
-        "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 0.885, "tilt_deg": 15.0,
-        "source": ("the cortex-lab / IBL estimate + Toronto-MRI scaling "
-                   "(Neuropixels Trajectory Explorer), modified empirically by "
-                   "Julie Fabre. The Allen CCF has no true bregma, so this is "
-                   "approximate"),
-    },
-    "whs_sd_rat": {
+    "allen_mouse": _ccf_ref(
+        "the cortex-lab / IBL estimate + Toronto-MRI scaling (Neuropixels "
+        "Trajectory Explorer), modified empirically by Julie Fabre. The Allen "
+        "CCF has no true bregma, so this is approximate"),
+    "kim_mouse": _ccf_ref(
+        "the Allen CCF estimate — the Kim atlas (Chon et al. 2019) shares Allen's "
+        "reference image (verified identical grid), modified empirically by "
+        "Julie Fabre. No true bregma, so this is approximate"),
+    "ccfv2_mouse": _ccf_ref(
+        "the Allen CCF estimate — CCFv2 uses the same average-template grid as "
+        "CCFv3 (and is where the cortex-lab / IBL bregma was derived), modified "
+        "empirically by Julie Fabre. No true bregma, so this is approximate"),
+    "ccfv2_fiber": _ccf_ref(
+        "the Allen CCF estimate — CCFv2 uses the same grid as CCFv3, modified "
+        "empirically by Julie Fabre. No true bregma, so this is approximate"),
+    # Both Waxholm-Space rats (whs_sd_rat and the SWC female rat registered into
+    # WHS) share this frame, so "whs_sd" covers both.
+    "whs_sd": {
         "bregma_um": (14469.0, 10374.0, 2808.0),
         "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 1.0, "tilt_deg": 0.0,
-        "source": ("the Waxholm atlas (Papp et al. 2014), mapped into this "
-                   "atlas's frame and checked against the anterior-commissure "
-                   "decussation (AP/DV within ~0.1 mm)"),
+        "defined": True,  # a real, atlas-defined bregma (not an estimate)
+        "source": ("the Waxholm atlas (Papp et al. 2014), which defines bregma "
+                   "explicitly. Recovered by mapping its published bregma voxel "
+                   "into this atlas's frame, then validated against the measured "
+                   "anterior-commissure decussation (AP/DV within ~0.1 mm)"),
     },
 }
 
