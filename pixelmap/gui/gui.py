@@ -1069,13 +1069,6 @@ class ChannelmapGUI(param.Parameterized):
         # Overlay now exists → later input edits live-update it.
         self._anatomy_overlay_active = True
 
-        if pn.state.notifications is not None and bands:
-            n_regions = len({b.atlas_id for b in bands})
-            pn.state.notifications.success(
-                f"Found {n_regions} region(s) across {len(probe_xs)} shank(s).",
-                duration=4_000,
-            )
-
     def clear_anatomy_overlay(self):
         """Wipe the region bands, labels, boundaries and reset the legend."""
         self._anatomy_overlay_active = False  # stop live-updating
@@ -1136,12 +1129,21 @@ class ChannelmapGUI(param.Parameterized):
         )
 
     def _on_atlas_change(self, *events):
-        """Atlas changed: reset bregma/squish/tilt first, then tip + notes."""
-        self._update_reference_params(*events)
-        self._update_tip_to_atlas_center(*events)
-        self._update_anatomy_origin_note(*events)
-        self._update_landmark_labels()
-        self.bregma_estimate_header.object = self._bregma_header_html()
+        """Atlas changed: reset bregma/squish/tilt + tip + notes, then recompute.
+
+        The field updates are batched under a recompute guard so a single atlas
+        switch triggers one overlay refresh, not one per field changed.
+        """
+        self._suppress_anatomy_recompute = True
+        try:
+            self._update_reference_params(*events)
+            self._update_tip_to_atlas_center(*events)
+            self._update_anatomy_origin_note(*events)
+            self._update_landmark_labels()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        finally:
+            self._suppress_anatomy_recompute = False
+        self._recompute_anatomy_if_active()
 
     def _update_landmark_labels(self):
         """Rename the toggle + coordinate fields to the atlas's landmark.
@@ -1165,10 +1167,10 @@ class ChannelmapGUI(param.Parameterized):
         """Banner above the bregma fields: explain the estimate, or prompt for one."""
         spec = self._origin_spec(self.atlas_name_input.value)
         status, lm, src = spec["status"], spec["landmark"], spec.get("source", "")
-        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")
-        AMBER = ("#fff6df", "#f0d27a", "#8a5a00")
-        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")
-        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")
+        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")   # defined / real value
+        ORANGE = ("#ffe7d1", "#f0a35e", "#9a4a00")  # rough estimate
+        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")    # info / pending
+        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")     # user must define
         if status == "defined" and lm == "bregma":  # WHS rat
             icon, palette = "✓", GREEN
             body = (f"<b>Bregma (defined, not an estimate)</b> — from {src}. "
@@ -1178,7 +1180,7 @@ class ChannelmapGUI(param.Parameterized):
             body = (f"<b>Origin = {lm} (defined)</b> — {src}; the established "
                     "reference for this species. Edit only if needed.")
         elif status == "estimate":  # Allen-family mouse
-            icon, palette = "⚠", AMBER
+            icon, palette = "⚠", ORANGE
             body = (f"<b>Bregma estimate (rough)</b> — from {src}. Edit if you "
                     "have better values.")
         elif status == "ac_pending":
@@ -1287,7 +1289,9 @@ class ChannelmapGUI(param.Parameterized):
             except Exception:
                 ac = None
             if ac is None:
-                spec["status"], spec["landmark"] = "user_origin", None
+                # AC is the convention but this atlas doesn't delineate it
+                # (e.g. the coarse human atlas) → keep the name, user sets it.
+                spec["status"] = "landmark_undefined"
                 return spec
             spec["bregma_um"] = ac
             spec["status"] = "defined"
@@ -1317,16 +1321,23 @@ class ChannelmapGUI(param.Parameterized):
         for w in (self.dv_squish_input, self.ap_squish_input,
                   self.ml_squish_input, self.tilt_input):
             w.disabled = not on
-        if on:
-            # Sensible bregma-relative default: at bregma, 4 mm deep.
-            self.tip_ap_input.value = 0.0
-            self.tip_ml_input.value = 0.0
-            self.tip_dv_input.value = 4000.0
-        else:
-            self._update_tip_to_atlas_center()
+        self._suppress_anatomy_recompute = True
+        try:
+            if on:
+                # Sensible bregma-relative default: at bregma, 4 mm deep.
+                self.tip_ap_input.value = 0.0
+                self.tip_ml_input.value = 0.0
+                self.tip_dv_input.value = 4000.0
+            else:
+                self._update_tip_to_atlas_center()
+        finally:
+            self._suppress_anatomy_recompute = False
+        self._recompute_anatomy_if_active()
 
     def _recompute_anatomy_if_active(self, *events):
         """Re-run the overlay on input changes, but only once one exists."""
+        if getattr(self, "_suppress_anatomy_recompute", False):
+            return
         if getattr(self, "_anatomy_overlay_active", False):
             self.compute_anatomy_overlay()
 
@@ -1884,12 +1895,13 @@ class ChannelmapGUI(param.Parameterized):
         # pose / bregma / squish / tilt input changes, so edits are visible
         # immediately instead of only on the next Compute click.
         self._anatomy_overlay_active = False
+        # atlas_name + bregma toggle do their own batched recompute (via
+        # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
         for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,
                    self.pitch_input, self.yaw_input, self.shank_orientation_input,
                    self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input,
                    self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
-                   self.tilt_input, self.bregma_relative_toggle,
-                   self.atlas_name_input):
+                   self.tilt_input):
             _w.param.watch(self._recompute_anatomy_if_active, "value")
         self._update_landmark_labels()  # name the toggle/fields for the default atlas
         self.anatomy_help = pn.pane.HTML(
