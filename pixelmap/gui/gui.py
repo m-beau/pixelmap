@@ -46,6 +46,7 @@ from pixelmap.types import Electrode
 from pixelmap.utils import imro
 from pixelmap.utils import url_share
 from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.schematic import render_locator
 from pixelmap.anatomy.visualization import compute_region_bands
 
 ## Configure logging
@@ -1018,6 +1019,19 @@ class ChannelmapGUI(param.Parameterized):
         # The atlas is now downloaded, so the origin corner can be shown.
         self._update_anatomy_origin_note()
 
+        try:
+            self.anatomy_locator.object = render_locator(
+                str(self.atlas_name_input.value).strip(),
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+            )
+        except Exception as exc:  # a failed locator shouldn't sink the overlay
+            print(f"Locator render failed: {exc}")
+
         if pn.state.notifications is not None and bands:
             n_regions = len({b.atlas_id for b in bands})
             pn.state.notifications.success(
@@ -1033,6 +1047,7 @@ class ChannelmapGUI(param.Parameterized):
         self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
         self.anatomy_legend.object = self._empty_legend_html()
+        self.anatomy_locator.object = None
 
     def _empty_legend_html(self) -> str:
         return (
@@ -1605,6 +1620,9 @@ class ChannelmapGUI(param.Parameterized):
         self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), width=320)
+        self.anatomy_locator = pn.pane.Matplotlib(
+            object=None, width=360, height=215, tight=True, format="png",
+        )
 
         if not anatomy_atlas.is_available():
             install_hint = (
@@ -1691,6 +1709,9 @@ class ChannelmapGUI(param.Parameterized):
                 self.share_link_output,
                 margin=(0, 0, 0, 20),
             ),
+
+            pn.pane.Markdown("## Probe location", margin=(15, 0, -5, 30)),
+            self.anatomy_locator,
 
             pn.pane.Markdown("## Region legend", margin=(15, 0, -5, 30)),
             self.anatomy_legend,
