@@ -34,6 +34,7 @@ def compute_region_bands(
     tip_atlas: tuple[float, float, float],
     pitch_deg: float,
     yaw_deg: float,
+    shank_orientation_deg: float = 0.0,
     atlas_name: str,
     step_um: float = 25.0,
 ) -> list[RegionBand]:
@@ -44,7 +45,8 @@ def compute_region_bands(
             position along the probe-local x axis (µm).
         y_range: ``(y_min, y_max)`` to sample along each shank (probe-local µm).
         tip_atlas: ``(AP, ML, DV)`` of shank-0 lowest electrode in atlas µm.
-        pitch_deg, yaw_deg: insertion pose.
+        pitch_deg, yaw_deg, shank_orientation_deg: insertion pose — see
+            :mod:`pixelmap.anatomy.transform`.
         atlas_name: brainglobe atlas identifier.
         step_um: sampling stride along each shank. Match or undercut the
             atlas resolution to avoid skipping thin regions.
@@ -69,6 +71,7 @@ def compute_region_bands(
             tip_atlas=tip_atlas,
             pitch_deg=pitch_deg,
             yaw_deg=yaw_deg,
+            shank_orientation_deg=shank_orientation_deg,
             atlas_name=atlas_name,
         )
         bands.extend(_collapse_to_bands(shank_id, probe_xp, y_samples, regions, step_um))

@@ -953,6 +953,7 @@ class ChannelmapGUI(param.Parameterized):
                 tip_atlas=tip,
                 pitch_deg=float(self.pitch_input.value),
                 yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
                 atlas_name=str(self.atlas_name_input.value).strip(),
                 step_um=25.0,
             )
@@ -1522,10 +1523,27 @@ class ChannelmapGUI(param.Parameterized):
             name="Tip DV (µm)", value=3000.0, step=10.0, width=95
         )
         self.pitch_input = pn.widgets.FloatInput(
-            name="Pitch (deg)", value=0.0, step=1.0, start=-90.0, end=90.0, width=140
+            name="Pitch (AP tilt, deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, width=140,
         )
         self.yaw_input = pn.widgets.FloatInput(
-            name="Yaw (deg)", value=0.0, step=1.0, start=-180.0, end=180.0, width=140
+            name="Yaw (ML tilt, deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, width=140,
+        )
+        self.shank_orientation_input = pn.widgets.FloatInput(
+            name="Shank orientation (deg)", value=0.0, step=1.0,
+            start=-180.0, end=360.0, width=200,
+        )
+        self.anatomy_help = pn.pane.HTML(
+            (
+                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+                "<b>Pitch</b> = AP tilt (probe leaning forward / backward). "
+                "<b>Yaw</b> = ML tilt (probe leaning left / right). "
+                "<b>Shank orientation</b> = direction of shanks 0→3 in the "
+                "horizontal plane; 0° = lateral (+ML), 90° = anterior (+AP)."
+                "</div>"
+            ),
+            width=320,
         )
         self.compute_anatomy_button = pn.widgets.Button(
             name="Compute anatomical overlay 🧠", button_type="primary", width=250
@@ -1708,6 +1726,8 @@ class ChannelmapGUI(param.Parameterized):
             self.atlas_name_input,
             pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
             pn.Row(self.pitch_input, self.yaw_input, sizing_mode="stretch_width"),
+            self.shank_orientation_input,
+            self.anatomy_help,
             self.compute_anatomy_button,
             self.clear_anatomy_button,
             styles={

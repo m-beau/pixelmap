@@ -16,19 +16,22 @@ Conventions used throughout this module:
   is to the right of the midline; DV is the depth axis, + meaning ventral
   (so going dorsal/up = decreasing DV).
 
-* **Pose**:
+* **Pose** — three independent angles around fixed atlas axes plus a spin
+  around the probe's own long axis:
 
   * ``tip_atlas`` — atlas position of the shank-0 lowest electrode.
-  * ``yaw_deg`` — rotation about the DV (vertical) axis. ``0`` orients the
-    shank-line along +ML, ``90`` along +AP, etc.
-  * ``pitch_deg`` — tilt about the rotated probe-x axis. ``0`` is vertical
-    (probe pointing straight down into the brain). Positive pitch tips the
-    *top* of the probe toward +AP (anterior), so the probe leans forward.
+  * ``pitch_deg`` — *AP tilt*. Rotation around the world ML axis. ``0`` is
+    vertical; positive tips the top of the probe forward (+AP).
+  * ``yaw_deg`` — *ML tilt*. Rotation around the world AP axis. ``0`` is
+    vertical; positive tips the top of the probe to the right (+ML).
+  * ``shank_orientation_deg`` — *shank line direction*. Rotation of the
+    shank line around the probe's own long axis. ``0`` = shanks along +ML
+    (the "side-on" insertion), ``90`` = along +AP (anterior), ``180`` =
+    along -ML, ``270`` = along -AP. Only matters for multi-shank probes.
 
-Two angles (yaw + pitch) are sufficient for the vast majority of
-Neuropixels insertions. Roll (rotation of the probe about its own long
-axis) is intentionally omitted in v1 — it would shift electrode positions
-by at most the probe thickness, which is well below the atlas resolution.
+Order of composition: spin (in the probe's local frame) → pitch → yaw, so
+that pitch and yaw remain the literal AP/ML tilts of the stereotax arm
+regardless of how the shank line is oriented around the probe shaft.
 """
 
 from __future__ import annotations
@@ -36,11 +39,32 @@ from __future__ import annotations
 import numpy as np
 
 
+def _R_pitch(pitch_rad: float) -> np.ndarray:
+    """AP tilt — rotation around world ML axis. ``probe-y`` rotates -DV → +AP."""
+    cp, sp = np.cos(pitch_rad), np.sin(pitch_rad)
+    return np.array([
+        [cp, 0.0, -sp],
+        [0.0, 1.0, 0.0],
+        [sp, 0.0,  cp],
+    ])
+
+
+def _R_yaw(yaw_rad: float) -> np.ndarray:
+    """ML tilt — rotation around world AP axis. ``probe-y`` rotates -DV → +ML."""
+    cy, sy = np.cos(yaw_rad), np.sin(yaw_rad)
+    return np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, cy, -sy],
+        [0.0, sy,  cy],
+    ])
+
+
 def probe_to_atlas(
     electrode_xy: np.ndarray,
     tip_atlas: np.ndarray | tuple[float, float, float],
     pitch_deg: float = 0.0,
     yaw_deg: float = 0.0,
+    shank_orientation_deg: float = 0.0,
 ) -> np.ndarray:
     """Map probe-local electrode positions to atlas coordinates.
 
@@ -48,8 +72,11 @@ def probe_to_atlas(
         electrode_xy: shape ``(N, 2)`` array of probe-local ``(xp, yp)`` in µm.
         tip_atlas: length-3 ``(AP, ML, DV)`` position of the shank-0 lowest
             electrode in atlas µm.
-        pitch_deg: pitch angle in degrees (see module docstring).
-        yaw_deg: yaw angle in degrees (see module docstring).
+        pitch_deg: AP tilt in degrees (see module docstring).
+        yaw_deg: ML tilt in degrees (see module docstring).
+        shank_orientation_deg: shank line direction in degrees (see module
+            docstring). At ``0``, +xp points along atlas +ML; at ``90``,
+            +xp points along atlas +AP.
 
     Returns:
         ``(N, 3)`` array of atlas ``(AP, ML, DV)`` positions in µm.
@@ -59,23 +86,23 @@ def probe_to_atlas(
         raise ValueError(f"electrode_xy must be (N, 2); got {electrode_xy.shape}")
     tip = np.asarray(tip_atlas, dtype=float).reshape(3)
 
-    yaw = np.deg2rad(yaw_deg)
     pitch = np.deg2rad(pitch_deg)
+    yaw = np.deg2rad(yaw_deg)
+    spin = np.deg2rad(shank_orientation_deg)
 
-    # Probe-x axis in atlas frame (yaw rotation, stays in the horizontal plane).
-    #   yaw = 0 → +ML; yaw = 90° → +AP.
-    probe_x = np.array([np.sin(yaw), np.cos(yaw), 0.0])
+    # Probe-local axes before any tilt:
+    #   probe-y points from the tip up the shank → -DV (a vertical probe).
+    #   probe-x lies along the shank line. Spin rotates it around probe-y, with
+    #     0° giving +ML and +90° giving +AP (rotation is in the horizontal
+    #     plane of the un-tilted probe).
+    probe_y_local = np.array([0.0, 0.0, -1.0])
+    probe_x_local = np.array([np.sin(spin), np.cos(spin), 0.0])
 
-    # Probe-y axis: starts as -DV (vertical, going dorsal from the tip), then
-    # pitch tilts it in the AP-DV plane around the (already-yawed) probe-x axis.
-    # The "horizontal direction perpendicular to probe-x" is the axis we tilt
-    # toward at +pitch — by convention pointing forward in atlas-AP at yaw=0.
-    horizontal_forward = np.array([np.cos(yaw), -np.sin(yaw), 0.0])
-    probe_y = np.array([
-        np.sin(pitch) * horizontal_forward[0],
-        np.sin(pitch) * horizontal_forward[1],
-        -np.cos(pitch),
-    ])
+    # World-axis tilts (pitch around world ML; yaw around world AP). Order:
+    # pitch first, then yaw — this keeps pitch acting purely as AP tilt.
+    R = _R_yaw(yaw) @ _R_pitch(pitch)
+    probe_x = R @ probe_x_local
+    probe_y = R @ probe_y_local
 
     displacements = (
         np.outer(electrode_xy[:, 0], probe_x)
