@@ -134,7 +134,9 @@ def orientation_code(name: str = _DEFAULT_ATLAS) -> str:
 # * allen_mouse_*: bregma, DV "squish" and nose-up tilt as baked into the
 #   Neuropixels Trajectory Explorer (Peters), which encodes the cortex-lab/IBL
 #   bregma estimate and the "Toronto MRI" scaling. bregma voxel [ML,AP,DV] =
-#   [570.5, 520, 44] @10µm; DV scale 0.885; AP tilt 5°.
+#   [570.5, 520, 44] @10µm; DV squish 0.885 (AP/ML default to 1.0 — no trusted
+#   estimate); AP tilt 15° (~total disagreement with Franklin & Paxinos per
+#   AtlasScaling.md, vs the IBL ~5° estimate).
 # * whs_sd_rat: bregma is *defined* by the Waxholm atlas (Papp et al. 2014,
 #   NIfTI voxel [653, 266, 440]); converted into brainglobe's reoriented frame.
 #   No squish/tilt — WHS is already stereotaxically aligned.
@@ -142,8 +144,14 @@ def orientation_code(name: str = _DEFAULT_ATLAS) -> str:
 # bregma_um is (AP, ML, DV) µm in the canonical asr frame; atlas DV =
 # real DV / dv_squish; tilt_deg is nose-up rotation about the ML axis.
 _ATLAS_REFERENCE = {
-    "allen_mouse": {"bregma_um": (5200.0, 5705.0, 440.0), "dv_squish": 0.885, "tilt_deg": 5.0},
-    "whs_sd_rat": {"bregma_um": (14469.0, 9594.0, 2808.0), "dv_squish": 1.0, "tilt_deg": 0.0},
+    "allen_mouse": {
+        "bregma_um": (5200.0, 5705.0, 440.0),
+        "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 0.885, "tilt_deg": 15.0,
+    },
+    "whs_sd_rat": {
+        "bregma_um": (14469.0, 9594.0, 2808.0),
+        "ap_squish": 1.0, "ml_squish": 1.0, "dv_squish": 1.0, "tilt_deg": 0.0,
+    },
 }
 
 

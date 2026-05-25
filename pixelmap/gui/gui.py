@@ -1016,16 +1016,26 @@ class ChannelmapGUI(param.Parameterized):
         # The atlas is now downloaded, so the origin corner can be shown.
         self._update_anatomy_origin_note()
 
-        # Show the bregma estimate as a black dot, but only for atlases that
-        # have one (and using the current, possibly-edited, bregma values).
+        # Bregma dot whenever an estimate exists or we're in bregma mode (using
+        # the current, possibly-edited, values). DV-squish + tilt warp the brain
+        # image only in bregma mode (where the squish/tilt inputs are live).
         atlas_name = str(self.atlas_name_input.value).strip()
+        bregma_mode = bool(self.bregma_relative_toggle.value)
+        has_estimate = anatomy_atlas.reference_params(atlas_name) is not None
         bregma_um = None
-        if anatomy_atlas.reference_params(atlas_name) is not None:
+        ap_squish = ml_squish = dv_squish = 1.0
+        tilt_deg = 0.0
+        if bregma_mode or has_estimate:
             bregma_um = (
                 float(self.bregma_ap_input.value),
                 float(self.bregma_ml_input.value),
                 float(self.bregma_dv_input.value),
             )
+        if bregma_mode:
+            ap_squish = float(self.ap_squish_input.value) or 1.0
+            ml_squish = float(self.ml_squish_input.value) or 1.0
+            dv_squish = float(self.dv_squish_input.value) or 1.0
+            tilt_deg = float(self.tilt_input.value)
 
         try:
             self.anatomy_locator.object = render_locator(
@@ -1037,6 +1047,10 @@ class ChannelmapGUI(param.Parameterized):
                 shank_positions=probe_xs,
                 y_range=(0.0, y_max),
                 bregma_um=bregma_um,
+                ap_squish=ap_squish,
+                ml_squish=ml_squish,
+                dv_squish=dv_squish,
+                tilt_deg=tilt_deg,
             )
         except Exception as exc:  # a failed locator shouldn't sink the overlay
             print(f"Locator render failed: {exc}")
@@ -1111,6 +1125,12 @@ class ChannelmapGUI(param.Parameterized):
             "</div>"
         )
 
+    def _on_atlas_change(self, *events):
+        """Atlas changed: reset bregma/squish/tilt first, then tip + note."""
+        self._update_reference_params(*events)
+        self._update_tip_to_atlas_center(*events)
+        self._update_anatomy_origin_note(*events)
+
     def _update_anatomy_origin_note(self, *events):
         """Refresh the coordinate note when the atlas selection changes."""
         self.anatomy_coord_note.object = self._anatomy_coord_note_html()
@@ -1152,6 +1172,8 @@ class ChannelmapGUI(param.Parameterized):
         )
         if not self.bregma_relative_toggle.value:
             return raw
+        # Translation only: DV-squish and tilt are applied as a *visual* warp of
+        # the atlas image in the locator, not by relocating the tip in CCF.
         return bregma_to_atlas_um(
             raw,
             bregma_um=(
@@ -1159,27 +1181,35 @@ class ChannelmapGUI(param.Parameterized):
                 float(self.bregma_ml_input.value),
                 float(self.bregma_dv_input.value),
             ),
-            dv_squish=float(self.dv_squish_input.value) or 1.0,
-            tilt_deg=float(self.tilt_input.value),
+            dv_squish=1.0,
+            tilt_deg=0.0,
         )
 
     def _update_reference_params(self, *events):
-        """Prefill bregma / DV-squish / tilt with the selected atlas's estimates."""
+        """Reset bregma / per-axis squish / tilt on atlas change.
+
+        Use the atlas's published estimate if there is one; otherwise reset
+        bregma + tilt to 0 and squish to 1.0 (no squash) for the user to fill in.
+        """
         ref = anatomy_atlas.reference_params(self.atlas_name_input.value)
         if ref is None:
-            return
+            ref = {"bregma_um": (0.0, 0.0, 0.0), "ap_squish": 1.0,
+                   "ml_squish": 1.0, "dv_squish": 1.0, "tilt_deg": 0.0}
         b_ap, b_ml, b_dv = ref["bregma_um"]
         self.bregma_ap_input.value = round(b_ap, 1)
         self.bregma_ml_input.value = round(b_ml, 1)
         self.bregma_dv_input.value = round(b_dv, 1)
+        self.ap_squish_input.value = ref["ap_squish"]
+        self.ml_squish_input.value = ref["ml_squish"]
         self.dv_squish_input.value = ref["dv_squish"]
         self.tilt_input.value = ref["tilt_deg"]
 
     def _on_bregma_toggle(self, *events):
         """Swap the tip defaults and enable squish/tilt for bregma-relative mode."""
         on = bool(self.bregma_relative_toggle.value)
-        self.dv_squish_input.disabled = not on
-        self.tilt_input.disabled = not on
+        for w in (self.dv_squish_input, self.ap_squish_input,
+                  self.ml_squish_input, self.tilt_input):
+            w.disabled = not on
         if on:
             # Sensible bregma-relative default: at bregma, 4 mm deep.
             self.tip_ap_input.value = 0.0
@@ -1704,7 +1734,8 @@ class ChannelmapGUI(param.Parameterized):
         # Optional bregma-relative coordinate mode + per-atlas calibration,
         # prefilled with published estimates (see anatomy.atlas.reference_params).
         ref = anatomy_atlas.reference_params(atlas_default) or {
-            "bregma_um": (0.0, 0.0, 0.0), "dv_squish": 1.0, "tilt_deg": 0.0,
+            "bregma_um": (0.0, 0.0, 0.0), "ap_squish": 1.0, "ml_squish": 1.0,
+            "dv_squish": 1.0, "tilt_deg": 0.0,
         }
         b_ap, b_ml, b_dv = ref["bregma_um"]
         self.bregma_relative_toggle = pn.widgets.Checkbox(
@@ -1719,13 +1750,19 @@ class ChannelmapGUI(param.Parameterized):
         self.bregma_dv_input = pn.widgets.FloatInput(
             name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, width=95
         )
-        # DV squish + tilt are part of the bregma→CCF conversion, so they only
-        # do anything in bregma mode — disabled until the toggle is on.
+        # Per-axis squish + AP tilt warp the atlas image in the locator; they
+        # only do anything in bregma mode — disabled until the toggle is on.
         self.dv_squish_input = pn.widgets.FloatInput(
-            name="DV squish", value=ref["dv_squish"], step=0.005, width=110, disabled=True
+            name="DV squish", value=ref["dv_squish"], step=0.005, width=85, disabled=True
+        )
+        self.ap_squish_input = pn.widgets.FloatInput(
+            name="AP squish", value=ref["ap_squish"], step=0.005, width=85, disabled=True
+        )
+        self.ml_squish_input = pn.widgets.FloatInput(
+            name="ML squish", value=ref["ml_squish"], step=0.005, width=85, disabled=True
         )
         self.tilt_input = pn.widgets.FloatInput(
-            name="Atlas tilt (deg)", value=ref["tilt_deg"], step=0.5, width=110, disabled=True
+            name="AP tilt (°)", value=ref["tilt_deg"], step=0.5, width=85, disabled=True
         )
         self.bregma_estimate_header = pn.pane.HTML(
             (
@@ -1740,9 +1777,7 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_coord_note = pn.pane.HTML(
             self._anatomy_coord_note_html(), width=320
         )
-        self.atlas_name_input.param.watch(self._update_anatomy_origin_note, "value")
-        self.atlas_name_input.param.watch(self._update_tip_to_atlas_center, "value")
-        self.atlas_name_input.param.watch(self._update_reference_params, "value")
+        self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
 
         # Once an overlay exists, live-update it (bands + slices) whenever any
@@ -1752,7 +1787,8 @@ class ChannelmapGUI(param.Parameterized):
         for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,
                    self.pitch_input, self.yaw_input, self.shank_orientation_input,
                    self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input,
-                   self.dv_squish_input, self.tilt_input, self.bregma_relative_toggle,
+                   self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                   self.tilt_input, self.bregma_relative_toggle,
                    self.atlas_name_input):
             _w.param.watch(self._recompute_anatomy_if_active, "value")
         self.anatomy_help = pn.pane.HTML(
@@ -1958,7 +1994,8 @@ class ChannelmapGUI(param.Parameterized):
             self.bregma_estimate_header,
             self.bregma_relative_toggle,
             pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
-            pn.Row(self.dv_squish_input, self.tilt_input, sizing_mode="stretch_width"),
+            pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                   self.tilt_input, sizing_mode="stretch_width"),
             self.compute_anatomy_button,
             self.clear_anatomy_button,
             styles={

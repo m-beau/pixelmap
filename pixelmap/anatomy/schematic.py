@@ -19,6 +19,7 @@ import functools
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from matplotlib.transforms import Affine2D
 
 from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
 from pixelmap.anatomy.transform import probe_to_atlas
@@ -74,26 +75,37 @@ def _outline_rgba(label_img: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title):
+def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title, warp=None):
     """Draw one slice (colored regions + outlines), or a silhouette fallback.
 
     ``label_img`` and ``fallback_mask`` are shaped ``(len(y_um), len(x_um))``;
-    y is DV in both views. The y-axis is oriented dorsal-up.
+    y is DV in both views. The y-axis is oriented dorsal-up. ``warp``, if given,
+    is ``(scale_x, scale_y, rotate_deg, pivot_x, pivot_y)`` applied to the *brain
+    image only* (not the probe) so the atlas visibly squashes/tilts about bregma.
     """
     # extent=(left, right, bottom, top); top = y_um[0] (DV 0) puts dorsal up.
     extent = (float(x_um[0]), float(x_um[-1]), float(y_um[-1]), float(y_um[0]))
+    artists = []
     if label_img.any():
-        ax.imshow(_region_fill_rgba(label_img, atlas), extent=extent,
-                  origin="upper", aspect="equal", interpolation="nearest", zorder=1)
-        ax.imshow(_outline_rgba(label_img), extent=extent,
-                  origin="upper", aspect="equal", interpolation="nearest", zorder=2)
+        artists.append(ax.imshow(_region_fill_rgba(label_img, atlas), extent=extent,
+                       origin="upper", aspect="equal", interpolation="nearest", zorder=1))
+        artists.append(ax.imshow(_outline_rgba(label_img), extent=extent,
+                       origin="upper", aspect="equal", interpolation="nearest", zorder=2))
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
     else:
         # Tip is outside the volume here — show the whole-brain silhouette.
-        ax.contourf(x_um, y_um, fallback_mask, levels=[0.5, 1.5], colors=[_FILL])
-        ax.contour(x_um, y_um, fallback_mask, levels=[0.5], colors=[_EDGE], linewidths=0.6)
+        artists.append(ax.contourf(x_um, y_um, fallback_mask, levels=[0.5, 1.5], colors=[_FILL]))
+        artists.append(ax.contour(x_um, y_um, fallback_mask, levels=[0.5], colors=[_EDGE], linewidths=0.6))
         ax.invert_yaxis()
+
+    if warp is not None:
+        scale_x, scale_y, rotate_deg, px, py = warp
+        if scale_x != 1.0 or scale_y != 1.0 or rotate_deg != 0.0:
+            tr = (Affine2D().translate(-px, -py).scale(scale_x, scale_y)
+                  .rotate_deg(rotate_deg).translate(px, py)) + ax.transData
+            for a in artists:
+                a.set_transform(tr)
     ax.set_title(title, fontsize=8)
 
 
@@ -107,14 +119,23 @@ def render_locator(
     shank_positions: dict[int, float],
     y_range: tuple[float, float],
     bregma_um: tuple[float, float, float] | None = None,
+    ap_squish: float = 1.0,
+    ml_squish: float = 1.0,
+    dv_squish: float = 1.0,
+    tilt_deg: float = 0.0,
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
 
     Pose args mirror
     :func:`pixelmap.anatomy.visualization.compute_region_bands`. Slices are
     taken at the tip's AP (coronal), ML (sagittal) and DV (horizontal).
-    Returns a bare matplotlib :class:`~matplotlib.figure.Figure` for a Panel
-    ``Matplotlib`` pane (no pyplot global state).
+
+    ``bregma_um`` draws a black bregma dot. ``ap_squish`` / ``ml_squish`` /
+    ``dv_squish`` and ``tilt_deg`` warp the *brain image* about bregma (per-axis
+    squash + nose-up AP tilt) so the atlas is shown in its stereotaxic-corrected
+    shape with the probe straight. Returns a bare matplotlib
+    :class:`~matplotlib.figure.Figure` for a Panel ``Matplotlib`` pane (no
+    pyplot global state).
     """
     atlas, ann, res = _atlas_data(atlas_name)
     n_ap, n_dv, n_ml = ann.shape
@@ -148,17 +169,27 @@ def render_locator(
     ax_cor = fig.add_subplot(2, 2, 2)
     ax_hor = fig.add_subplot(2, 2, 3)
 
+    # Brain-image warp about bregma: per-axis squash on each panel's two
+    # in-plane axes + nose-up AP tilt (sagittal only; tilt about ML is
+    # out-of-plane for the coronal/horizontal views). warp = (sx, sy, deg, px, py).
+    warp_sag = warp_cor = warp_hor = None
+    if bregma_um is not None:
+        b_ap, b_ml, b_dv = bregma_um
+        warp_sag = (ap_squish, dv_squish, tilt_deg, b_ap, b_dv)  # x=AP, y=DV
+        warp_cor = (ml_squish, dv_squish, 0.0, b_ml, b_dv)        # x=ML, y=DV
+        warp_hor = (ml_squish, ap_squish, 0.0, b_ml, b_ap)        # x=ML, y=AP
+
     # Labels report the coordinate along each panel's visible horizontal axis:
     # AP on the sagittal view, ML on the coronal view.
     _draw_view(ax_sag, ann[:, :, ml_idx].T, ap_um, dv_um, atlas,
                fallback_mask=inside.any(axis=2).T,
-               title=f"Sagittal · AP {ap_um[ap_idx]:.0f} µm")
+               title=f"Sagittal · AP {ap_um[ap_idx]:.0f} µm", warp=warp_sag)
     _draw_view(ax_cor, ann[ap_idx, :, :], ml_um, dv_um, atlas,
                fallback_mask=inside.any(axis=0),
-               title=f"Coronal · ML {ml_um[ml_idx]:.0f} µm")
+               title=f"Coronal · ML {ml_um[ml_idx]:.0f} µm", warp=warp_cor)
     _draw_view(ax_hor, ann[:, dv_idx, :], ml_um, ap_um, atlas,
                fallback_mask=inside.any(axis=1),
-               title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm")
+               title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm", warp=warp_hor)
 
     # Probe (red) + bregma estimate (black) per view: (axis, x-col, y-col)
     # indexing into (AP, ML, DV).

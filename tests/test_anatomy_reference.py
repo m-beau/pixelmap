@@ -15,8 +15,10 @@ from pixelmap.anatomy.transform import bregma_to_atlas_um
 def test_reference_params_matches_by_prefix():
     allen = reference_params("allen_mouse_10um")
     assert allen["bregma_um"] == (5200.0, 5705.0, 440.0)
+    assert allen["ap_squish"] == 1.0  # no trusted estimate → default 1
+    assert allen["ml_squish"] == 1.0
     assert allen["dv_squish"] == 0.885
-    assert allen["tilt_deg"] == 5.0
+    assert allen["tilt_deg"] == 15.0
     # every allen_mouse_* variant resolves to the same entry
     assert reference_params("allen_mouse_bluebrain_barrels_25um") is not None
     rat = reference_params("whs_sd_rat_39um")
