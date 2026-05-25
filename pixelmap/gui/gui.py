@@ -1711,25 +1711,25 @@ class ChannelmapGUI(param.Parameterized):
             self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
         )
         self.tip_ap_input = pn.widgets.FloatInput(
-            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, width=95
+            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, width=95, margin=(5, 2)
         )
         self.tip_ml_input = pn.widgets.FloatInput(
-            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, width=95
+            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, width=95, margin=(5, 2)
         )
         self.tip_dv_input = pn.widgets.FloatInput(
-            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, width=95
+            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, width=95, margin=(5, 2)
         )
         self.pitch_input = pn.widgets.FloatInput(
             name="Pitch (deg)", value=0.0, step=1.0,
-            start=-90.0, end=90.0, width=105,
+            start=-90.0, end=90.0, width=105, margin=(5, 2),
         )
         self.yaw_input = pn.widgets.FloatInput(
             name="Yaw (deg)", value=0.0, step=1.0,
-            start=-90.0, end=90.0, width=105,
+            start=-90.0, end=90.0, width=105, margin=(5, 2),
         )
         self.shank_orientation_input = pn.widgets.FloatInput(
             name="Shank ori (deg)", value=0.0, step=1.0,
-            start=-180.0, end=360.0, width=110,
+            start=-180.0, end=360.0, width=108, margin=(5, 2),
         )
         # Optional bregma-relative coordinate mode + per-atlas calibration,
         # prefilled with published estimates (see anatomy.atlas.reference_params).
@@ -1742,27 +1742,27 @@ class ChannelmapGUI(param.Parameterized):
             name="Tip relative to bregma", value=False, width=300, margin=(6, 0, 0, 10),
         )
         self.bregma_ap_input = pn.widgets.FloatInput(
-            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, width=95
+            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, width=95, margin=(5, 2)
         )
         self.bregma_ml_input = pn.widgets.FloatInput(
-            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, width=95
+            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, width=95, margin=(5, 2)
         )
         self.bregma_dv_input = pn.widgets.FloatInput(
-            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, width=95
+            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, width=95, margin=(5, 2)
         )
         # Per-axis squish + AP tilt warp the atlas image in the locator; they
         # only do anything in bregma mode — disabled until the toggle is on.
         self.dv_squish_input = pn.widgets.FloatInput(
-            name="DV squish", value=ref["dv_squish"], step=0.005, width=85, disabled=True
+            name="DV squish", value=ref["dv_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
         )
         self.ap_squish_input = pn.widgets.FloatInput(
-            name="AP squish", value=ref["ap_squish"], step=0.005, width=85, disabled=True
+            name="AP squish", value=ref["ap_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
         )
         self.ml_squish_input = pn.widgets.FloatInput(
-            name="ML squish", value=ref["ml_squish"], step=0.005, width=85, disabled=True
+            name="ML squish", value=ref["ml_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
         )
         self.tilt_input = pn.widgets.FloatInput(
-            name="AP tilt (°)", value=ref["tilt_deg"], step=0.5, width=85, disabled=True
+            name="AP tilt°", value=ref["tilt_deg"], step=0.5, width=78, margin=(5, 2), disabled=True
         )
         self.bregma_estimate_header = pn.pane.HTML(
             (
@@ -1984,20 +1984,24 @@ class ChannelmapGUI(param.Parameterized):
             self.imro_file_loader,
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
-            pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 10)),
-            self.anatomy_install_hint,
-            self.atlas_name_input,
-            self.anatomy_coord_note,
-            pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
-            pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
-            self.anatomy_help,
-            self.bregma_estimate_header,
-            self.bregma_relative_toggle,
-            pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
-            pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
-                   self.tilt_input, sizing_mode="stretch_width"),
-            self.compute_anatomy_button,
-            self.clear_anatomy_button,
+            pn.Column(
+                pn.pane.Markdown("## Anatomical overlay", margin=(-5, 0, 0, 10)),
+                self.anatomy_install_hint,
+                self.atlas_name_input,
+                self.anatomy_coord_note,
+                pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
+                self.anatomy_help,
+                self.bregma_estimate_header,
+                self.bregma_relative_toggle,
+                pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                       self.tilt_input, sizing_mode="stretch_width"),
+                self.compute_anatomy_button,
+                self.clear_anatomy_button,
+                styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
+                margin=(10, 5, 0, 5),
+            ),
             styles={
                 "position": "fixed",
                 "top": "0px",
