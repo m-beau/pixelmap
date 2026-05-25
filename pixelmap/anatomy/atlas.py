@@ -207,6 +207,54 @@ def reference_params(name: str = _DEFAULT_ATLAS) -> dict | None:
     return None
 
 
+def landmark_policy(name: str) -> str | None:
+    """The species' conventional stereotaxic origin landmark, or ``None``.
+
+    * ``"anterior commissure"`` — human (AC-PC) and fish (zebrafish / cavefish
+      atlases use the AC as their zero point). Derivable from the annotation.
+    * ``"bregma"`` — rodents (mouse / rat / vole / mole-rat). A *skull* point we
+      can't locate from the annotation; absent a hardcoded value, user defines.
+    * ``"interaural"`` — cat (Horsley-Clarke interaural zero, per Snider-Niemer /
+      Reinoso-Suárez; bregma is an alternative). External point → user defines.
+    * ``None`` — axolotl / cephalopod / spinal cord: no established stereotaxic
+      landmark, so the user defines an origin (coordinates are atlas-defined).
+
+    Cheap — just a name check.
+    """
+    n = str(name).lower()
+    if n.startswith("allen_human") or any(k in n for k in ("zfish", "zebrafish", "cavefish")):
+        return "anterior commissure"
+    if n.startswith("csl_cat"):
+        return "interaural"
+    if any(k in n for k in ("mouse", "rat", "vole")):
+        return "bregma"
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
+    """Origin at the anterior-commissure decussation, from the annotation.
+
+    Returns canonical ``(AP, ML, DV)`` µm, or ``None`` if the atlas delineates
+    no anterior commissure. Same recipe used (and validated) for the WHS rat:
+    the AC's midline-crossing centroid. Requires the atlas (downloads if absent).
+    """
+    atlas = get_atlas(name)
+    ac_ids = [int(s["id"]) for s in atlas.structures.values()
+              if "anterior" in s["name"].lower() and "commis" in s["name"].lower()]
+    if not ac_ids:
+        return None
+    ann, res = canonical_annotation(name)  # (AP, DV, ML)
+    ap, dv, ml = np.where(np.isin(ann, ac_ids))
+    if ap.size == 0:
+        return None
+    midline = float(ml.mean())                 # AC ~symmetric → centroid ML = midline
+    near = np.abs(ml - midline) < 4             # voxels near midline = decussation
+    return (float(ap[near].mean() * res[0]),
+            midline * res[2],
+            float(dv[near].mean() * res[1]))
+
+
 # Which anatomical axis each orientation letter belongs to, and the letter that
 # marks the canonical (AP, DV, ML) origin: AP from anterior, DV from the dorsal
 # (superior) surface, ML from the right. pixelmap works in this fixed frame.

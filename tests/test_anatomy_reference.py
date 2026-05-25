@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pixelmap.anatomy.atlas import reference_params
+from pixelmap.anatomy.atlas import landmark_policy, reference_params
 from pixelmap.anatomy.transform import bregma_to_atlas_um
 
 
@@ -45,6 +45,23 @@ def test_reference_params_matches_by_prefix():
                  "demba_allen_seg_dev_mouse_p14_25um", "ccfv2_dev_mouse_25um",
                  "kim_dev_mouse_idisco_10um"]:
         assert reference_params(name) is None
+
+
+def test_landmark_policy_names_the_species_landmark():
+    # human + fish use the anterior commissure (AC-PC / fish-atlas zero)
+    for name in ["allen_human_500um", "azba_zfish_4um", "mpin_zfish_1um",
+                 "sju_cavefish_2um"]:
+        assert landmark_policy(name) == "anterior commissure"
+    # rodents (incl. non-Allen mice, vole, mole-rat) → bregma
+    for name in ["osten_mouse_25um", "princeton_mouse_20um", "perens_lsfm_mouse_20um",
+                 "australian_mouse_15um", "prairie_vole_25um", "african_molerat_20um",
+                 "swc_female_rat_50um"]:
+        assert landmark_policy(name) == "bregma"
+    # cat → Horsley-Clarke interaural zero
+    assert landmark_policy("csl_cat_500um") == "interaural"
+    # no established stereotaxic landmark → user defines an origin
+    for name in ["unam_axolotl_40um", "columbia_cuttlefish_50um", "allen_cord_20um"]:
+        assert landmark_policy(name) is None
 
 
 def test_origin_maps_to_bregma():

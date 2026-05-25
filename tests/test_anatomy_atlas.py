@@ -41,10 +41,12 @@ def _reset_atlas_cache():
     """Make sure no real atlas leaks across tests via the lru_cache."""
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     yield
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
 
 
@@ -170,6 +172,32 @@ class TestOrientation:
         expected = np.flip(np.transpose(native, (2, 0, 1)), axis=2)  # AP from axis2, flip ML
         assert arr.shape == (4, 2, 3)
         np.testing.assert_array_equal(arr, expected)
+
+    def test_derive_origin_from_ac_finds_midline_crossing(self, monkeypatch):
+        # AC at AP voxel 2, DV voxel 2, ML voxels 3-5 (midline 4) in an asr volume.
+        ann = np.zeros((6, 4, 8), dtype=np.int32)
+        ann[2, 2, 3:6] = 5
+        structs = {5: {"id": 5, "acronym": "ac", "name": "anterior commissure",
+                       "rgb_triplet": [1, 2, 3]}}
+        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
+                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("asr", ann, structs)))
+        atlas_module.get_atlas.cache_clear()
+        atlas_module.canonical_annotation.cache_clear()
+        atlas_module.derive_origin_from_ac.cache_clear()
+        # (AP, ML, DV) µm = (2*25, 4*25, 2*25)
+        assert atlas_module.derive_origin_from_ac("x") == (50.0, 100.0, 50.0)
+
+    def test_derive_origin_from_ac_none_without_ac(self, monkeypatch):
+        ann = np.zeros((4, 4, 4), dtype=np.int32)
+        ann[1, 1, 1] = 9
+        structs = {9: {"id": 9, "acronym": "x", "name": "some nucleus",
+                       "rgb_triplet": [0, 0, 0]}}
+        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
+                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("asr", ann, structs)))
+        atlas_module.get_atlas.cache_clear()
+        atlas_module.canonical_annotation.cache_clear()
+        atlas_module.derive_origin_from_ac.cache_clear()
+        assert atlas_module.derive_origin_from_ac("y") is None
 
     def test_lookup_resolves_through_ap_flip(self, monkeypatch):
         # "psr" reverses AP: a marker at the native posterior pole (index 0) must

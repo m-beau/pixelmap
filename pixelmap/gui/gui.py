@@ -942,6 +942,12 @@ class ChannelmapGUI(param.Parameterized):
         plot_centers = self._shank_plot_centers()
         y_max = float(self.positions_df["y"].max())
 
+        # If the origin landmark was "pending" (AC of a not-yet-downloaded
+        # atlas), computing below downloads it — remember to fill it in after.
+        origin_was_pending = (
+            self._origin_spec(self.atlas_name_input.value)["status"] == "ac_pending"
+        )
+
         tip = self._tip_atlas_um()
 
         try:
@@ -1021,11 +1027,16 @@ class ChannelmapGUI(param.Parameterized):
         # image only in bregma mode (where the squish/tilt inputs are live).
         atlas_name = str(self.atlas_name_input.value).strip()
         bregma_mode = bool(self.bregma_relative_toggle.value)
-        has_estimate = anatomy_atlas.reference_params(atlas_name) is not None
+        # The atlas is downloaded now (bands were computed), so a previously
+        # "pending" AC landmark can be filled in (without clobbering user edits).
+        if origin_was_pending:
+            self._update_reference_params()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        has_origin = self._origin_spec(atlas_name)["status"] in ("defined", "estimate")
         bregma_um = None
         ap_squish = ml_squish = dv_squish = 1.0
         tilt_deg = 0.0
-        if bregma_mode or has_estimate:
+        if bregma_mode or has_origin:
             bregma_um = (
                 float(self.bregma_ap_input.value),
                 float(self.bregma_ml_input.value),
@@ -1118,9 +1129,8 @@ class ChannelmapGUI(param.Parameterized):
             "Tip coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
             "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
             "with AP increasing posteriorly, DV ventrally and ML from the right. "
-            "Tick <i>Tip relative to bregma</i> to enter stereotaxic coordinates "
-            "instead — the bregma / DV-squish / tilt below (prefilled with "
-            "estimates) convert them. Brainglobe defines no true bregma."
+            "Tick the <i>Tip relative to …</i> toggle below to enter coordinates "
+            "from the atlas's landmark instead (the values below convert them)."
             f"<br>{native_line}"
             "</div>"
         )
@@ -1130,26 +1140,62 @@ class ChannelmapGUI(param.Parameterized):
         self._update_reference_params(*events)
         self._update_tip_to_atlas_center(*events)
         self._update_anatomy_origin_note(*events)
+        self._update_landmark_labels()
         self.bregma_estimate_header.object = self._bregma_header_html()
+
+    def _update_landmark_labels(self):
+        """Rename the toggle + coordinate fields to the atlas's landmark.
+
+        e.g. "Tip relative to bregma" for rodents, "...to anterior commissure"
+        for other vertebrates.
+        """
+        lm = self._origin_spec(self.atlas_name_input.value)["landmark"]
+        if lm is None:
+            toggle, prefix = "origin", "Origin"
+        elif lm == "anterior commissure":
+            toggle, prefix = "anterior commissure", "AC"
+        else:  # bregma, interaural, …
+            toggle, prefix = lm, lm.capitalize()
+        self.bregma_relative_toggle.name = f"Tip relative to {toggle}"
+        self.bregma_ap_input.name = f"{prefix} AP (µm)"
+        self.bregma_ml_input.name = f"{prefix} ML (µm)"
+        self.bregma_dv_input.name = f"{prefix} DV (µm)"
 
     def _bregma_header_html(self) -> str:
         """Banner above the bregma fields: explain the estimate, or prompt for one."""
-        ref = anatomy_atlas.reference_params(self.atlas_name_input.value)
-        if ref is None:
-            icon = "⚠"
-            body = ("<b>No bregma estimate</b> for this atlas — set the bregma "
-                    "coordinate (and any squish / tilt) yourself below.")
-            bg, border, color = "#fdecec", "#e3a5a5", "#8a3a3a"  # red: action needed
-        elif ref.get("defined"):
-            icon = "✓"
-            body = (f"<b>Bregma (defined, not an estimate)</b> — from "
-                    f"{ref['source']}. Edit only if needed.")
-            bg, border, color = "#e7f6e7", "#9ccb9c", "#2e6b2e"  # green: real value
-        else:
-            icon = "⚠"
-            body = (f"<b>Bregma estimate (rough)</b> — from {ref['source']}. "
-                    "Edit if you have better values.")
-            bg, border, color = "#fff6df", "#f0d27a", "#8a5a00"  # amber: estimate
+        spec = self._origin_spec(self.atlas_name_input.value)
+        status, lm, src = spec["status"], spec["landmark"], spec.get("source", "")
+        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")
+        AMBER = ("#fff6df", "#f0d27a", "#8a5a00")
+        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")
+        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")
+        if status == "defined" and lm == "bregma":  # WHS rat
+            icon, palette = "✓", GREEN
+            body = (f"<b>Bregma (defined, not an estimate)</b> — from {src}. "
+                    "Edit only if needed.")
+        elif status == "defined":  # AC is the species' established origin (human)
+            icon, palette = "✓", GREEN
+            body = (f"<b>Origin = {lm} (defined)</b> — {src}; the established "
+                    "reference for this species. Edit only if needed.")
+        elif status == "estimate":  # Allen-family mouse
+            icon, palette = "⚠", AMBER
+            body = (f"<b>Bregma estimate (rough)</b> — from {src}. Edit if you "
+                    "have better values.")
+        elif status == "ac_pending":
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>Origin = {lm}</b> — located from the atlas on the first "
+                    "<i>Compute</i>.")
+        elif status == "landmark_undefined":  # rodent/cat: bregma, but no value here
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>{lm.capitalize()}</b> is the standard origin for this "
+                    f"species, but isn't located in this atlas — set {lm} in the "
+                    "fields below.")
+        else:  # user_origin — no skull landmark for this species
+            icon, palette = "⚠", RED
+            body = ("<b>No skull-bregma landmark</b> for this species — "
+                    "coordinates are atlas-defined; set an <b>origin</b> (0,0,0) "
+                    "yourself below if you want relative coordinates.")
+        bg, border, color = palette
         return (
             f'<div style="font-size: 11px; color: {color}; background: {bg}; '
             f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
@@ -1210,24 +1256,60 @@ class ChannelmapGUI(param.Parameterized):
             tilt_deg=0.0,
         )
 
-    def _update_reference_params(self, *events):
-        """Reset bregma / per-axis squish / tilt on atlas change.
+    def _origin_spec(self, name) -> dict:
+        """Resolve the recommended coordinate origin + banner status for an atlas.
 
-        Use the atlas's published estimate if there is one; otherwise reset
-        bregma + tilt to 0 and squish to 1.0 (no squash) for the user to fill in.
+        Rodents use a hardcoded bregma; other vertebrates fall back to the
+        anterior commissure (derived from the annotation when downloaded);
+        invertebrate / spinal atlases have no point landmark. Cheap unless it
+        needs to derive the AC, which only happens for a downloaded atlas.
         """
-        ref = anatomy_atlas.reference_params(self.atlas_name_input.value)
-        if ref is None:
-            ref = {"bregma_um": (0.0, 0.0, 0.0), "ap_squish": 1.0,
-                   "ml_squish": 1.0, "dv_squish": 1.0, "tilt_deg": 0.0}
-        b_ap, b_ml, b_dv = ref["bregma_um"]
+        name = str(name).strip()
+        ref = anatomy_atlas.reference_params(name)
+        if ref:
+            ref["landmark"] = "bregma"
+            ref["status"] = "defined" if ref.get("defined") else "estimate"
+            return ref
+        spec = {"bregma_um": None, "ap_squish": 1.0, "ml_squish": 1.0,
+                "dv_squish": 1.0, "tilt_deg": 0.0, "landmark": None,
+                "status": "user_origin", "source": ""}
+        landmark = anatomy_atlas.landmark_policy(name)
+        if landmark is None:
+            return spec  # no skull landmark for this species → user defines origin
+        spec["landmark"] = landmark
+        if landmark == "anterior commissure":
+            # Human (AC-PC): derive it from the annotation when downloaded.
+            if not anatomy_atlas.is_available() or not anatomy_atlas.is_downloaded(name):
+                spec["status"] = "ac_pending"
+                return spec
+            try:
+                ac = anatomy_atlas.derive_origin_from_ac(name)
+            except Exception:
+                ac = None
+            if ac is None:
+                spec["status"], spec["landmark"] = "user_origin", None
+                return spec
+            spec["bregma_um"] = ac
+            spec["status"] = "defined"
+            spec["source"] = ("the anterior-commissure decussation, computed "
+                              "from this atlas's annotation")
+            return spec
+        # landmark == "bregma" but no hardcoded value (other rodents / cat):
+        # the convention is bregma, but it's a skull point we can't locate here.
+        spec["status"] = "landmark_undefined"
+        return spec
+
+    def _update_reference_params(self, *events):
+        """Fill bregma / per-axis squish / tilt from the atlas's origin spec."""
+        spec = self._origin_spec(self.atlas_name_input.value)
+        b_ap, b_ml, b_dv = spec["bregma_um"] or (0.0, 0.0, 0.0)
         self.bregma_ap_input.value = round(b_ap, 1)
         self.bregma_ml_input.value = round(b_ml, 1)
         self.bregma_dv_input.value = round(b_dv, 1)
-        self.ap_squish_input.value = ref["ap_squish"]
-        self.ml_squish_input.value = ref["ml_squish"]
-        self.dv_squish_input.value = ref["dv_squish"]
-        self.tilt_input.value = ref["tilt_deg"]
+        self.ap_squish_input.value = spec["ap_squish"]
+        self.ml_squish_input.value = spec["ml_squish"]
+        self.dv_squish_input.value = spec["dv_squish"]
+        self.tilt_input.value = spec["tilt_deg"]
 
     def _on_bregma_toggle(self, *events):
         """Swap the tip defaults and enable squish/tilt for bregma-relative mode."""
@@ -1809,6 +1891,7 @@ class ChannelmapGUI(param.Parameterized):
                    self.tilt_input, self.bregma_relative_toggle,
                    self.atlas_name_input):
             _w.param.watch(self._recompute_anatomy_if_active, "value")
+        self._update_landmark_labels()  # name the toggle/fields for the default atlas
         self.anatomy_help = pn.pane.HTML(
             (
                 '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
