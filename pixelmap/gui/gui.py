@@ -1352,7 +1352,7 @@ class ChannelmapGUI(param.Parameterized):
             return
 
         # Deduplicate by atlas_id, preserve a stable display order.
-        seen: dict[int, "RegionBand"] = {}
+        seen = {}
         for band in bands:
             seen.setdefault(band.atlas_id, band)
 
