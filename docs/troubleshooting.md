@@ -14,7 +14,7 @@ To find your probe's subtype, check either:
 - The `~imroTbl` field in a `.meta` file saved alongside a previous recording (usually the last field in the file).
 
 :::{warning}
-SpikeGLX's probe visualizer (the probe-shaped heatmap) may not display the correct probe subtype. For example, it may show NP2014 for a 2013 probe. Always verify the subtype from the `.imro` or `.meta` file directly.
+SpikeGLX's probe visualizer (the probe-shaped heatmap display) does not display "probe types", but probe **part numbers**. Probe types are identifiers used by SpikeGLX, while probe part numbers are used by IMEC - see SpikeGLX's [IMRO table documentation](https://billkarsh.github.io/SpikeGLX/help/imroTables/#format-probe-map). As of version 2026-01-15, SpikeGLX began writing part numbers into imro headers. Prior to that, the imro header used the probe types. SpikeGLX 20260115 and later (and CatGT 5.3 and later) can read either the probe type or part number. In practice, plug your probe into SpikeGLX and verify the header value from the default `.imro` or `.meta` file generated for your probe.
 :::
 
 ## SpikeGLX IMRO editing options are greyed out

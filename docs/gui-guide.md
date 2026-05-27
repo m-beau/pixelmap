@@ -12,11 +12,11 @@ Or use the [online version](https://pixelmap.pni.princeton.edu/app) — no insta
 
 ## How It Works
 
-Neuropixels electrodes are [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's headstage. Each ADC is shared by multiple electrodes, meaning that selecting one electrode makes others unavailable. PixelMap visualizes these constraints in real time:
+Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable. PixelMap visualizes these constraints in real time:
 
-- **Red** electrodes are currently selected.
-- **Black** electrodes are unavailable because they share an ADC with a selected electrode.
-- **Available** electrodes can still be selected.
+- **Red** sites are selected for recording (connected to readout line).
+- **Black** electrodes are unavailable because they share a readout line or ADC with a selected site.
+- **Grey** sites remain available and can still be selected.
 
 ## Selection Methods
 

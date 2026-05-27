@@ -981,7 +981,7 @@ class ChannelmapGUI(param.Parameterized):
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
-            TapTool(),
+            TapTool(description="Tap to select/deselect single electrode"),
             ResetTool(),
             HoverTool(
                 tooltips=[
@@ -1353,8 +1353,8 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.HTML("""
             <div style="font-size: 13px; line-height: 1.4; text-align: justify;">
             <b>Neuropixels hardware Constraints:</b><br>
-            Neuropixels electrodes are <a href='https://www.neuropixels.org/support' target='_blank'>hardwired</a> to specific ADCs in the probe's head. When you select an electrode, others become unavailable because they share the same recording lines.
-            This GUI allows you to build a channelmap around those constraints: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines turn <b>black</b>.<br><br>
+            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
+            PixelMap visualizes these constraints in real time: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines or ADCs turn <b>black</b>.<br><br>
 
             <b>You can mix and match four selection methods:</b><br>
             • <b>Presets:</b> Pre-configured channelmaps that respect wiring constraints<br>
