@@ -65,6 +65,9 @@ docs = [
     "myst-parser",
     "sphinx-design",
 ]
+anatomy = [
+    "brainglobe-atlasapi>=2.0",
+]
 
 [dependency-groups]
 dev = [
