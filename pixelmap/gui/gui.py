@@ -45,6 +45,10 @@ from pixelmap.constants import (
 from pixelmap.types import Electrode
 from pixelmap.utils import imro
 from pixelmap.utils import url_share
+from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.schematic import render_locator
+from pixelmap.anatomy.transform import bregma_to_atlas_um
+from pixelmap.anatomy.visualization import compute_region_bands
 
 ## Configure logging
 basicConfig(level=logging.ERROR)  # no warnings
@@ -58,6 +62,14 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions
 pn.extension("tabulator", notifications=True)
+
+
+def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
+    """Return ``hex_color`` darkened by ``factor`` (0=black, 1=unchanged)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 ###################################
@@ -845,6 +857,522 @@ class ChannelmapGUI(param.Parameterized):
         self.update_electrode_counter()
         self.refresh_undo_buttons()
 
+    ###################################
+    ##### Anatomical overlay logic ####
+    ###################################
+
+    def setup_region_bands(self):
+        """Initialize the empty Bokeh sources + glyphs for the anatomy overlay.
+
+        Three layers, drawn back-to-front so labels stay on top of bands:
+          - colored band rectangles (fill behind the shank),
+          - boundary tick marks (horizontal lines at region transitions),
+          - region acronym text labels next to each band.
+        """
+        self.region_band_source = ColumnDataSource(
+            data={"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        )
+        self.region_band_renderer = self.plot.rect(
+            x="x", y="y", width="width", height="height",
+            fill_color="color", fill_alpha=0.25, line_color=None,
+            source=self.region_band_source,
+        )
+
+        self.region_boundary_source = ColumnDataSource(
+            data={"x0": [], "x1": [], "y0": [], "y1": []}
+        )
+        self.region_boundary_renderer = self.plot.segment(
+            x0="x0", y0="y0", x1="x1", y1="y1",
+            line_color="#444444", line_width=1, line_dash="dashed",
+            source=self.region_boundary_source,
+        )
+
+        self.region_label_source = ColumnDataSource(
+            data={"x": [], "y": [], "text": [], "color": []}
+        )
+        self.region_label_renderer = self.plot.text(
+            x="x", y="y", text="text", text_color="color",
+            text_font_size="10pt", text_baseline="middle", text_align="left",
+            source=self.region_label_source,
+        )
+
+    def _available_atlases(self) -> tuple[list[str], str]:
+        """List atlases known to brainglobe; fall back to a single default."""
+        default = "allen_mouse_25um"
+        if not anatomy_atlas.is_available():
+            return [default], default
+        try:
+            atlases = anatomy_atlas.list_atlases()
+        except Exception:
+            return [default], default
+        if not atlases:
+            return [default], default
+        if default not in atlases:
+            atlases = [default] + list(atlases)
+        return list(atlases), default
+
+    def _shank_probe_xs(self) -> dict[int, float]:
+        """Probe-local x (µm) at the *median* of each shank's electrodes."""
+        return {
+            int(s): float(self.positions_df[self.positions_df["shank"] == s]["x"].median())
+            for s in sorted(self.positions_df["shank"].unique())
+        }
+
+    def _shank_plot_centers(self) -> dict[int, float]:
+        """Bokeh-plot x at the center of each shank's drawn outline."""
+        if self.probe_type in ["1.0", "2.0-1shank"]:
+            return {0: 0.0}
+        return {sid: sid * 250.0 for sid in self._shank_probe_xs()}
+
+    def _shank_plot_width(self) -> float:
+        """Width (in plot units) to draw region bands at, narrower than the shank."""
+        return 90.0  # shank outlines are 100 wide
+
+    def compute_anatomy_overlay(self):
+        """Compute region bands for the current pose and render them."""
+        if not anatomy_atlas.is_available():
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(
+                    "Anatomy support not installed. Run: pip install 'pixelmap[anatomy]'",
+                    duration=10_000,
+                )
+            return
+
+        probe_xs = self._shank_probe_xs()
+        plot_centers = self._shank_plot_centers()
+        y_max = float(self.positions_df["y"].max())
+
+        # If the origin landmark was "pending" (AC of a not-yet-downloaded
+        # atlas), computing below downloads it — remember to fill it in after.
+        origin_was_pending = (
+            self._origin_spec(self.atlas_name_input.value)["status"] == "ac_pending"
+        )
+
+        tip = self._tip_atlas_um()
+
+        try:
+            bands = compute_region_bands(
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
+                atlas_name=str(self.atlas_name_input.value).strip(),
+                step_um=25.0,
+            )
+        except ImportError as exc:
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(str(exc), duration=10_000)
+            return
+        except Exception as exc:
+            print(f"Anatomy lookup failed: {exc}")
+            if pn.state.notifications is not None:
+                pn.state.notifications.error(f"Anatomy lookup failed: {exc}", duration=10_000)
+            return
+
+        width = self._shank_plot_width()
+        half_width = width / 2
+        # Pull label text slightly outside the shank outline so it doesn't
+        # overlap the electrode rects.
+        label_offset = half_width + 6
+
+        band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        label_data = {"x": [], "y": [], "text": [], "color": []}
+        boundary_data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        # Track which boundaries we've already drawn per shank so adjacent
+        # bands sharing a transition don't double up on the line.
+        seen_boundaries: set[tuple[int, float]] = set()
+
+        for band in bands:
+            plot_center = plot_centers.get(band.shank_id)
+            if plot_center is None:
+                continue
+            y_mid = (band.y_min + band.y_max) / 2
+            color_hex = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+
+            band_data["x"].append(plot_center)
+            band_data["y"].append(y_mid)
+            band_data["width"].append(width)
+            band_data["height"].append(band.y_max - band.y_min)
+            band_data["color"].append(color_hex)
+            band_data["acronym"].append(band.acronym)
+
+            label_data["x"].append(plot_center + label_offset)
+            label_data["y"].append(y_mid)
+            label_data["text"].append(band.acronym)
+            # Slightly darker than the swatch so labels stay readable on white.
+            label_data["color"].append(_darken_hex(color_hex, factor=0.6))
+
+            for boundary_y in (band.y_min, band.y_max):
+                key = (band.shank_id, round(boundary_y, 3))
+                if key in seen_boundaries:
+                    continue
+                seen_boundaries.add(key)
+                boundary_data["x0"].append(plot_center - half_width)
+                boundary_data["x1"].append(plot_center + half_width)
+                boundary_data["y0"].append(boundary_y)
+                boundary_data["y1"].append(boundary_y)
+
+        self.region_band_source.data = band_data
+        self.region_label_source.data = label_data
+        self.region_boundary_source.data = boundary_data
+
+        self._update_anatomy_legend(bands)
+        # The atlas is now downloaded, so the origin corner can be shown.
+        self._update_anatomy_origin_note()
+
+        # Bregma dot whenever an estimate exists or we're in bregma mode (using
+        # the current, possibly-edited, values). DV-squish + tilt warp the brain
+        # image only in bregma mode (where the squish/tilt inputs are live).
+        atlas_name = str(self.atlas_name_input.value).strip()
+        bregma_mode = bool(self.bregma_relative_toggle.value)
+        # The atlas is downloaded now (bands were computed), so a previously
+        # "pending" AC landmark can be filled in (without clobbering user edits).
+        if origin_was_pending:
+            self._update_reference_params()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        has_origin = self._origin_spec(atlas_name)["status"] in ("defined", "estimate")
+        bregma_um = None
+        ap_squish = ml_squish = dv_squish = 1.0
+        tilt_deg = 0.0
+        if bregma_mode or has_origin:
+            bregma_um = (
+                float(self.bregma_ap_input.value),
+                float(self.bregma_ml_input.value),
+                float(self.bregma_dv_input.value),
+            )
+        if bregma_mode:
+            ap_squish = float(self.ap_squish_input.value) or 1.0
+            ml_squish = float(self.ml_squish_input.value) or 1.0
+            dv_squish = float(self.dv_squish_input.value) or 1.0
+            tilt_deg = float(self.tilt_input.value)
+
+        try:
+            self.anatomy_locator.object = render_locator(
+                atlas_name,
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+                bregma_um=bregma_um,
+                ap_squish=ap_squish,
+                ml_squish=ml_squish,
+                dv_squish=dv_squish,
+                tilt_deg=tilt_deg,
+            )
+        except Exception as exc:  # a failed locator shouldn't sink the overlay
+            print(f"Locator render failed: {exc}")
+
+        # Overlay now exists → later input edits live-update it.
+        self._anatomy_overlay_active = True
+
+    def clear_anatomy_overlay(self):
+        """Wipe the region bands, labels, boundaries and reset the legend."""
+        self._anatomy_overlay_active = False  # stop live-updating
+        self.region_band_source.data = {
+            "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
+        }
+        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
+        self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        self.anatomy_legend.object = self._empty_legend_html()
+        self.anatomy_locator.object = None
+
+    def _empty_legend_html(self) -> str:
+        return (
+            '<div style="font-size: 12px; color: #666; padding: 4px 12px;">'
+            "No anatomical overlay computed yet."
+            "</div>"
+        )
+
+    def _anatomy_coord_note_html(self) -> str:
+        """Coordinate-space note: the fixed tip frame + the atlas's native code.
+
+        Tip coordinates use one fixed frame for every atlas; the atlas's own
+        voxel orientation is read and remapped under the hood. We surface that
+        native code as an FYI, but only when the atlas is already downloaded so
+        switching atlases in the dropdown stays cheap.
+        """
+        name = str(self.atlas_name_input.value).strip()
+        native = None
+        if anatomy_atlas.is_available():
+            try:
+                if anatomy_atlas.is_downloaded(name):
+                    native = (
+                        anatomy_atlas.orientation_code(name),
+                        anatomy_atlas.origin_corner(name),
+                    )
+            except Exception:
+                native = None
+        if native:
+            code, origin = native
+            native_line = (
+                f"<b>{name}</b> native voxel orientation: <code>{code}</code> "
+                f"(origin {origin})."
+            )
+        else:
+            native_line = (
+                f"<b>{name}</b>'s native orientation is shown once the atlas is "
+                "downloaded (on first overlay compute)."
+            )
+        return (
+            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+            "Tip coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
+            "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
+            "with AP increasing posteriorly, DV ventrally and ML from the right. "
+            "Tick the <i>Tip relative to …</i> toggle below to enter coordinates "
+            "from the atlas's landmark instead (the values below convert them)."
+            f"<br>{native_line}"
+            "</div>"
+        )
+
+    def _on_atlas_change(self, *events):
+        """Atlas changed: reset bregma/squish/tilt + tip + notes, then recompute.
+
+        The field updates are batched under a recompute guard so a single atlas
+        switch triggers one overlay refresh, not one per field changed.
+        """
+        self._suppress_anatomy_recompute = True
+        try:
+            self._update_reference_params(*events)
+            self._update_tip_to_atlas_center(*events)
+            self._update_anatomy_origin_note(*events)
+            self._update_landmark_labels()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        finally:
+            self._suppress_anatomy_recompute = False
+        self._recompute_anatomy_if_active()
+
+    def _update_landmark_labels(self):
+        """Rename the toggle + coordinate fields to the atlas's landmark.
+
+        e.g. "Tip relative to bregma" for rodents, "...to anterior commissure"
+        for other vertebrates.
+        """
+        lm = self._origin_spec(self.atlas_name_input.value)["landmark"]
+        if lm is None:
+            toggle, prefix = "origin", "Origin"
+        elif lm == "anterior commissure":
+            toggle, prefix = "anterior commissure", "AC"
+        else:  # bregma, interaural, …
+            toggle, prefix = lm, lm.capitalize()
+        self.bregma_relative_toggle.name = f"Tip relative to {toggle}"
+        self.bregma_ap_input.name = f"{prefix} AP (µm)"
+        self.bregma_ml_input.name = f"{prefix} ML (µm)"
+        self.bregma_dv_input.name = f"{prefix} DV (µm)"
+
+    def _bregma_header_html(self) -> str:
+        """Banner above the bregma fields: explain the estimate, or prompt for one."""
+        spec = self._origin_spec(self.atlas_name_input.value)
+        status, lm, src = spec["status"], spec["landmark"], spec.get("source", "")
+        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")   # defined / real value
+        ORANGE = ("#ffe7d1", "#f0a35e", "#9a4a00")  # rough estimate
+        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")    # info / pending
+        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")     # user must define
+        if status == "defined" and lm == "bregma":  # WHS rat
+            icon, palette = "✓", GREEN
+            body = (f"<b>Bregma (defined, not an estimate)</b> — from {src}. "
+                    "Edit only if needed.")
+        elif status == "defined":  # AC is the species' established origin (human)
+            icon, palette = "✓", GREEN
+            body = (f"<b>Origin = {lm} (defined)</b> — {src}; the established "
+                    "reference for this species. Edit only if needed.")
+        elif status == "estimate":  # Allen-family mouse
+            icon, palette = "⚠", ORANGE
+            body = (f"<b>Bregma estimate (rough)</b> — from {src}. Edit if you "
+                    "have better values.")
+        elif status == "ac_pending":
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>Origin = {lm}</b> — located from the atlas on the first "
+                    "<i>Compute</i>.")
+        elif status == "landmark_undefined":  # rodent/cat: bregma, but no value here
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>{lm.capitalize()}</b> is the standard origin for this "
+                    f"species, but isn't located in this atlas — set {lm} in the "
+                    "fields below.")
+        else:  # user_origin — no skull landmark for this species
+            icon, palette = "⚠", RED
+            body = ("<b>No skull-bregma landmark</b> for this species — "
+                    "coordinates are atlas-defined; set an <b>origin</b> (0,0,0) "
+                    "yourself below if you want relative coordinates.")
+        bg, border, color = palette
+        return (
+            f'<div style="font-size: 11px; color: {color}; background: {bg}; '
+            f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
+            f'margin: 8px 10px 2px 10px;">{icon} {body}</div>'
+        )
+
+    def _update_anatomy_origin_note(self, *events):
+        """Refresh the coordinate note when the atlas selection changes."""
+        self.anatomy_coord_note.object = self._anatomy_coord_note_html()
+
+    def _atlas_tip_center(self, name: str):
+        """Atlas center as ``(AP, ML, DV)`` µm, or ``None`` if not readable cheaply.
+
+        Only computed for already-downloaded atlases so it can't trigger a
+        download (used on init and on every atlas-selection change).
+        """
+        name = str(name).strip()
+        if not anatomy_atlas.is_available():
+            return None
+        try:
+            if not anatomy_atlas.is_downloaded(name):
+                return None
+            return anatomy_atlas.volume_center_um(name)
+        except Exception:
+            return None
+
+    def _update_tip_to_atlas_center(self, *events):
+        """Seed the tip inputs with the selected atlas's center, when available."""
+        if self.bregma_relative_toggle.value:
+            return  # in bregma mode the tip is relative, not absolute CCF
+        center = self._atlas_tip_center(self.atlas_name_input.value)
+        if center is None:
+            return
+        ap, ml, dv = center
+        self.tip_ap_input.value = round(ap, 1)
+        self.tip_ml_input.value = round(ml, 1)
+        self.tip_dv_input.value = round(dv, 1)
+
+    def _tip_atlas_um(self) -> tuple[float, float, float]:
+        """Current tip in canonical atlas (AP, ML, DV) µm, honoring bregma mode."""
+        raw = (
+            float(self.tip_ap_input.value),
+            float(self.tip_ml_input.value),
+            float(self.tip_dv_input.value),
+        )
+        if not self.bregma_relative_toggle.value:
+            return raw
+        # Translation only: DV-squish and tilt are applied as a *visual* warp of
+        # the atlas image in the locator, not by relocating the tip in CCF.
+        return bregma_to_atlas_um(
+            raw,
+            bregma_um=(
+                float(self.bregma_ap_input.value),
+                float(self.bregma_ml_input.value),
+                float(self.bregma_dv_input.value),
+            ),
+            dv_squish=1.0,
+            tilt_deg=0.0,
+        )
+
+    def _origin_spec(self, name) -> dict:
+        """Resolve the recommended coordinate origin + banner status for an atlas.
+
+        Rodents use a hardcoded bregma; other vertebrates fall back to the
+        anterior commissure (derived from the annotation when downloaded);
+        invertebrate / spinal atlases have no point landmark. Cheap unless it
+        needs to derive the AC, which only happens for a downloaded atlas.
+        """
+        name = str(name).strip()
+        ref = anatomy_atlas.reference_params(name)
+        if ref:
+            ref["landmark"] = "bregma"
+            ref["status"] = "defined" if ref.get("defined") else "estimate"
+            return ref
+        spec = {"bregma_um": None, "ap_squish": 1.0, "ml_squish": 1.0,
+                "dv_squish": 1.0, "tilt_deg": 0.0, "landmark": None,
+                "status": "user_origin", "source": ""}
+        landmark = anatomy_atlas.landmark_policy(name)
+        if landmark is None:
+            return spec  # no skull landmark for this species → user defines origin
+        spec["landmark"] = landmark
+        if landmark == "anterior commissure":
+            # Human (AC-PC): derive it from the annotation when downloaded.
+            if not anatomy_atlas.is_available() or not anatomy_atlas.is_downloaded(name):
+                spec["status"] = "ac_pending"
+                return spec
+            try:
+                ac = anatomy_atlas.derive_origin_from_ac(name)
+            except Exception:
+                ac = None
+            if ac is None:
+                # AC is the convention but this atlas doesn't delineate it
+                # (e.g. the coarse human atlas) → keep the name, user sets it.
+                spec["status"] = "landmark_undefined"
+                return spec
+            spec["bregma_um"] = ac
+            spec["status"] = "defined"
+            spec["source"] = ("the anterior-commissure decussation, computed "
+                              "from this atlas's annotation")
+            return spec
+        # landmark == "bregma" but no hardcoded value (other rodents / cat):
+        # the convention is bregma, but it's a skull point we can't locate here.
+        spec["status"] = "landmark_undefined"
+        return spec
+
+    def _update_reference_params(self, *events):
+        """Fill bregma / per-axis squish / tilt from the atlas's origin spec."""
+        spec = self._origin_spec(self.atlas_name_input.value)
+        b_ap, b_ml, b_dv = spec["bregma_um"] or (0.0, 0.0, 0.0)
+        self.bregma_ap_input.value = round(b_ap, 1)
+        self.bregma_ml_input.value = round(b_ml, 1)
+        self.bregma_dv_input.value = round(b_dv, 1)
+        self.ap_squish_input.value = spec["ap_squish"]
+        self.ml_squish_input.value = spec["ml_squish"]
+        self.dv_squish_input.value = spec["dv_squish"]
+        self.tilt_input.value = spec["tilt_deg"]
+
+    def _on_bregma_toggle(self, *events):
+        """Swap the tip defaults and enable squish/tilt for bregma-relative mode."""
+        on = bool(self.bregma_relative_toggle.value)
+        for w in (self.dv_squish_input, self.ap_squish_input,
+                  self.ml_squish_input, self.tilt_input):
+            w.disabled = not on
+        self._suppress_anatomy_recompute = True
+        try:
+            if on:
+                # Sensible bregma-relative default: at bregma, 4 mm deep.
+                self.tip_ap_input.value = 0.0
+                self.tip_ml_input.value = 0.0
+                self.tip_dv_input.value = 4000.0
+            else:
+                self._update_tip_to_atlas_center()
+        finally:
+            self._suppress_anatomy_recompute = False
+        self._recompute_anatomy_if_active()
+
+    def _recompute_anatomy_if_active(self, *events):
+        """Re-run the overlay on input changes, but only once one exists."""
+        if getattr(self, "_suppress_anatomy_recompute", False):
+            return
+        if getattr(self, "_anatomy_overlay_active", False):
+            self.compute_anatomy_overlay()
+
+    def _update_anatomy_legend(self, bands: list):
+        """Render a deduplicated region legend on the right-side panel."""
+        if not bands:
+            self.anatomy_legend.object = (
+                '<div style="font-size: 12px; color: #b00; padding: 4px 12px;">'
+                "No regions found at the given pose (probe outside atlas volume?)."
+                "</div>"
+            )
+            return
+
+        # Deduplicate by atlas_id, preserve a stable display order.
+        seen: dict[int, "RegionBand"] = {}
+        for band in bands:
+            seen.setdefault(band.atlas_id, band)
+
+        rows = []
+        for band in seen.values():
+            swatch = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+            rows.append(
+                f'<div style="display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px;">'
+                f'<span style="display: inline-block; width: 14px; height: 14px; '
+                f'background: {swatch}; border: 1px solid #888;"></span>'
+                f'<span style="font-weight: bold; min-width: 60px;">{band.acronym}</span>'
+                f'<span style="color: #444;">{band.name}</span>'
+                f"</div>"
+            )
+        self.anatomy_legend.object = (
+            '<div style="padding: 4px 12px; max-height: 280px; overflow-y: auto;">'
+            + "".join(rows)
+            + "</div>"
+        )
+
     def apply_url_state(self, encoded: str) -> bool:
         """Restore a selection previously serialized via build_share_link.
 
@@ -974,10 +1502,16 @@ class ChannelmapGUI(param.Parameterized):
             description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
         )
 
-        # Create figure with proper tools
+        # Create figure with proper tools.
+        # We keep explicit references to PanTool and WheelZoomTool so we can
+        # mark them as the default active drag and scroll tools. Without
+        # this, Bokeh would require the user to click the toolbar icon first
+        # before click-drag could pan or wheel could zoom.
+        pan_tool = PanTool()
+        wheel_zoom_tool = WheelZoomTool()
         tools = [
-            PanTool(),
-            WheelZoomTool(),
+            pan_tool,
+            wheel_zoom_tool,
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
@@ -999,7 +1533,13 @@ class ChannelmapGUI(param.Parameterized):
             tools=tools,
             title=f"Neuropixels {self.probe_type} Electrode Layout",
             toolbar_location="right",
+            active_drag=pan_tool,
+            active_scroll=wheel_zoom_tool,
         )
+
+        # Region bands must be added *before* the electrode rects so they
+        # render behind everything else.
+        self.setup_region_bands()
 
         # Create electrode data and visualization
         self.create_electrode_data()
@@ -1275,6 +1815,131 @@ class ChannelmapGUI(param.Parameterized):
         )
         self.share_link_button.on_click(lambda event: self.update_share_link())
 
+        # Anatomy widgets
+        atlas_options, atlas_default = self._available_atlases()
+        self.atlas_name_input = pn.widgets.Select(
+            name="Atlas",
+            value=atlas_default,
+            options=atlas_options,
+            width=300,
+        )
+        # Default the tip to the atlas center (mid-brain) when we can read it
+        # cheaply; otherwise fall back to a reasonable fixed coordinate.
+        default_ap, default_ml, default_dv = (
+            self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
+        )
+        self.tip_ap_input = pn.widgets.FloatInput(
+            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        self.tip_ml_input = pn.widgets.FloatInput(
+            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        self.tip_dv_input = pn.widgets.FloatInput(
+            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        self.pitch_input = pn.widgets.FloatInput(
+            name="Pitch (deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, width=105, margin=(5, 2),
+        )
+        self.yaw_input = pn.widgets.FloatInput(
+            name="Yaw (deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, width=105, margin=(5, 2),
+        )
+        self.shank_orientation_input = pn.widgets.FloatInput(
+            name="Shank ori (deg)", value=0.0, step=1.0,
+            start=-180.0, end=360.0, width=108, margin=(5, 2),
+        )
+        # Optional bregma-relative coordinate mode + per-atlas calibration,
+        # prefilled with published estimates (see anatomy.atlas.reference_params).
+        ref = anatomy_atlas.reference_params(atlas_default) or {
+            "bregma_um": (0.0, 0.0, 0.0), "ap_squish": 1.0, "ml_squish": 1.0,
+            "dv_squish": 1.0, "tilt_deg": 0.0,
+        }
+        b_ap, b_ml, b_dv = ref["bregma_um"]
+        self.bregma_relative_toggle = pn.widgets.Checkbox(
+            name="Tip relative to bregma", value=False, width=300, margin=(6, 0, 0, 10),
+        )
+        self.bregma_ap_input = pn.widgets.FloatInput(
+            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        self.bregma_ml_input = pn.widgets.FloatInput(
+            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        self.bregma_dv_input = pn.widgets.FloatInput(
+            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, width=95, margin=(5, 2)
+        )
+        # Per-axis squish + AP tilt warp the atlas image in the locator; they
+        # only do anything in bregma mode — disabled until the toggle is on.
+        self.dv_squish_input = pn.widgets.FloatInput(
+            name="DV squish", value=ref["dv_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+        )
+        self.ap_squish_input = pn.widgets.FloatInput(
+            name="AP squish", value=ref["ap_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+        )
+        self.ml_squish_input = pn.widgets.FloatInput(
+            name="ML squish", value=ref["ml_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+        )
+        self.tilt_input = pn.widgets.FloatInput(
+            name="AP tilt°", value=ref["tilt_deg"], step=0.5, width=78, margin=(5, 2), disabled=True
+        )
+        self.bregma_estimate_header = pn.pane.HTML(
+            self._bregma_header_html(), width=320
+        )
+        self.anatomy_coord_note = pn.pane.HTML(
+            self._anatomy_coord_note_html(), width=320
+        )
+        self.atlas_name_input.param.watch(self._on_atlas_change, "value")
+        self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
+
+        # Once an overlay exists, live-update it (bands + slices) whenever any
+        # pose / bregma / squish / tilt input changes, so edits are visible
+        # immediately instead of only on the next Compute click.
+        self._anatomy_overlay_active = False
+        # atlas_name + bregma toggle do their own batched recompute (via
+        # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
+        for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,
+                   self.pitch_input, self.yaw_input, self.shank_orientation_input,
+                   self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input,
+                   self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                   self.tilt_input):
+            _w.param.watch(self._recompute_anatomy_if_active, "value")
+        self._update_landmark_labels()  # name the toggle/fields for the default atlas
+        self.anatomy_help = pn.pane.HTML(
+            (
+                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+                "<b>Pitch</b> = AP tilt (probe leaning forward / backward). "
+                "<b>Yaw</b> = ML tilt (probe leaning left / right). "
+                "<b>Shank orientation</b> = direction of shanks 0→3 in the "
+                "horizontal plane; 0° = lateral (+ML), 90° = anterior (+AP)."
+                "</div>"
+            ),
+            width=320,
+        )
+        self.compute_anatomy_button = pn.widgets.Button(
+            name="Compute anatomical overlay 🧠", button_type="primary", width=250
+        )
+        self.clear_anatomy_button = pn.widgets.Button(
+            name="Clear overlay", button_type="default", width=120
+        )
+        self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
+        self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
+        self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), width=320)
+        self.anatomy_locator = pn.pane.Matplotlib(
+            object=None, width=320, height=290, tight=True, format="png",
+        )
+
+        if not anatomy_atlas.is_available():
+            install_hint = (
+                "<i>Optional: install with </i><code>pip install 'pixelmap[anatomy]'</code>"
+                "<i> to enable atlas lookups.</i>"
+            )
+            self.anatomy_install_hint = pn.pane.HTML(
+                f'<div style="font-size: 12px; color: #b00; padding: 4px 0;">{install_hint}</div>',
+                width=300,
+            )
+        else:
+            self.anatomy_install_hint = pn.Spacer(height=0)
+
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
         self.apply_uploaded_imro_button = pn.widgets.Button(
@@ -1348,6 +2013,12 @@ class ChannelmapGUI(param.Parameterized):
                 self.share_link_output,
                 margin=(0, 0, 0, 20),
             ),
+
+            pn.pane.Markdown("## Probe location", margin=(15, 0, -5, 30)),
+            self.anatomy_locator,
+
+            pn.pane.Markdown("## Region legend", margin=(15, 0, -5, 30)),
+            self.anatomy_legend,
 
             pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
@@ -1426,6 +2097,24 @@ class ChannelmapGUI(param.Parameterized):
             self.imro_file_loader,
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
+            pn.Column(
+                pn.pane.Markdown("## Anatomical overlay", margin=(-5, 0, 0, 10)),
+                self.anatomy_install_hint,
+                self.atlas_name_input,
+                self.anatomy_coord_note,
+                pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
+                self.anatomy_help,
+                self.bregma_estimate_header,
+                self.bregma_relative_toggle,
+                pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                       self.tilt_input, sizing_mode="stretch_width"),
+                self.compute_anatomy_button,
+                self.clear_anatomy_button,
+                styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
+                margin=(10, 5, 0, 5),
+            ),
             styles={
                 "position": "fixed",
                 "top": "0px",
