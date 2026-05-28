@@ -1628,6 +1628,8 @@ class ChannelmapGUI(param.Parameterized):
         # Create electrode data and visualization
         self.create_electrode_data()
         self.setup_electrode_visualization()
+        # Restrict hover tool to electrode rectangles only (prevents ??? on overlay glyphs)
+        hover_tool.renderers = [self.electrode_renderer]
 
         # Set initial y_range so only the bottom third of the probe is visible:
         # probe tips pinned at the bottom, top two-thirds hidden above the frame.
