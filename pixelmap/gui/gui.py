@@ -1000,9 +1000,9 @@ class ChannelmapGUI(param.Parameterized):
 
         width = self._shank_plot_width()
         half_width = width / 2
-        # Pull label text slightly outside the shank outline so it doesn't
+        # Pull label text outside the shank outline so it doesn't
         # overlap the electrode rects.
-        label_offset = half_width + 6
+        label_offset = half_width + 14
 
         band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
         label_data = {"x": [], "y": [], "text": [], "color": []}
@@ -2134,11 +2134,11 @@ class ChannelmapGUI(param.Parameterized):
             self.anatomy_locator_section,
             self.anatomy_legend,
 
-            pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
+            pn.pane.Markdown("## PixelMap [documentation](https://pixelmap-neuropixels.readthedocs.io/en/latest/)", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
             <div style="font-size: 13px; line-height: 1.4; text-align: justify;">
             <b>Neuropixels hardware Constraints:</b><br>
-            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
+            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines (<a href = https://www.neuropixels.org/support>hardwired</a>) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
             PixelMap visualizes these constraints in real time: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines or ADCs turn <b>black</b>.<br><br>
 
             <b>You can mix and match four selection methods:</b><br>
@@ -2147,7 +2147,7 @@ class ChannelmapGUI(param.Parameterized):
             • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, or "zigzag/interleaved selection") to manually select multiple sites<br>
             • <b>Selection from pre-existing IMRO file</b>: you can pre-load an IMRO file as a starting point before doing any of the above.<br><br>
 
-            Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like.
+            Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like. Use this IMRO file in SpikeGLX to record from the selected channels, and then use the Kilosort .json file to spikesort your data accordingly.<br><br>
             </div>
             """),
 
@@ -2181,7 +2181,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.Column(
                 pn.pane.Markdown("## Probe and recording metadata", margin=(-5, 0, 0, 10)),
                 pn.pane.Markdown(
-                    "(see <a href='https://billkarsh.github.io/SpikeGLX/help/imroTables' target='_blank'>IMRO table anatomy</a>)",
+                    "(see <a href='https://billkarsh.github.io/SpikeGLX/help/imroTables' target='_blank'>SpikeGLX IMRO table anatomy</a>)",
                     margin=(-15, 0, -5, 10),
                 ),
                 self.probe_type_selector,
