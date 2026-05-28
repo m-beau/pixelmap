@@ -165,7 +165,41 @@ Hit record, and off you go!
 To spikesort your data, make sure to feed the imro table to your favorite spike-sorter. E.g. for Kilosort, simply use the Kilosort txt file that you can download from PixelMap alongside the `.imro` and pdf files.
 ___
 
-## Optional feature 1: Anatomical Overlay
+## Optional feature: SpikeGLX Survey Overlay
+
+SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap overlays these values *alongside* the probe so you can visually identify the most active contacts before committing to a channelmap.
+
+PixelMap draws a thin colored **sidebar bar** just outside the shank outline for each contact — a "mirror image" of the contact column. Each bar is colored by that contact's `Val` using a Viridis colormap. Left-column contacts get a bar on the left of the outline; right-column contacts get a bar on the right.
+
+### Exporting and loading a survey
+
+1. In SpikeGLX, run a survey recording. Offline, load the recording and open up the graphical shank viewer. Under the **View** tab, select *Sample whole survey* and click the update button to have SpikeGLX compute activity across all contacts. Use the **Export Map** button to save a survey `.txt` file.
+2. In PixelMap, expand the **Survey overlay** section in the left panel.
+3. Click the file picker and choose your survey `.txt` file.
+4. Press **Load survey overlay**. A Viridis-colored bar appears just outside the shank outline next to each contact, and a colorbar labeled *Survey Val* appears above the plot.
+
+### Reading the overlay
+
+- **The contacts keep their normal coloring** — red (selected), black (unavailable), light gray (available) — so your selection and the ADC constraints stay fully visible.
+- The **sidebar bars** flanking the shank are colored by `Val`. The colorbar above the plot shows the current min/max range.
+- Bars for **unavailable contacts** (ADC conflicts) are dimmed (reduced opacity) so they're distinguishable from available ones.
+- Contacts with no matching survey value get a neutral gray bar.
+- Hover over a contact to see its exact `Survey value` in the tooltip.
+
+### Adjusting the colormap range
+
+The **vmin** and **vmax** inputs are auto-populated from the file's minimum and maximum values. Edit either input to rescale the colormap live — useful for bringing out contrast in a narrow activity band.
+
+### Clearing the overlay
+
+Click **Clear overlay** to remove the survey overlay. The overlay is also cleared automatically when you switch probe types, since contact positions differ across probe types.
+
+:::{note}
+The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
+:::
+
+
+## Optional feature: Anatomical Overlay
 
 The anatomical overlay maps every electrode on your probe to a brain region from a standard atlas, and displays the result directly on the probe visualization. It is designed to help you approximately plan where your probe will be recording before the animal is implanted, or to review the anatomy of an existing insertion.
 
@@ -248,35 +282,4 @@ The region legend in the right panel lists every brain region traversed by the p
 
 Regions are listed **alphabetically by acronym** so they are easy to scan regardless of probe depth order. The legend updates live whenever a coordinate or angle is changed after the first compute.
 
-## Optional feature 2: SpikeGLX Survey Overlay
 
-SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap overlays these values *alongside* the probe so you can visually identify the most active contacts before committing to a channelmap.
-
-PixelMap draws a thin colored **sidebar bar** just outside the shank outline for each contact — a "mirror image" of the contact column. Each bar is colored by that contact's `Val` using a Viridis colormap. Left-column contacts get a bar on the left of the outline; right-column contacts get a bar on the right.
-
-### Exporting and loading a survey
-
-1. In SpikeGLX, run a survey recording. Offline, load the recording and open up the graphical shank viewer. Under the **View** tab, select *Sample whole survey* and click the update button to have SpikeGLX compute activity across all contacts. Use the **Export Map** button to save a survey `.txt` file.
-2. In PixelMap, expand the **Survey overlay** section in the left panel.
-3. Click the file picker and choose your survey `.txt` file.
-4. Press **Load survey overlay**. A Viridis-colored bar appears just outside the shank outline next to each contact, and a colorbar labeled *Survey Val* appears above the plot.
-
-### Reading the overlay
-
-- **The contacts keep their normal coloring** — red (selected), black (unavailable), light gray (available) — so your selection and the ADC constraints stay fully visible.
-- The **sidebar bars** flanking the shank are colored by `Val`. The colorbar above the plot shows the current min/max range.
-- Bars for **unavailable contacts** (ADC conflicts) are dimmed (reduced opacity) so they're distinguishable from available ones.
-- Contacts with no matching survey value get a neutral gray bar.
-- Hover over a contact to see its exact `Survey value` in the tooltip.
-
-### Adjusting the colormap range
-
-The **vmin** and **vmax** inputs are auto-populated from the file's minimum and maximum values. Edit either input to rescale the colormap live — useful for bringing out contrast in a narrow activity band.
-
-### Clearing the overlay
-
-Click **Clear overlay** to remove the survey overlay. The overlay is also cleared automatically when you switch probe types, since contact positions differ across probe types.
-
-:::{note}
-The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
-:::
