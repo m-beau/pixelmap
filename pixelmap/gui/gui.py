@@ -1499,29 +1499,34 @@ class ChannelmapGUI(param.Parameterized):
             description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
         )
 
-        # Create figure with proper tools.
-        # We keep explicit references to PanTool and WheelZoomTool so we can
-        # mark them as the default active drag and scroll tools. Without
-        # this, Bokeh would require the user to click the toolbar icon first
-        # before click-drag could pan or wheel could zoom.
-        pan_tool = PanTool()
-        wheel_zoom_tool = WheelZoomTool()
+        # Always-on gesture tools — hidden from toolbar (visible=False).
+        # Left-click drag = pan; scroll = zoom.
+        # Note: right-click drag zoom is not supported by this Bokeh version.
+        pan_tool = PanTool(visible=True)
+        wheel_zoom_tool = WheelZoomTool(visible=False)
+
+        # Tap and hover are always active but don't need toolbar buttons.
+        tap_tool = TapTool(description="Tap to select/deselect single electrode", visible=False)
+        hover_tool = HoverTool(
+            visible=False,
+            tooltips=[
+                ("Electrode", "@electrode_id"),
+                ("Shank", "@shank_id"),
+                ("Z position", "@y μm"),
+                ("Status", "@status"),
+            ],
+        )
+
+        # Toolbar only shows the selection tools and reset.
         tools = [
+            ResetTool(),
             pan_tool,
             wheel_zoom_tool,
+            hover_tool,
+            tap_tool,
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
-            TapTool(description="Tap to select/deselect single electrode"),
-            ResetTool(),
-            HoverTool(
-                tooltips=[
-                    ("Electrode", "@electrode_id"),
-                    ("Shank", "@shank_id"),
-                    ("Z position", "@y μm"),
-                    ("Status", "@status"),
-                ]
-            ),
         ]
 
         self.plot = figure(
@@ -1533,6 +1538,7 @@ class ChannelmapGUI(param.Parameterized):
             active_drag=pan_tool,
             active_scroll=wheel_zoom_tool,
         )
+        self.plot.toolbar.logo = None
 
         # Region bands must be added *before* the electrode rects so they
         # render behind everything else.
