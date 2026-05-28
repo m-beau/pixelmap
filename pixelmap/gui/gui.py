@@ -4,6 +4,7 @@ Interactive GUI for Neuropixels Channelmap Generation
 Using Bokeh for better interactivity with hover, click, and rectangular selection
 """
 
+import base64
 import gc
 import json
 import logging
@@ -1074,7 +1075,7 @@ class ChannelmapGUI(param.Parameterized):
             tilt_deg = float(self.tilt_input.value)
 
         try:
-            self.anatomy_locator.object = render_locator(
+            _fig = render_locator(
                 atlas_name,
                 tip_atlas=tip,
                 pitch_deg=float(self.pitch_input.value),
@@ -1088,6 +1089,8 @@ class ChannelmapGUI(param.Parameterized):
                 dv_squish=dv_squish,
                 tilt_deg=tilt_deg,
             )
+            self.anatomy_locator.object = self._fig_to_locator_html(_fig)
+            plt.close(_fig)
         except Exception as exc:  # a failed locator shouldn't sink the overlay
             print(f"Locator render failed: {exc}")
 
@@ -1106,8 +1109,35 @@ class ChannelmapGUI(param.Parameterized):
         self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
         self.anatomy_legend.object = self._empty_legend_html()
-        self.anatomy_locator.object = None
+        self.anatomy_locator.object = ""
         self.anatomy_locator_section.visible = False
+
+    def _fig_to_locator_html(self, fig) -> str:
+        """Convert a matplotlib figure to an HTML img with click-to-lightbox."""
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=300)
+        buf.seek(0)
+        b64 = base64.b64encode(buf.read()).decode("utf-8")
+        src = f"data:image/png;base64,{b64}"
+        return (
+            '<div style="cursor:zoom-in;"'
+            ' onclick="(function(el){'
+            'var src=el.querySelector(\'img\').src;'
+            'var lb=document.createElement(\'div\');'
+            'lb.style.cssText=\'position:fixed;top:0;left:0;width:100vw;height:100vh;'
+            'background:rgba(0,0,0,0.85);z-index:9999;display:flex;'
+            'align-items:center;justify-content:center;cursor:zoom-out;\';'
+            'var img=document.createElement(\'img\');'
+            'img.src=src;'
+            'img.style.cssText=\'max-width:90vw;max-height:90vh;width:auto;height:auto;'
+            'border-radius:8px;box-shadow:0 0 40px rgba(0,0,0,0.5);\';'
+            'lb.appendChild(img);'
+            'lb.addEventListener(\'click\',function(){document.body.removeChild(lb);});'
+            'document.body.appendChild(lb);'
+            '})(this)">'
+            f'<img src="{src}" style="width:320px;display:block;">'
+            '</div>'
+        )
 
     def _empty_legend_html(self) -> str:
         return (
@@ -2011,9 +2041,7 @@ class ChannelmapGUI(param.Parameterized):
         self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
-        self.anatomy_locator = pn.pane.Matplotlib(
-            object=None, width=320, height=290, tight=True, format="png",
-        )
+        self.anatomy_locator = pn.pane.HTML("", sizing_mode="stretch_width")
         # Hidden until the first overlay is computed; cleared by "Clear overlay".
         self.anatomy_locator_section = pn.Column(
             self.anatomy_locator,
@@ -2146,7 +2174,7 @@ class ChannelmapGUI(param.Parameterized):
                     "target='_blank'>link</a></b><br> (and adding a star ⭐ to the <a href='https://github.com/m-beau/pixelmap' "
                     "target='_blank'>repo</a> 😊)</span></div>"
                 ),
-                margin=(0, 0, 0, 40),
+                margin=(0, 0, 0, 0),
             ),
             pn.Column(
                 pn.pane.Markdown("## Probe and recording metadata", margin=(-5, 0, 0, 10)),
