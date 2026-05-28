@@ -32,6 +32,7 @@ dependencies = [
     "bokeh>=3.0.0",
     "dotenv>=0.9.9",
     "psutil>=7.1.0",
+    "brainglobe-atlasapi>=2.0",
 ]
 
 [project.gui-scripts]
@@ -68,5 +69,9 @@ docs = [
 
 [dependency-groups]
 dev = [
+    "furo>=2025.12.19",
+    "myst-parser>=4.0.1",
     "pytest>=8.4.1",
+    "sphinx-autobuild>=2024.10.3",
+    "sphinx-design>=0.6.1",
 ]

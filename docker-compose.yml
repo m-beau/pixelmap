@@ -15,6 +15,7 @@ services:
       - ANALYTICS_COOKIE_SECURE=false
     volumes:
       - ./output:/app/output
+      - brainglobe_cache:/root/.brainglobe
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:${INTERNAL_PORT}/"]
       interval: 30s
@@ -22,3 +23,9 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
+
+volumes:
+  # Persists brainglobe atlas downloads across container restarts.
+  # The default atlas (allen_mouse_25um) is pre-baked into the image; any
+  # additional atlases users download on the server accumulate here.
+  brainglobe_cache:

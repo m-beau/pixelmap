@@ -1,4 +1,4 @@
-# Development Guide
+# Contributing / Developer Guide
 
 This guide is for contributors and developers who want to work on PixelMap.
 
@@ -16,7 +16,7 @@ git clone https://github.com/m-beau/channelmap_generator.git
 cd channelmap_generator
 
 # Install with dev dependencies
-uv sync --all-extras
+uv sync
 
 # Or with pip
 pip install -e ".[dev]"
@@ -121,8 +121,11 @@ To add support for a new probe (e.g., Quadbase, NXT):
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/m-beau/channelmap_generator/blob/main/CONTRIBUTING.md) for guidelines on:
+To contribute:
 
-- Reporting bugs
-- Requesting features
-- Submitting pull requests
+1. Fork the repository
+2. Create a branch with a descriptive name (e.g., `feature/your-feature-name` or `fix/bug-description`)
+3. Make your changes and run tests: `pytest`
+4. Push to your fork and open a pull request **to the `dev` branch**
+
+See [CONTRIBUTING.md](https://github.com/m-beau/channelmap_generator/blob/main/CONTRIBUTING.md) for full guidelines on reporting bugs, requesting features, and code style.
