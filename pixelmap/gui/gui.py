@@ -21,15 +21,19 @@ import param
 from bokeh import events
 from bokeh.models import (
     BoxSelectTool,
+    ColorBar,
     ColumnDataSource,
     CustomJS,
     HoverTool,
+    LinearColorMapper,
     PanTool,
     Range1d,
     ResetTool,
     TapTool,
+    Title,
     WheelZoomTool,
 )
+from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
 from bokeh.util.logconfig import basicConfig
 
@@ -44,7 +48,7 @@ from pixelmap.constants import (
     SUPPORTED_4shanks_PRESETS,
 )
 from pixelmap.types import Electrode
-from pixelmap.utils import imro
+from pixelmap.utils import imro, survey
 from pixelmap.utils import url_share
 from pixelmap.anatomy import atlas as anatomy_atlas
 from pixelmap.anatomy.schematic import render_locator
@@ -235,6 +239,13 @@ class ChannelmapGUI(param.Parameterized):
         self.ap_gain_default = 500
         self.lf_gain_default = 250
 
+        # Survey overlay state
+        self.survey_values: dict[Electrode, float] | None = None
+        self.survey_cmap = LinearColorMapper(palette=Viridis256, low=0.0, high=1.0)
+        self.survey_color_bar = None
+        self.survey_color_bar_title = None
+        self._survey_range_suspend = False
+
         # Load initial data
         self.load_probe_data()
 
@@ -320,14 +331,23 @@ class ChannelmapGUI(param.Parameterized):
             "line_color": [],
             "line_width": [],
             "status": [],
+            "val": [],
+            "bar_x": [],
+            "bar_height": [],
+            "bar_color": [],
+            "bar_alpha": [],
         }
 
         # Parameters for visualization
+        BAR_WIDTH = 16
+        BAR_GAP = 4  # gap between shank outline and survey bar
+
         if self.probe_type in ["1.0", "2.0-1shank"]:
             # Single shank
             shank_width = 100
             electrode_width = 15
             electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
+            shank_spacing = None
         else:
             # Multi-shank
             shank_width = 100
@@ -335,24 +355,39 @@ class ChannelmapGUI(param.Parameterized):
             electrode_width = 12
             electrode_height = 8
 
+        # Bars sit just outside the shank outline, mirroring the column the
+        # electrode lives in: left-column contacts → bar on the left of the
+        # outline, right-column contacts → bar on the right.
+        bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+
         for shank_id, electrode_id, orig_x, y in positions:
 
             # Map x position to shank width
             if self.probe_type == "1.0":
                 x_norm = (orig_x - 35) / 24
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             elif self.probe_type == "2.0-1shank":
                 x_norm = (orig_x - 16) / 16
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             else: # 4-shanks 2.0 or NXT
                 # Calculate shank center
-                x_center = shank_id * shank_spacing
+                x_center_shank = shank_id * shank_spacing
                 # Map electrode position within shank
-                x_norm = (orig_x - x_center - 16) / 16
-                x = x_center + x_norm * (shank_width * 0.7) / 2
+                x_norm = (orig_x - x_center_shank - 16) / 16
+                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
+
+            # Bar x: just outside the shank outline, on the side matching
+            # the electrode's column relative to the shank center.
+            side = 1 if (x - x_center_shank) >= 0 else -1
+            bar_x = x_center_shank + side * bar_offset
 
             # Determine electrode status and color
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(Electrode(shank_id, electrode_id))
+            electrode = Electrode(shank_id, electrode_id)
+            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
+            val = self._get_survey_val(electrode)
+            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
 
             electrode_data["x"].append(x)
             electrode_data["y"].append(y)
@@ -365,22 +400,53 @@ class ChannelmapGUI(param.Parameterized):
             electrode_data["line_color"].append(line_color)
             electrode_data["line_width"].append(line_width)
             electrode_data["status"].append(status)
+            electrode_data["val"].append(val)
+            electrode_data["bar_x"].append(bar_x)
+            electrode_data["bar_height"].append(electrode_height * 1.5)
+            electrode_data["bar_color"].append(bar_color)
+            electrode_data["bar_alpha"].append(bar_alpha)
 
         # Create ColumnDataSource
         self.electrode_source = ColumnDataSource(data=electrode_data)
 
 
     def get_electrode_plotting_params(self, electrode: Electrode):
-        """
-        Get electrode appearance based on its status
-        status, color, alpha, line_color, line_width
-        """
+        """Get electrode fill/border appearance based on selection state."""
         if electrode in self.electrodes.selected:
             return "Selected", "red", 1.0, "darkred", 0
         elif electrode in self.electrodes.unavailable:
             return "Unavailable", "black", 1.0, "darkgray", 0
-        else:  # unselected electrodes
+        else:
             return "Unselected", "lightgray", 0.8, "gray", 0
+
+    def _get_survey_val(self, electrode: Electrode) -> float:
+        """Return the survey Val for an electrode, or NaN if none loaded."""
+        if self.survey_values is None:
+            return float("nan")
+        return self.survey_values.get(electrode, float("nan"))
+
+    def _get_survey_color(self, electrode: Electrode) -> str:
+        """Map a survey Val to a hex color using the current colormap bounds."""
+        val = self._get_survey_val(electrode)
+        if not np.isfinite(val):
+            return "#dddddd"  # neutral gray for electrodes without survey data
+        low = self.survey_cmap.low
+        high = self.survey_cmap.high
+        if high <= low:
+            frac = 0.0
+        else:
+            frac = (val - low) / (high - low)
+        frac = max(0.0, min(1.0, frac))
+        idx = int(round(frac * (len(Viridis256) - 1)))
+        return Viridis256[idx]
+
+    def _get_bar_color_alpha(self, electrode: Electrode) -> tuple[str, float]:
+        """Return (fill_color, fill_alpha) for the survey sidebar of an electrode."""
+        if self.survey_values is None:
+            return "#000000", 0.0
+        color = self._get_survey_color(electrode)
+        alpha = 0.4 if electrode in self.electrodes.unavailable else 1.0
+        return color, alpha
 
 
     def setup_electrode_visualization(self):
@@ -399,6 +465,19 @@ class ChannelmapGUI(param.Parameterized):
             hover_fill_color="yellow",
             hover_line_color="orange",
             hover_line_width=3,
+        )
+
+        # Survey sidebar bars: thin rectangles flanking each electrode contact,
+        # colored by survey Val. Invisible (alpha=0) until a survey is loaded.
+        self.survey_bar_renderer = self.plot.rect(
+            x="bar_x",
+            y="y",
+            width=16,
+            height="bar_height",
+            fill_color="bar_color",
+            fill_alpha="bar_alpha",
+            line_alpha=0,
+            source=self.electrode_source,
         )
 
         # Add shank outlines and labels
@@ -432,7 +511,7 @@ class ChannelmapGUI(param.Parameterized):
                         [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
                     )
                     self.plot.text(
-                        [shank_width / 2 + 3],
+                        [shank_width / 2 + 17],
                         [bank_y],
                         text=[f"Bank {bank_i // 384}"],
                         text_font_size="10pt",
@@ -490,7 +569,7 @@ class ChannelmapGUI(param.Parameterized):
                         )
                         if shank_id == 3:  # Bank labels (only on rightmost shank)
                             self.plot.text(
-                                [x_center + shank_width / 2 + 5],
+                                [x_center + shank_width / 2 + 17],
                                 [bank_y],
                                 text=[f"Bank {bank_i // 384}"],
                                 text_font_size="10pt",
@@ -512,6 +591,9 @@ class ChannelmapGUI(param.Parameterized):
         line_colors = np.empty(n_electrodes, dtype=object)
         line_widths = np.empty(n_electrodes, dtype=np.int32)
         statuses = np.empty(n_electrodes, dtype=object)
+        vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = np.empty(n_electrodes, dtype=object)
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
 
         for i in range(n_electrodes):
             shank_id = self.electrode_source.data["shank_id"][i]
@@ -525,12 +607,15 @@ class ChannelmapGUI(param.Parameterized):
             line_colors[i] = line_color
             line_widths[i] = line_width
             statuses[i] = status
+            vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
 
         # Update the data source with new data, replacing old arrays
         self.electrode_source.data.update(
             {"color": colors.tolist(), "alpha": alphas.tolist(),
              "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist()}
+             "status": statuses.tolist(), "val": vals.tolist(),
+             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
         )
 
 
@@ -924,7 +1009,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         self.region_label_source = ColumnDataSource(
-            data={"x": [], "y": [], "text": [], "color": []}
+            data={"x": [], "y": [], "text": [], "color": [], "center": []}
         )
         self.region_label_renderer = self.plot.text(
             x="x", y="y", text="text", text_color="color",
@@ -961,6 +1046,26 @@ class ChannelmapGUI(param.Parameterized):
     def _shank_plot_width(self) -> float:
         """Width (in plot units) to draw region bands at, narrower than the shank."""
         return 90.0  # shank outlines are 100 wide
+
+    def _region_label_offset(self, half_width: float) -> float:
+        """Horizontal offset for region acronym labels. Pushed out to clear the
+        survey sidebar bars (outer edge ~half_width + 25) when a survey overlay
+        is loaded; snug to the bands otherwise."""
+        if self.survey_values is not None:
+            return half_width + 33
+        return half_width + 14
+
+    def _reposition_region_labels(self):
+        """Re-place anatomy region labels for the current survey state. Idempotent;
+        a no-op when no anatomy overlay is shown."""
+        data = self.region_label_source.data
+        centers = data.get("center")
+        if not centers:
+            return
+        offset = self._region_label_offset(self._shank_plot_width() / 2)
+        new = dict(data)
+        new["x"] = [c + offset for c in centers]
+        self.region_label_source.data = new
 
     def compute_anatomy_overlay(self):
         """Compute region bands for the current pose and render them."""
@@ -1000,12 +1105,13 @@ class ChannelmapGUI(param.Parameterized):
 
         width = self._shank_plot_width()
         half_width = width / 2
-        # Pull label text outside the shank outline so it doesn't
-        # overlap the electrode rects.
-        label_offset = half_width + 14
+        # Pull label text outside the shank outline so it doesn't overlap the
+        # electrode rects; the offset widens when a survey overlay is loaded so
+        # labels clear the survey sidebar bars (see _region_label_offset).
+        label_offset = self._region_label_offset(half_width)
 
         band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
-        label_data = {"x": [], "y": [], "text": [], "color": []}
+        label_data = {"x": [], "y": [], "text": [], "color": [], "center": []}
         boundary_data = {"x0": [], "x1": [], "y0": [], "y1": []}
         # Track which boundaries we've already drawn per shank so adjacent
         # bands sharing a transition don't double up on the line.
@@ -1026,6 +1132,7 @@ class ChannelmapGUI(param.Parameterized):
             band_data["acronym"].append(band.acronym)
 
             label_data["x"].append(plot_center + label_offset)
+            label_data["center"].append(plot_center)
             label_data["y"].append(y_mid)
             label_data["text"].append(band.acronym)
             # Slightly darker than the swatch so labels stay readable on white.
@@ -1106,7 +1213,7 @@ class ChannelmapGUI(param.Parameterized):
         self.region_band_source.data = {
             "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
         }
-        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
+        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": [], "center": []}
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
         self.anatomy_legend.object = self._empty_legend_html()
         self.anatomy_locator.object = ""
@@ -1551,6 +1658,108 @@ class ChannelmapGUI(param.Parameterized):
         )
         return f"?{url_share.QUERY_PARAM}={encoded}"
 
+    ###################################
+    ##### Survey overlay handlers #####
+    ###################################
+
+    def load_survey_file(self):
+        """Parse an uploaded SpikeGLX survey .txt file and overlay Val on the probe."""
+        if self.survey_file_loader.value is None:
+            pn.state.notifications.warning(
+                "No survey file found - upload one before clicking this button.",
+                duration=10_000,
+            )
+            return
+
+        file_extension = str(self.survey_file_loader.filename).split(".")[-1].lower()
+        if file_extension not in ("txt", "tsv"):
+            pn.state.notifications.error(
+                f"You must upload a .txt survey file, not .{file_extension}!",
+                duration=10_000,
+            )
+            return
+
+        content = self.survey_file_loader.value
+        if isinstance(content, bytes):
+            content = content.decode("utf-8")
+
+        try:
+            survey_df = survey.parse_survey_file(content)
+        except ValueError as e:
+            pn.state.notifications.error(f"Failed to parse survey file: {e}", duration=10_000)
+            return
+
+        try:
+            values, n_unmatched = survey.validate_probe_match(survey_df, self.positions_df)
+        except ValueError as e:
+            pn.state.notifications.error(str(e), duration=10_000)
+            return
+
+        self.survey_values = values
+
+        vals = np.array(list(values.values()), dtype=float)
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        if vmax <= vmin:
+            vmax = vmin + 1.0  # avoid degenerate colormap range
+
+        self.survey_cmap.low = vmin
+        self.survey_cmap.high = vmax
+        self._set_survey_range_inputs(vmin, vmax, enabled=True)
+        if self.survey_color_bar is not None:
+            self.survey_color_bar.visible = True
+            self.survey_color_bar_title.visible = True
+
+        self.update_electrode_colors()
+        self._reposition_region_labels()
+
+        msg = f"Loaded survey: {len(values)} contacts mapped."
+        if n_unmatched:
+            msg += f" {n_unmatched} row(s) did not match the probe and were ignored."
+            pn.state.notifications.warning(msg, duration=10_000)
+        else:
+            pn.state.notifications.success(msg, duration=5_000)
+
+    def clear_survey_overlay(self):
+        """Remove any loaded survey overlay."""
+        if self.survey_values is None:
+            return
+        self.survey_values = None
+        self._set_survey_range_inputs(None, None, enabled=False)
+        if self.survey_color_bar is not None:
+            self.survey_color_bar.visible = False
+            self.survey_color_bar_title.visible = False
+        self.update_electrode_colors()
+        self._reposition_region_labels()
+
+    def _set_survey_range_inputs(self, vmin, vmax, enabled: bool):
+        """Update the vmin/vmax widgets without re-triggering their watchers."""
+        if not hasattr(self, "survey_vmin_input"):
+            return
+        self._survey_range_suspend = True
+        try:
+            self.survey_vmin_input.disabled = not enabled
+            self.survey_vmax_input.disabled = not enabled
+            self.survey_vmin_input.value = vmin if vmin is not None else 0.0
+            self.survey_vmax_input.value = vmax if vmax is not None else 1.0
+        finally:
+            self._survey_range_suspend = False
+
+    def _on_survey_range_change(self, _event=None):
+        """User edited vmin/vmax — update colormap and redraw."""
+        if self._survey_range_suspend or self.survey_values is None:
+            return
+        low = float(self.survey_vmin_input.value)
+        high = float(self.survey_vmax_input.value)
+        if high <= low:
+            pn.state.notifications.warning(
+                "Survey vmax must be greater than vmin.", duration=5_000
+            )
+            return
+        self.survey_cmap.low = low
+        self.survey_cmap.high = high
+        self.update_electrode_colors()
+
     ######################
     ##### GUI layout #####
     ######################
@@ -1594,6 +1803,7 @@ class ChannelmapGUI(param.Parameterized):
                 ("Shank", "@shank_id"),
                 ("Z position", "@y μm"),
                 ("Status", "@status"),
+                ("Survey value", "@val"),
             ],
         )
 
@@ -1644,6 +1854,28 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         self.setup_interactions()  # Only necessary for the tap tool
+
+        # Survey overlay color bar (hidden until a survey is loaded).
+        # Title is a separate annotation so text_align="center" is honored
+        # over the full bar width.
+        self.survey_color_bar = ColorBar(
+            color_mapper=self.survey_cmap,
+            label_standoff=6,
+            location="bottom",
+            orientation="horizontal",
+            height=15,
+            width=300,
+            visible=self.survey_values is not None,
+        )
+        self.survey_color_bar_title = Title(
+            text="Survey value",
+            align="center",
+            text_font_size="11px",
+            text_font_style="normal",
+            visible=self.survey_values is not None,
+        )
+        self.plot.add_layout(self.survey_color_bar, "above")
+        self.plot.add_layout(self.survey_color_bar_title, "above")
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
@@ -2061,6 +2293,25 @@ class ChannelmapGUI(param.Parameterized):
         )
         self.apply_uploaded_imro_button.on_click(lambda event: self.apply_uploaded_imro())
 
+        # Survey (.txt) overlay widgets
+        self.survey_file_loader = pn.widgets.FileInput(accept=".txt,.tsv", width=300)
+        self.apply_survey_button = pn.widgets.Button(
+            name="Load survey overlay ⬆", button_type="primary", width=160
+        )
+        self.apply_survey_button.on_click(lambda event: self.load_survey_file())
+        self.clear_survey_button = pn.widgets.Button(
+            name="Clear overlay", button_type="default", width=120
+        )
+        self.clear_survey_button.on_click(lambda event: self.clear_survey_overlay())
+        self.survey_vmin_input = pn.widgets.FloatInput(
+            name="vmin", value=0.0, step=0.1, width=140, disabled=True
+        )
+        self.survey_vmax_input = pn.widgets.FloatInput(
+            name="vmax", value=1.0, step=0.1, width=140, disabled=True
+        )
+        self.survey_vmin_input.param.watch(self._on_survey_range_change, "value")
+        self.survey_vmax_input.param.watch(self._on_survey_range_change, "value")
+
 
     def create_download_buttons(self):
         """Create download buttons as a reactive pane"""
@@ -2212,6 +2463,15 @@ class ChannelmapGUI(param.Parameterized):
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
             pn.Column(
+                pn.pane.Markdown("## Survey overlay", margin=(-5, 0, 0, 0)),
+                self.survey_file_loader,
+                pn.Row(self.apply_survey_button, self.clear_survey_button),
+                pn.Row(self.survey_vmin_input, self.survey_vmax_input),
+                styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
+                margin=(10, 5, 0, 5),
+                sizing_mode="stretch_width",
+            ),
+            pn.Column(
                 pn.pane.Markdown("## Anatomical overlay 🧠", margin=(-5, 0, 0, 0)),
                 self.atlas_name_input,
                 self.anatomy_coord_note,
@@ -2322,6 +2582,12 @@ class ChannelmapGUI(param.Parameterized):
         Handle probe type changes, which require to reset the whole plot.
         Param module monitors value changes of probe_type.
         """
+        # Drop any loaded survey overlay — electrode IDs don't transfer
+        # across probe types and positions_df is about to be reloaded.
+        self.survey_values = None
+        if hasattr(self, "survey_vmin_input"):
+            self._set_survey_range_inputs(None, None, enabled=False)
+
         self.clear_bokeh_data()
         self.load_probe_data()
         self.setup_bokeh_plot()
