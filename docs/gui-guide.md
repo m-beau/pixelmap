@@ -250,21 +250,24 @@ Regions are listed **alphabetically by acronym** so they are easy to scan regard
 
 ## Optional feature 2: SpikeGLX Survey Overlay
 
-SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap can overlay these values as a heatmap on the shank viewer so you can visually identify the most active contacts before committing to a channelmap.
+SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap overlays these values *alongside* the probe so you can visually identify the most active contacts before committing to a channelmap.
+
+PixelMap draws a thin colored **sidebar bar** just outside the shank outline for each contact — a "mirror image" of the contact column. Each bar is colored by that contact's `Val` using a Viridis colormap. Left-column contacts get a bar on the left of the outline; right-column contacts get a bar on the right.
 
 ### Exporting and loading a survey
 
 1. In SpikeGLX, run a survey recording. Offline, load the recording and open up the graphical shank viewer. Under the **View** tab, select *Sample whole survey* and click the update button to have SpikeGLX compute activity across all contacts. Use the **Export Map** button to save a survey `.txt` file.
 2. In PixelMap, expand the **Survey overlay** section in the left panel.
 3. Click the file picker and choose your survey `.txt` file.
-4. Press **Load survey overlay**. The shank viewer will immediately color all contacts by `Val` using a Viridis colormap, and a colorbar labeled *Survey Val* will appear above the plot.
+4. Press **Load survey overlay**. A Viridis-colored bar appears just outside the shank outline next to each contact, and a colorbar labeled *Survey Val* appears above the plot.
 
 ### Reading the overlay
 
-- All contacts are colored by `Val`. The colorbar shows the current min/max range.
-- **Selected contacts** retain a red border so your current selection stays visible on top of the heatmap.
-- **Unavailable contacts** (ADC conflicts) render at reduced opacity so they remain distinguishable.
-- Hover over any contact to see its exact `Survey value` in the tooltip.
+- **The contacts keep their normal coloring** — red (selected), black (unavailable), light gray (available) — so your selection and the ADC constraints stay fully visible.
+- The **sidebar bars** flanking the shank are colored by `Val`. The colorbar above the plot shows the current min/max range.
+- Bars for **unavailable contacts** (ADC conflicts) are dimmed (reduced opacity) so they're distinguishable from available ones.
+- Contacts with no matching survey value get a neutral gray bar.
+- Hover over a contact to see its exact `Survey value` in the tooltip.
 
 ### Adjusting the colormap range
 
@@ -272,7 +275,7 @@ The **vmin** and **vmax** inputs are auto-populated from the file's minimum and 
 
 ### Clearing the overlay
 
-Click **Clear overlay** to remove the heatmap and return to the standard electrode coloring. The overlay is also cleared automatically when you switch probe types, since electrode positions differ across probe types.
+Click **Clear overlay** to remove the survey overlay. The overlay is also cleared automatically when you switch probe types, since contact positions differ across probe types.
 
 :::{note}
 The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
