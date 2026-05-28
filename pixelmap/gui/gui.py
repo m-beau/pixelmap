@@ -1525,7 +1525,7 @@ class ChannelmapGUI(param.Parameterized):
         ]
 
         self.plot = figure(
-            width=self.probe_plot_width,
+            sizing_mode="stretch_width",
             height=self.probe_plot_height,
             tools=tools,
             title=f"Neuropixels {self.probe_type} Electrode Layout",
@@ -1541,6 +1541,19 @@ class ChannelmapGUI(param.Parameterized):
         # Create electrode data and visualization
         self.create_electrode_data()
         self.setup_electrode_visualization()
+
+        # Set initial y_range so only the bottom third of the probe is visible:
+        # probe tips pinned at the bottom, top two-thirds hidden above the frame.
+        all_y = self.electrode_source.data["y"]
+        _min_y = min(all_y)
+        _max_y = max(all_y)
+        _probe_height = _max_y - _min_y
+        _tip_overhang = _probe_height * 0.08  # matches tip_height ratio in add_shank_outlines
+        self.plot.y_range = Range1d(
+            start=_min_y - _tip_overhang - 300,     # a little below the tip
+            end=_min_y + _probe_height / 3,          # 1/3 of probe height up from tip
+        )
+
         self.setup_interactions()  # Only necessary for the tap tool
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
@@ -1721,12 +1734,9 @@ class ChannelmapGUI(param.Parameterized):
             align="center",
         )
 
-        # Bokeh pane with proper scrolling - larger viewport for better visibility
-        self.plot_pane = pn.pane.Bokeh(
-            self.plot,
-            width=self.probe_plot_width,
-            height=self.probe_plot_height,  # Larger viewport height for better electrode visibility
-        )
+        # Bokeh pane - let the Bokeh figure's own sizing_mode/height control rendering.
+        # Do not impose Panel-level height; the container crops via CSS overflow.
+        self.plot_pane = pn.pane.Bokeh(self.plot)
 
         # Reference and gain inputs
         self.reference_selector_widget = pn.Param(
@@ -2122,12 +2132,48 @@ class ChannelmapGUI(param.Parameterized):
             scroll=False,
         )
 
-        # Main layout with properly scrollable plot container
+        # JS that auto-scrolls the probe container to the bottom on load
+        # so the probe tips are visible first, with the base above (scroll up to see).
+        scroll_to_bottom_pane = pn.pane.HTML(
+            """
+            <script>
+            (function() {
+              function scrollProbeToBottom() {
+                var container = document.querySelector('.probe-plot-container');
+                if (container) {
+                  container.scrollTop = container.scrollHeight;
+                } else {
+                  setTimeout(scrollProbeToBottom, 100);
+                }
+              }
+              if (document.readyState === 'complete') {
+                scrollProbeToBottom();
+              } else {
+                window.addEventListener('load', scrollProbeToBottom);
+              }
+            })();
+            </script>
+            """,
+            width=0,
+            height=0,
+            margin=0,
+        )
+
+        # Central plot container: fills remaining width between the two side columns,
+        # height locked to the browser viewport. The probe figure is taller than 100vh
+        # so it is cropped vertically (scrollable) with the tip visible at the bottom.
         central_plot_container = pn.Column(
+            scroll_to_bottom_pane,
             self.plot_pane,
-            width=self.probe_plot_width,
-            height=self.probe_plot_height,  # Match the plot pane height
-            scroll=True,  # Enable scrolling for the plot container
+            sizing_mode="stretch_width",
+            min_width=300,
+            css_classes=["probe-plot-container"],
+            styles={
+                "height": "100vh",
+                "overflow-y": "auto",
+                "overflow-x": "auto",
+            },
+            scroll=False,
         )
 
         layout = pn.Row(
@@ -2135,7 +2181,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.Spacer(width=370),  # Spacer for fixed controls panel on left
             central_plot_container,
             right_column,
-            sizing_mode="fixed",
+            sizing_mode="stretch_width",
         )
 
         return layout
