@@ -586,6 +586,16 @@ class ChannelmapGUI(param.Parameterized):
                     if electrode_id in zigzag_subset:
                         self.electrodes.select(Electrode(shank_id, electrode_id))
 
+            elif self.select_mode == "interleaved_select":
+                # interleaved logic - rows 0,1 then skip 2,3, then rows 4,5... (0,1,4,5,8,9...)
+                print(f"Box interleaved select: {len(new)} electrodes")
+                interleaved_subset = self.get_interleaved_subset()
+                for idx in new:
+                    shank_id = self.electrode_source.data["shank_id"][idx]
+                    electrode_id = self.electrode_source.data["electrode_id"][idx]
+                    if electrode_id in interleaved_subset:
+                        self.electrodes.select(Electrode(shank_id, electrode_id))
+
         # Update electrode visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
@@ -610,6 +620,31 @@ class ChannelmapGUI(param.Parameterized):
                 i += 4
             zigzag_subset = np.array(zigzag_subset)
         return zigzag_subset
+
+    def get_interleaved_subset(self):
+        """Return electrode IDs for the interleaved pattern: pairs 0-1, skip 2-3, pairs 4-5, ...
+        Selects every other row (two adjacent electrodes per row), e.g. 0,1,4,5,8,9,..."""
+        N_per_shank = PROBE_N[self.probe_type]["N"]
+        if self.probe_type == "1.0":
+            # 1.0 has one electrode per row; select every other pair of rows
+            interleaved_subset = []
+            i = 0
+            while i < N_per_shank:
+                interleaved_subset.append(i)
+                interleaved_subset.append(i + 1)
+                i += 4
+            interleaved_subset = np.array(interleaved_subset)
+        else:
+            # 2.0 probes: 2 electrodes per row, groups of 4 = 2 rows.
+            # Select first row of each pair of rows (electrodes 0,1 then 4,5 then 8,9...)
+            interleaved_subset = []
+            i = 0
+            while i < N_per_shank:
+                interleaved_subset.append(i)
+                interleaved_subset.append(i + 1)
+                i += 4
+            interleaved_subset = np.array(interleaved_subset)
+        return interleaved_subset
 
 
     def apply_preset(self):
@@ -1111,7 +1146,7 @@ class ChannelmapGUI(param.Parameterized):
                 "downloaded (on first overlay compute)."
             )
         return (
-            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
             "Tip coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
             "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
             "with AP increasing posteriorly, DV ventrally and ML from the right. "
@@ -1200,7 +1235,7 @@ class ChannelmapGUI(param.Parameterized):
         return (
             f'<div style="font-size: 11px; color: {color}; background: {bg}; '
             f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
-            f'margin: 4px 10px 4px 10px;">{icon} {body}</div>'
+            f'margin: 4px 0; text-align: justify;">{icon} {body}</div>'
         )
 
     def _update_anatomy_origin_note(self, *events):
@@ -1354,7 +1389,7 @@ class ChannelmapGUI(param.Parameterized):
             seen.setdefault(band.atlas_id, band)
 
         rows = []
-        for band in seen.values():
+        for band in sorted(seen.values(), key=lambda b: b.acronym.lower()):
             swatch = "#{:02x}{:02x}{:02x}".format(*band.rgb)
             rows.append(
                 f'<div style="display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px;">'
@@ -1433,9 +1468,19 @@ class ChannelmapGUI(param.Parameterized):
                 location.search = query
         except Exception:
             pass
-        self.share_link_output.value = full_url
+        # Trigger the JS clipboard copy via the hidden TextInput watcher.
+        # Counter prefix ensures value always changes so jscallback fires on re-click.
+        self._share_link_counter += 1
+        self.share_link_trigger.value = f"{self._share_link_counter}:{full_url}"
+        self.share_link_button.name = "Copy shareable link to clipboard 🔗"
+        self.share_link_output.object = (
+            f'<input type="text" readonly value="{full_url}" '
+            f'style="width:100%;font-family:monospace;font-size:12px;color:#555;'
+            f'border:1px solid #ddd;border-radius:4px;padding:4px 6px;'
+            f'background:#f5f5f5;box-sizing:border-box;cursor:text;">'
+        )
         if pn.state.notifications is not None:
-            pn.state.notifications.success("Share link ready — copy from the field below.", duration=5_000)
+            pn.state.notifications.success("Link copied to clipboard!", duration=3_000)
 
     def do_undo(self):
         """Roll back to the previous selection snapshot."""
@@ -1488,6 +1533,7 @@ class ChannelmapGUI(param.Parameterized):
         select_box_string = "Select Electrodes"
         deselect_box_string = "Deselect Electrodes"
         zigzagselect_box_string = "Zigzag-select Electrodes"
+        interleavedselect_box_string = "Interleaved-select Electrodes"
 
         self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
 
@@ -1497,6 +1543,10 @@ class ChannelmapGUI(param.Parameterized):
 
         self.box_zigzagselect_tool = BoxSelectTool(
             description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
+        )
+
+        self.box_interleavedselect_tool = BoxSelectTool(
+            description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
         )
 
         # Always-on gesture tools — hidden from toolbar (visible=False).
@@ -1527,6 +1577,7 @@ class ChannelmapGUI(param.Parameterized):
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
+            self.box_interleavedselect_tool,
         ]
 
         self.plot = figure(
@@ -1564,7 +1615,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
-        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string)
+        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string)
 
     def setup_interactions(self):
         """Setup click and selection interactions"""
@@ -1583,7 +1634,7 @@ class ChannelmapGUI(param.Parameterized):
         # Python callbacks for interactions - this is the key part
         self.electrode_source.selected.on_change("indices", self.on_electrode_selection)
 
-    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string):
+    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string):
         """JS callback to expose active tools in toolbar"""
         # workaround https://stackoverflow.com/questions/58210752/how-to-get-currently-active-tool-in-bokeh-figure
 
@@ -1596,6 +1647,7 @@ class ChannelmapGUI(param.Parameterized):
             let select_tool = null;
             let deselect_tool = null;
             let zigzagselect_tool = null;
+            let interleavedselect_tool = null;
 
             tools.forEach((tool, index) => {
                 if (tool.description === 'select_box_string') {
@@ -1607,15 +1659,20 @@ class ChannelmapGUI(param.Parameterized):
                 if (tool.description === 'zigzagselect_box_string') {
                     zigzagselect_tool = tool;
                 }
+                if (tool.description === 'interleavedselect_box_string') {
+                    interleavedselect_tool = tool;
+                }
             });
 
-            if (select_tool && deselect_tool && zigzagselect_tool) {
+            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool) {
                 if (select_tool.active) {
                     tools_info = 'select';
                 } else if (deselect_tool.active) {
                     tools_info = 'deselect';
                 } else if (zigzagselect_tool.active) {
                     tools_info = 'zigzag_select';
+                } else if (interleavedselect_tool.active) {
+                    tools_info = 'interleaved_select';
                 } else {
                     tools_info = 'neither_active';
                 }
@@ -1626,6 +1683,7 @@ class ChannelmapGUI(param.Parameterized):
 
         tool_state.data = {active_tool: [tools_info]};
         """
+        js_code = js_code.replace("interleavedselect_box_string", interleavedselect_box_string)
         js_code = js_code.replace("zigzagselect_box_string", zigzagselect_box_string)
         js_code = js_code.replace("deselect_box_string", deselect_box_string)
         js_code = js_code.replace("select_box_string", select_box_string)
@@ -1653,6 +1711,9 @@ class ChannelmapGUI(param.Parameterized):
             elif active_tool == "zigzag_select":
                 self.select_mode = "zigzag_select"
                 print("→ ZIGZAG-SELECT box activated")
+            elif active_tool == "interleaved_select":
+                self.select_mode = "interleaved_select"
+                print("→ INTERLEAVED-SELECT box activated")
             else:
                 self.select_mode = "select"
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
@@ -1773,7 +1834,7 @@ class ChannelmapGUI(param.Parameterized):
             button_type="default",
             disabled=True,
             width=120,
-            margin=(0, 5, 5, 10),
+            margin=(0, 5, 5, 5),
             css_classes=["pixelmap-undo"],
         )
         self.redo_button = pn.widgets.Button(
@@ -1781,7 +1842,7 @@ class ChannelmapGUI(param.Parameterized):
             button_type="default",
             disabled=True,
             width=120,
-            margin=(0, 10, 5, 5),
+            margin=(0, 5, 5, 5),
             css_classes=["pixelmap-redo"],
         )
         self.undo_button.on_click(lambda event: self.do_undo())
@@ -1818,14 +1879,24 @@ class ChannelmapGUI(param.Parameterized):
 
         # Share-link widgets
         self.share_link_button = pn.widgets.Button(
-            name="Get shareable link 🔗", button_type="primary", width=250
+            name="Get shareable link 🔗", button_type="primary", sizing_mode="stretch_width"
         )
-        self.share_link_output = pn.widgets.TextInput(
-            name="Share link (copy to clipboard)",
-            value="",
-            disabled=True,
-            width=300,
-        )
+        self.share_link_output = pn.pane.HTML("", sizing_mode="stretch_width", margin=(0, 0))
+        # Hidden trigger: when Python sets its value the JS callback fires and
+        # copies the URL to the clipboard automatically.
+        self._share_link_counter = 0
+        self.share_link_trigger = pn.widgets.TextInput(value="", visible=False)
+        # Value format: "{counter}:{url}" — counter always increments so the
+        # value always changes, guaranteeing the JS callback fires on re-clicks.
+        self.share_link_trigger.jscallback(value="""
+            if (cb_obj.value) {
+                var idx = cb_obj.value.indexOf(':');
+                var url = idx >= 0 ? cb_obj.value.slice(idx + 1) : cb_obj.value;
+                navigator.clipboard.writeText(url).catch(function(e) {
+                    console.warn('Clipboard copy failed:', e);
+                });
+            }
+        """)
         self.share_link_button.on_click(lambda event: self.update_share_link())
 
         # Anatomy widgets
@@ -1834,7 +1905,8 @@ class ChannelmapGUI(param.Parameterized):
             name="Atlas",
             value=atlas_default,
             options=atlas_options,
-            width=300,
+            sizing_mode="stretch_width",
+            margin=(5, 0),
         )
         # Default the tip to the atlas center (mid-brain) when we can read it
         # cheaply; otherwise fall back to a reasonable fixed coordinate.
@@ -1842,25 +1914,25 @@ class ChannelmapGUI(param.Parameterized):
             self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
         )
         self.tip_ap_input = pn.widgets.FloatInput(
-            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, width=95, margin=(5, 2)
+            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         self.tip_ml_input = pn.widgets.FloatInput(
-            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, width=95, margin=(5, 2)
+            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         self.tip_dv_input = pn.widgets.FloatInput(
-            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, width=95, margin=(5, 2)
+            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         self.pitch_input = pn.widgets.FloatInput(
             name="Pitch (deg)", value=0.0, step=1.0,
-            start=-90.0, end=90.0, width=105, margin=(5, 2),
+            start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         self.yaw_input = pn.widgets.FloatInput(
             name="Yaw (deg)", value=0.0, step=1.0,
-            start=-90.0, end=90.0, width=105, margin=(5, 2),
+            start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         self.shank_orientation_input = pn.widgets.FloatInput(
             name="Shank ori (deg)", value=0.0, step=1.0,
-            start=-180.0, end=360.0, width=108, margin=(5, 2),
+            start=-180.0, end=360.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         # Optional bregma-relative coordinate mode + per-atlas calibration,
         # prefilled with published estimates (see anatomy.atlas.reference_params).
@@ -1870,36 +1942,36 @@ class ChannelmapGUI(param.Parameterized):
         }
         b_ap, b_ml, b_dv = ref["bregma_um"]
         self.bregma_relative_toggle = pn.widgets.Checkbox(
-            name="Tip relative to bregma", value=False, width=300, margin=(6, 0, 0, 10),
+            name="Tip relative to bregma", value=False, sizing_mode="stretch_width", margin=(6, 0, 0, 0),
         )
         self.bregma_ap_input = pn.widgets.FloatInput(
-            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, width=95, margin=(5, 2)
+            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         self.bregma_ml_input = pn.widgets.FloatInput(
-            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, width=95, margin=(5, 2)
+            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         self.bregma_dv_input = pn.widgets.FloatInput(
-            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, width=95, margin=(5, 2)
+            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         # Per-axis squish + AP tilt warp the atlas image in the locator; they
         # only do anything in bregma mode — disabled until the toggle is on.
         self.dv_squish_input = pn.widgets.FloatInput(
-            name="DV squish", value=ref["dv_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+            name="DV squish", value=ref["dv_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
         )
         self.ap_squish_input = pn.widgets.FloatInput(
-            name="AP squish", value=ref["ap_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+            name="AP squish", value=ref["ap_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
         )
         self.ml_squish_input = pn.widgets.FloatInput(
-            name="ML squish", value=ref["ml_squish"], step=0.005, width=78, margin=(5, 2), disabled=True
+            name="ML squish", value=ref["ml_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
         )
         self.tilt_input = pn.widgets.FloatInput(
-            name="AP tilt°", value=ref["tilt_deg"], step=0.5, width=78, margin=(5, 2), disabled=True
+            name="AP tilt°", value=ref["tilt_deg"], step=0.5, sizing_mode="stretch_width", margin=(5, 2), disabled=True
         )
         self.bregma_estimate_header = pn.pane.HTML(
-            self._bregma_header_html(), width=320
+            self._bregma_header_html(), sizing_mode="stretch_width", margin=(0, 0)
         )
         self.anatomy_coord_note = pn.pane.HTML(
-            self._anatomy_coord_note_html(), width=320
+            self._anatomy_coord_note_html(), sizing_mode="stretch_width", margin=(0, 0)
         )
         self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
@@ -1919,30 +1991,31 @@ class ChannelmapGUI(param.Parameterized):
         self._update_landmark_labels()  # name the toggle/fields for the default atlas
         self.anatomy_help = pn.pane.HTML(
             (
-                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0;">'
+                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
                 "<b>Pitch</b> = AP tilt (probe leaning forward / backward). "
                 "<b>Yaw</b> = ML tilt (probe leaning left / right). "
                 "<b>Shank orientation</b> = direction of shanks 0→3 in the "
                 "horizontal plane; 0° = lateral (+ML), 90° = anterior (+AP)."
                 "</div>"
             ),
-            width=320,
+            sizing_mode="stretch_width",
+            margin=(0, 0),
         )
         self.compute_anatomy_button = pn.widgets.Button(
-            name="Compute anatomical overlay 🧠", button_type="primary", width=250
+            name="Compute anatomical overlay 🧠", button_type="primary",
+            sizing_mode="stretch_width", margin=(0, 0, 0, 0),
         )
         self.clear_anatomy_button = pn.widgets.Button(
-            name="Clear overlay", button_type="default", width=120
+            name="Clear overlay", button_type="danger", width=110, margin=(0, 0, 0, 0),
         )
         self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
-        self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), width=320)
+        self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
         self.anatomy_locator = pn.pane.Matplotlib(
             object=None, width=320, height=290, tight=True, format="png",
         )
         # Hidden until the first overlay is computed; cleared by "Clear overlay".
         self.anatomy_locator_section = pn.Column(
-            pn.pane.Markdown("## Probe location", margin=(15, 0, -5, 30)),
             self.anatomy_locator,
             visible=False,
         )
@@ -2010,7 +2083,7 @@ class ChannelmapGUI(param.Parameterized):
             self.undo_keyboard_pane,
             pn.Column(
                 self.electrode_counter,
-                pn.Row(self.undo_button, self.redo_button, margin=(0, 0, 0, 10)),
+                pn.Row(self.undo_button, self.redo_button, align="center", margin=(0, 0, 0, 0)),
                 self.clear_button,
                 margin=(0, 0, -10, 20),
             ),
@@ -2020,14 +2093,15 @@ class ChannelmapGUI(param.Parameterized):
 
             pn.pane.Markdown("## Share this layout", margin=(15, 0, -5, 30)),
             pn.Column(
+                self.share_link_trigger,  # hidden; JS watches its value to copy to clipboard
                 self.share_link_button,
                 self.share_link_output,
-                margin=(0, 0, 0, 20),
+                margin=(0, 0, 0, 10),
+                sizing_mode="stretch_width",
             ),
 
+            pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 30)),
             self.anatomy_locator_section,
-
-            pn.pane.Markdown("## Region legend", margin=(15, 0, -5, 30)),
             self.anatomy_legend,
 
             pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
@@ -2040,7 +2114,7 @@ class ChannelmapGUI(param.Parameterized):
             <b>You can mix and match four selection methods:</b><br>
             • <b>Presets:</b> Pre-configured channelmaps that respect wiring constraints<br>
             • <b>Textual selection:</b> Type electrode ranges (e.g., "1-10,20-25") to add to the current selection<br>
-            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, or "zigzag selection") to maually select multiple sites<br>
+            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, or "zigzag/interleaved selection") to manually select multiple sites<br>
             • <b>Selection from pre-existing IMRO file</b>: you can pre-load an IMRO file as a starting point before doing any of the above.<br><br>
 
             Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like.
@@ -2108,7 +2182,7 @@ class ChannelmapGUI(param.Parameterized):
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
             pn.Column(
-                pn.pane.Markdown("## Anatomical overlay", margin=(-5, 0, 0, 10)),
+                pn.pane.Markdown("## Anatomical overlay 🧠", margin=(-5, 0, 0, 0)),
                 self.atlas_name_input,
                 self.anatomy_coord_note,
                 pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
@@ -2119,8 +2193,8 @@ class ChannelmapGUI(param.Parameterized):
                 pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
                 pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
                        self.tilt_input, sizing_mode="stretch_width"),
-                self.compute_anatomy_button,
-                self.clear_anatomy_button,
+                pn.Row(self.compute_anatomy_button, self.clear_anatomy_button,
+                       sizing_mode="stretch_width", styles={"gap": "6px"}),
                 styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
                 margin=(10, 5, 0, 5),
             ),
