@@ -2,10 +2,6 @@
 
 Why a wrapper:
 
-* Make the dependency optional — if ``brainglobe-atlasapi`` is not
-  installed, importing :mod:`pixelmap` itself must still work; only the
-  anatomy-specific entry points should fail, and they should fail with a
-  one-line install hint rather than an opaque ``ModuleNotFoundError``.
 * Cache atlas instances per-process so repeated lookups don't re-load the
   annotation volume (it's tens of MB).
 * Expose a tiny ``RegionInfo`` record so the rest of PixelMap doesn't
@@ -16,16 +12,15 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
+from brainglobe_atlasapi import BrainGlobeAtlas
+from brainglobe_atlasapi.list_atlases import (
+    get_all_atlases_lastversions,
+    get_downloaded_atlases,
+)
 
 _DEFAULT_ATLAS = "allen_mouse_25um"
-
-_BRAINGLOBE_INSTALL_HINT = (
-    "Anatomical-overlay features require brainglobe-atlasapi. "
-    "Install with: pip install 'pixelmap[anatomy]'"
-)
 
 
 @dataclass(frozen=True)
@@ -38,15 +33,6 @@ class RegionInfo:
     rgb: tuple[int, int, int]  # 0-255 color as defined by the atlas
 
 
-def _import_brainglobe() -> Any:
-    """Return the BrainGlobeAtlas class, raising a friendly error if missing."""
-    try:
-        from brainglobe_atlasapi import BrainGlobeAtlas
-    except ImportError as exc:
-        raise ImportError(_BRAINGLOBE_INSTALL_HINT) from exc
-    return BrainGlobeAtlas
-
-
 @functools.lru_cache(maxsize=4)
 def get_atlas(name: str = _DEFAULT_ATLAS):
     """Return a cached :class:`BrainGlobeAtlas` instance.
@@ -55,17 +41,7 @@ def get_atlas(name: str = _DEFAULT_ATLAS):
     download/caching to brainglobe — its on-disk cache is shared across
     processes.
     """
-    BrainGlobeAtlas = _import_brainglobe()
     return BrainGlobeAtlas(name)
-
-
-def is_available() -> bool:
-    """Cheap check used by the GUI to decide whether to show the panel."""
-    try:
-        _import_brainglobe()
-    except ImportError:
-        return False
-    return True
 
 
 def list_atlases() -> list[str]:
@@ -77,10 +53,6 @@ def list_atlases() -> list[str]:
     atlas download — only an HTTP HEAD/JSON fetch of the registry index,
     which is cached locally by brainglobe.
     """
-    try:
-        from brainglobe_atlasapi.list_atlases import get_all_atlases_lastversions
-    except ImportError as exc:
-        raise ImportError(_BRAINGLOBE_INSTALL_HINT) from exc
     return sorted(get_all_atlases_lastversions().keys())
 
 
@@ -100,10 +72,6 @@ def is_downloaded(name: str = _DEFAULT_ATLAS) -> bool:
     un-downloaded atlas from a dropdown should not kick off a tens-of-MB
     download just to label the coordinate space.
     """
-    try:
-        from brainglobe_atlasapi.list_atlases import get_downloaded_atlases
-    except ImportError as exc:
-        raise ImportError(_BRAINGLOBE_INSTALL_HINT) from exc
     return name in get_downloaded_atlases()
 
 

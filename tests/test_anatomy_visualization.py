@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 
@@ -43,8 +40,7 @@ def _reset_cache():
 
 @pytest.fixture
 def fake_brainglobe(monkeypatch):
-    fake_module = SimpleNamespace(BrainGlobeAtlas=_LayeredAtlas)
-    monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", fake_module)
+    monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _LayeredAtlas)
     yield
 
 

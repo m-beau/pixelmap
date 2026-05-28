@@ -1,13 +1,10 @@
 """Tests for the locator schematic (brain slice + colored regions + probe).
 
-As elsewhere in the anatomy tests, we patch brainglobe with a tiny fake
+As elsewhere in the anatomy tests, we patch BrainGlobeAtlas with a tiny fake
 atlas so nothing is downloaded.
 """
 
 from __future__ import annotations
-
-import sys
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -47,9 +44,7 @@ def _reset_caches():
 
 @pytest.fixture
 def fake_brainglobe(monkeypatch):
-    monkeypatch.setitem(
-        sys.modules, "brainglobe_atlasapi", SimpleNamespace(BrainGlobeAtlas=_FakeAtlas)
-    )
+    monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _FakeAtlas)
     yield
 
 

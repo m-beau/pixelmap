@@ -899,8 +899,6 @@ class ChannelmapGUI(param.Parameterized):
     def _available_atlases(self) -> tuple[list[str], str]:
         """List atlases known to brainglobe; fall back to a single default."""
         default = "allen_mouse_25um"
-        if not anatomy_atlas.is_available():
-            return [default], default
         try:
             atlases = anatomy_atlas.list_atlases()
         except Exception:
@@ -930,13 +928,10 @@ class ChannelmapGUI(param.Parameterized):
 
     def compute_anatomy_overlay(self):
         """Compute region bands for the current pose and render them."""
-        if not anatomy_atlas.is_available():
-            if pn.state.notifications is not None:
-                pn.state.notifications.error(
-                    "Anatomy support not installed. Run: pip install 'pixelmap[anatomy]'",
-                    duration=10_000,
-                )
-            return
+        atlas_name = str(self.atlas_name_input.value).strip()
+        if not anatomy_atlas.is_downloaded(atlas_name):
+            self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
+            self.compute_anatomy_button.disabled = True
 
         probe_xs = self._shank_probe_xs()
         plot_centers = self._shank_plot_centers()
@@ -958,17 +953,13 @@ class ChannelmapGUI(param.Parameterized):
                 pitch_deg=float(self.pitch_input.value),
                 yaw_deg=float(self.yaw_input.value),
                 shank_orientation_deg=float(self.shank_orientation_input.value),
-                atlas_name=str(self.atlas_name_input.value).strip(),
+                atlas_name=atlas_name,
                 step_um=25.0,
             )
-        except ImportError as exc:
-            if pn.state.notifications is not None:
-                pn.state.notifications.error(str(exc), duration=10_000)
-            return
         except Exception as exc:
             print(f"Anatomy lookup failed: {exc}")
-            if pn.state.notifications is not None:
-                pn.state.notifications.error(f"Anatomy lookup failed: {exc}", duration=10_000)
+            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+            self.compute_anatomy_button.disabled = False
             return
 
         width = self._shank_plot_width()
@@ -1025,7 +1016,6 @@ class ChannelmapGUI(param.Parameterized):
         # Bregma dot whenever an estimate exists or we're in bregma mode (using
         # the current, possibly-edited, values). DV-squish + tilt warp the brain
         # image only in bregma mode (where the squish/tilt inputs are live).
-        atlas_name = str(self.atlas_name_input.value).strip()
         bregma_mode = bool(self.bregma_relative_toggle.value)
         # The atlas is downloaded now (bands were computed), so a previously
         # "pending" AC landmark can be filled in (without clobbering user edits).
@@ -1068,6 +1058,9 @@ class ChannelmapGUI(param.Parameterized):
 
         # Overlay now exists → later input edits live-update it.
         self._anatomy_overlay_active = True
+        self.anatomy_locator_section.visible = True
+        self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+        self.compute_anatomy_button.disabled = False
 
     def clear_anatomy_overlay(self):
         """Wipe the region bands, labels, boundaries and reset the legend."""
@@ -1079,6 +1072,7 @@ class ChannelmapGUI(param.Parameterized):
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
         self.anatomy_legend.object = self._empty_legend_html()
         self.anatomy_locator.object = None
+        self.anatomy_locator_section.visible = False
 
     def _empty_legend_html(self) -> str:
         return (
@@ -1097,15 +1091,14 @@ class ChannelmapGUI(param.Parameterized):
         """
         name = str(self.atlas_name_input.value).strip()
         native = None
-        if anatomy_atlas.is_available():
-            try:
-                if anatomy_atlas.is_downloaded(name):
-                    native = (
-                        anatomy_atlas.orientation_code(name),
-                        anatomy_atlas.origin_corner(name),
-                    )
-            except Exception:
-                native = None
+        try:
+            if anatomy_atlas.is_downloaded(name):
+                native = (
+                    anatomy_atlas.orientation_code(name),
+                    anatomy_atlas.origin_corner(name),
+                )
+        except Exception:
+            native = None
         if native:
             code, origin = native
             native_line = (
@@ -1143,6 +1136,12 @@ class ChannelmapGUI(param.Parameterized):
             self.bregma_estimate_header.object = self._bregma_header_html()
         finally:
             self._suppress_anatomy_recompute = False
+        # Reflect download state in the button label so users know before clicking.
+        name = str(self.atlas_name_input.value).strip()
+        if anatomy_atlas.is_downloaded(name):
+            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+        else:
+            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
         self._recompute_anatomy_if_active()
 
     def _update_landmark_labels(self):
@@ -1201,7 +1200,7 @@ class ChannelmapGUI(param.Parameterized):
         return (
             f'<div style="font-size: 11px; color: {color}; background: {bg}; '
             f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
-            f'margin: 8px 10px 2px 10px;">{icon} {body}</div>'
+            f'margin: 4px 10px 4px 10px;">{icon} {body}</div>'
         )
 
     def _update_anatomy_origin_note(self, *events):
@@ -1215,8 +1214,6 @@ class ChannelmapGUI(param.Parameterized):
         download (used on init and on every atlas-selection change).
         """
         name = str(name).strip()
-        if not anatomy_atlas.is_available():
-            return None
         try:
             if not anatomy_atlas.is_downloaded(name):
                 return None
@@ -1281,7 +1278,7 @@ class ChannelmapGUI(param.Parameterized):
         spec["landmark"] = landmark
         if landmark == "anterior commissure":
             # Human (AC-PC): derive it from the annotation when downloaded.
-            if not anatomy_atlas.is_available() or not anatomy_atlas.is_downloaded(name):
+            if not anatomy_atlas.is_downloaded(name):
                 spec["status"] = "ac_pending"
                 return spec
             try:
@@ -1927,18 +1924,16 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_locator = pn.pane.Matplotlib(
             object=None, width=320, height=290, tight=True, format="png",
         )
+        # Hidden until the first overlay is computed; cleared by "Clear overlay".
+        self.anatomy_locator_section = pn.Column(
+            pn.pane.Markdown("## Probe location", margin=(15, 0, -5, 30)),
+            self.anatomy_locator,
+            visible=False,
+        )
 
-        if not anatomy_atlas.is_available():
-            install_hint = (
-                "<i>Optional: install with </i><code>pip install 'pixelmap[anatomy]'</code>"
-                "<i> to enable atlas lookups.</i>"
-            )
-            self.anatomy_install_hint = pn.pane.HTML(
-                f'<div style="font-size: 12px; color: #b00; padding: 4px 0;">{install_hint}</div>',
-                width=300,
-            )
-        else:
-            self.anatomy_install_hint = pn.Spacer(height=0)
+        # Set initial button label based on whether the default atlas is already cached.
+        if not anatomy_atlas.is_downloaded(atlas_default):
+            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
 
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
@@ -1995,7 +1990,7 @@ class ChannelmapGUI(param.Parameterized):
         """Create the main Panel layout"""
 
         # Counter and Downloader (fixed on the right)
-        counter_downloader = pn.Column(
+        right_column = pn.Column(
             self.undo_keyboard_pane,
             pn.Column(
                 self.electrode_counter,
@@ -2014,8 +2009,7 @@ class ChannelmapGUI(param.Parameterized):
                 margin=(0, 0, 0, 20),
             ),
 
-            pn.pane.Markdown("## Probe location", margin=(15, 0, -5, 30)),
-            self.anatomy_locator,
+            self.anatomy_locator_section,
 
             pn.pane.Markdown("## Region legend", margin=(15, 0, -5, 30)),
             self.anatomy_legend,
@@ -2050,7 +2044,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         # Controls panel (fixed on left)
-        controls = pn.Column(
+        left_column = pn.Column(
             pn.pane.Markdown(
                 (
                     f"<div style='text-align: center; padding: 12px;'><strong>See project (v{__version__}) at:"
@@ -2099,7 +2093,6 @@ class ChannelmapGUI(param.Parameterized):
             self.apply_uploaded_imro_button,
             pn.Column(
                 pn.pane.Markdown("## Anatomical overlay", margin=(-5, 0, 0, 10)),
-                self.anatomy_install_hint,
                 self.atlas_name_input,
                 self.anatomy_coord_note,
                 pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
@@ -2130,7 +2123,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         # Main layout with properly scrollable plot container
-        plot_container = pn.Column(
+        central_plot_container = pn.Column(
             self.plot_pane,
             width=self.probe_plot_width,
             height=self.probe_plot_height,  # Match the plot pane height
@@ -2138,10 +2131,10 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         layout = pn.Row(
-            controls,
+            left_column,
             pn.Spacer(width=370),  # Spacer for fixed controls panel on left
-            plot_container,
-            counter_downloader,
+            central_plot_container,
+            right_column,
             sizing_mode="fixed",
         )
 

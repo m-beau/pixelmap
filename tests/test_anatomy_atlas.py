@@ -1,15 +1,11 @@
 """Tests for the brainglobe atlas wrapper.
 
 We don't want the test suite to download a real atlas — that's tens of MB
-and CI-hostile. We patch the brainglobe entry points with a tiny fake atlas
-that exercises the indexing logic.
+and CI-hostile. We patch atlas_module.BrainGlobeAtlas with a tiny fake atlas
+that exercises the indexing logic without touching the network.
 """
 
 from __future__ import annotations
-
-import sys
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -52,25 +48,9 @@ def _reset_atlas_cache():
 
 @pytest.fixture
 def fake_brainglobe(monkeypatch):
-    """Inject a fake brainglobe_atlasapi module so _import_brainglobe succeeds."""
-    fake_module = SimpleNamespace(BrainGlobeAtlas=_FakeAtlas)
-    monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", fake_module)
+    """Patch BrainGlobeAtlas in the atlas module with a tiny fake."""
+    monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _FakeAtlas)
     yield
-
-
-class TestAvailability:
-    def test_is_available_true_when_brainglobe_present(self, fake_brainglobe):
-        assert atlas_module.is_available() is True
-
-    def test_is_available_false_when_brainglobe_missing(self, monkeypatch):
-        # Hide any installed copy so the import fails reliably.
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", None)
-        assert atlas_module.is_available() is False
-
-    def test_lookup_raises_install_hint_when_missing(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", None)
-        with pytest.raises(ImportError, match="pixelmap\\[anatomy\\]"):
-            atlas_module.get_atlas("allen_mouse_25um")
 
 
 class TestLookup:
@@ -93,18 +73,14 @@ class TestLookup:
         out = atlas_module.lookup_regions("fake", coords)
         assert out == [None, None]
 
-    def test_zero_label_returns_none(self, fake_brainglobe, monkeypatch):
+    def test_zero_label_returns_none(self, monkeypatch):
         # Override the fake atlas to have all zeros (outside-brain everywhere).
         class Zeros(_FakeAtlas):
             def __init__(self, name):
                 super().__init__(name)
                 self.annotation = np.zeros((4, 4, 4), dtype=np.int32)
 
-        monkeypatch.setitem(
-            sys.modules,
-            "brainglobe_atlasapi",
-            SimpleNamespace(BrainGlobeAtlas=Zeros),
-        )
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", Zeros)
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
 
@@ -164,8 +140,7 @@ class TestOrientation:
     def test_canonical_annotation_reorients_to_asr(self, monkeypatch):
         # Native "sla" volume is indexed (DV, ML, AP); canonical must be (AP, DV, ML).
         native = np.arange(2 * 3 * 4, dtype=np.int32).reshape(2, 3, 4)
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
-                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("sla", native)))
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("sla", native))
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         arr, _ = atlas_module.canonical_annotation("x")
@@ -179,8 +154,7 @@ class TestOrientation:
         ann[2, 2, 3:6] = 5
         structs = {5: {"id": 5, "acronym": "ac", "name": "anterior commissure",
                        "rgb_triplet": [1, 2, 3]}}
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
-                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("asr", ann, structs)))
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         atlas_module.derive_origin_from_ac.cache_clear()
@@ -192,8 +166,7 @@ class TestOrientation:
         ann[1, 1, 1] = 9
         structs = {9: {"id": 9, "acronym": "x", "name": "some nucleus",
                        "rgb_triplet": [0, 0, 0]}}
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
-                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("asr", ann, structs)))
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         atlas_module.derive_origin_from_ac.cache_clear()
@@ -205,8 +178,7 @@ class TestOrientation:
         native = np.zeros((4, 2, 2), dtype=np.int32)
         native[0, :, :] = 2     # native index 0 = posterior
         native[1:, :, :] = 1
-        monkeypatch.setitem(sys.modules, "brainglobe_atlasapi",
-                            SimpleNamespace(BrainGlobeAtlas=_atlas_cls("psr", native)))
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("psr", native))
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         anterior = atlas_module.lookup_regions("x", np.array([[0.0, 0.0, 0.0]]))

@@ -32,6 +32,7 @@ dependencies = [
     "bokeh>=3.0.0",
     "dotenv>=0.9.9",
     "psutil>=7.1.0",
+    "brainglobe-atlasapi>=2.0",
 ]
 
 [project.gui-scripts]
@@ -64,9 +65,6 @@ docs = [
     "furo",
     "myst-parser",
     "sphinx-design",
-]
-anatomy = [
-    "brainglobe-atlasapi>=2.0",
 ]
 
 [dependency-groups]

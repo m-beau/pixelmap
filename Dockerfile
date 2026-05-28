@@ -25,6 +25,12 @@ COPY . /app
 
 # Install the Python packages using uv
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
+
+# Pre-download the default atlas so the first user request doesn't trigger a
+# ~58 MB download.  The atlas is stored in ~/.brainglobe/ inside the image
+# layer; mount a Docker volume there in production to persist any additional
+# atlases users request across container restarts.
+RUN python -c "from brainglobe_atlasapi import BrainGlobeAtlas; BrainGlobeAtlas('allen_mouse_25um')"
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Expose the port

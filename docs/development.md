@@ -16,7 +16,7 @@ git clone https://github.com/m-beau/channelmap_generator.git
 cd channelmap_generator
 
 # Install with dev dependencies
-uv sync --all-extras
+uv sync
 
 # Or with pip
 pip install -e ".[dev]"
