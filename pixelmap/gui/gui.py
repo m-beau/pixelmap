@@ -1009,7 +1009,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         self.region_label_source = ColumnDataSource(
-            data={"x": [], "y": [], "text": [], "color": []}
+            data={"x": [], "y": [], "text": [], "color": [], "center": []}
         )
         self.region_label_renderer = self.plot.text(
             x="x", y="y", text="text", text_color="color",
@@ -1046,6 +1046,26 @@ class ChannelmapGUI(param.Parameterized):
     def _shank_plot_width(self) -> float:
         """Width (in plot units) to draw region bands at, narrower than the shank."""
         return 90.0  # shank outlines are 100 wide
+
+    def _region_label_offset(self, half_width: float) -> float:
+        """Horizontal offset for region acronym labels. Pushed out to clear the
+        survey sidebar bars (outer edge ~half_width + 25) when a survey overlay
+        is loaded; snug to the bands otherwise."""
+        if self.survey_values is not None:
+            return half_width + 33
+        return half_width + 14
+
+    def _reposition_region_labels(self):
+        """Re-place anatomy region labels for the current survey state. Idempotent;
+        a no-op when no anatomy overlay is shown."""
+        data = self.region_label_source.data
+        centers = data.get("center")
+        if not centers:
+            return
+        offset = self._region_label_offset(self._shank_plot_width() / 2)
+        new = dict(data)
+        new["x"] = [c + offset for c in centers]
+        self.region_label_source.data = new
 
     def compute_anatomy_overlay(self):
         """Compute region bands for the current pose and render them."""
@@ -1085,12 +1105,13 @@ class ChannelmapGUI(param.Parameterized):
 
         width = self._shank_plot_width()
         half_width = width / 2
-        # Pull label text outside the shank outline so it doesn't
-        # overlap the electrode rects.
-        label_offset = half_width + 14
+        # Pull label text outside the shank outline so it doesn't overlap the
+        # electrode rects; the offset widens when a survey overlay is loaded so
+        # labels clear the survey sidebar bars (see _region_label_offset).
+        label_offset = self._region_label_offset(half_width)
 
         band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
-        label_data = {"x": [], "y": [], "text": [], "color": []}
+        label_data = {"x": [], "y": [], "text": [], "color": [], "center": []}
         boundary_data = {"x0": [], "x1": [], "y0": [], "y1": []}
         # Track which boundaries we've already drawn per shank so adjacent
         # bands sharing a transition don't double up on the line.
@@ -1111,6 +1132,7 @@ class ChannelmapGUI(param.Parameterized):
             band_data["acronym"].append(band.acronym)
 
             label_data["x"].append(plot_center + label_offset)
+            label_data["center"].append(plot_center)
             label_data["y"].append(y_mid)
             label_data["text"].append(band.acronym)
             # Slightly darker than the swatch so labels stay readable on white.
@@ -1191,7 +1213,7 @@ class ChannelmapGUI(param.Parameterized):
         self.region_band_source.data = {
             "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
         }
-        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": []}
+        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": [], "center": []}
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
         self.anatomy_legend.object = self._empty_legend_html()
         self.anatomy_locator.object = ""
@@ -1689,6 +1711,7 @@ class ChannelmapGUI(param.Parameterized):
             self.survey_color_bar_title.visible = True
 
         self.update_electrode_colors()
+        self._reposition_region_labels()
 
         msg = f"Loaded survey: {len(values)} contacts mapped."
         if n_unmatched:
@@ -1707,6 +1730,7 @@ class ChannelmapGUI(param.Parameterized):
             self.survey_color_bar.visible = False
             self.survey_color_bar_title.visible = False
         self.update_electrode_colors()
+        self._reposition_region_labels()
 
     def _set_survey_range_inputs(self, vmin, vmax, enabled: bool):
         """Update the vmin/vmax widgets without re-triggering their watchers."""
