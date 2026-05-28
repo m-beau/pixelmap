@@ -9,10 +9,17 @@ from pixelmap.constants import WIRING_FILE_MAP
 from pixelmap.types import Electrode
 from pixelmap.utils import survey
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
 
 @pytest.fixture
 def positions_df_1_0(wiring_maps_dir):
     return pd.read_csv(wiring_maps_dir / WIRING_FILE_MAP["1.0"][0])
+
+
+@pytest.fixture
+def positions_df_2_0_1shank(wiring_maps_dir):
+    return pd.read_csv(wiring_maps_dir / WIRING_FILE_MAP["2.0-1shank"][0])
 
 
 @pytest.fixture
@@ -35,14 +42,38 @@ def test_parse_survey_file_happy_path():
     assert df.iloc[1]["val"] == pytest.approx(2.0)
 
 
-def test_parse_survey_file_example(tmp_path):
-    example = Path(__file__).resolve().parent.parent / "survey_exported.txt"
-    if not example.exists():
-        pytest.skip("example survey_exported.txt not present")
-    df = survey.parse_survey_file(example.read_text())
+def test_parse_survey_file_4shank_export():
+    df = survey.parse_survey_file((FIXTURES / "survey_2.0-4shanks.txt").read_text())
     assert set(df.columns) == {"shank", "xum", "zum", "val"}
     assert df["shank"].min() >= 0
     assert df["shank"].max() <= 3
+    assert set(df["shank"].unique()) == {0, 1, 2, 3}
+
+
+def test_parse_survey_file_1_0_export():
+    df = survey.parse_survey_file((FIXTURES / "survey_1.0.txt").read_text())
+    assert set(df.columns) == {"shank", "xum", "zum", "val"}
+    assert set(df["shank"].unique()) == {0}
+
+
+def test_parse_survey_file_2_0_1shank_export():
+    df = survey.parse_survey_file((FIXTURES / "survey_2.0-1shank.txt").read_text())
+    assert set(df.columns) == {"shank", "xum", "zum", "val"}
+    assert set(df["shank"].unique()) == {0}
+
+
+def test_validate_probe_match_1_0_export(positions_df_1_0):
+    df = survey.parse_survey_file((FIXTURES / "survey_1.0.txt").read_text())
+    values, n_unmatched = survey.validate_probe_match(df, positions_df_1_0)
+    assert n_unmatched == 0
+    assert len(values) == len(positions_df_1_0)
+
+
+def test_validate_probe_match_2_0_1shank_export(positions_df_2_0_1shank):
+    df = survey.parse_survey_file((FIXTURES / "survey_2.0-1shank.txt").read_text())
+    values, n_unmatched = survey.validate_probe_match(df, positions_df_2_0_1shank)
+    assert n_unmatched == 0
+    assert len(values) == len(positions_df_2_0_1shank)
 
 
 def test_parse_survey_file_missing_columns():
