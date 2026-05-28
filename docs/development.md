@@ -1,4 +1,4 @@
-# Development Guide
+# Contributing / Developer Guide
 
 This guide is for contributors and developers who want to work on PixelMap.
 
