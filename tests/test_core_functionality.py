@@ -110,7 +110,7 @@ class TestIMROFileGeneration:
         assert isinstance(imro_list, list)
         assert len(imro_list) > 1  # Header + electrodes
         header = imro_list[0]
-        assert isinstance(header[0], int)  # Probe subtype
+        assert isinstance(header[0], (int, str))  # Probe subtype (int legacy or str part number)
         assert isinstance(header[1], int)  # Number of channels
 
     def test_generate_imro_2_0_1shank(self, wiring_maps_dir):
