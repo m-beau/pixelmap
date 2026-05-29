@@ -93,7 +93,7 @@ Type electrode ranges directly, e.g. `1-10,20-25`, to add them to the current se
 
 You can hover over any electrode to see its ID, shank, depth (Z position), and current status in a tooltip. Clicking a single electrode (de)selects it.
 
-You can also drag boxes to (de)select ranges of electrodes with one of four box tools (select the active tool from the toolbar on the right of the probe plot):
+You can also drag boxes to (de)select ranges of electrodes with one of five box tools (select the active tool from the toolbar on the right of the probe plot):
 
 ```{list-table}
 :widths: 12 88
@@ -114,6 +114,10 @@ You can also drag boxes to (de)select ranges of electrodes with one of four box 
     :height: 40px
     :::
   - **Interleaved selection** — drag to select every other *pair* of rows: rows 0–1, then 4–5, then 8–9, and so on (the pattern 0, 1, 4, 5, 8, 9, …). This matches the wiring layout of certain recording configurations where adjacent row pairs share a bank.
+* - :::{image} _static/dependent_deselector.png
+    :height: 40px
+    :::
+  - **Deselect dependents** — drag over unavailable (black) electrodes to find the selected (red) electrodes that blocked them due to shared lines or ADCs, and deselect those selected electrodes, freeing the blocked electrodes and all their other dependents.
 ```
 
 :::{tip}

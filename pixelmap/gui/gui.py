@@ -698,6 +698,30 @@ class ChannelmapGUI(param.Parameterized):
                     if electrode_id in interleaved_subset:
                         self.electrodes.select(Electrode(shank_id, electrode_id))
 
+            elif self.select_mode == "dependent_deselect":
+                # Find unavailable (black) electrodes in the box span, then deselect
+                # all selected electrodes whose wiring conflicts caused them to be unavailable.
+                print(f"Box deselect-dependents: {len(new)} electrodes in span")
+                unavailable_in_span = set()
+                for idx in new:
+                    shank_id = self.electrode_source.data["shank_id"][idx]
+                    electrode_id = self.electrode_source.data["electrode_id"][idx]
+                    electrode = Electrode(shank_id, electrode_id)
+                    if electrode in self.electrodes.unavailable:
+                        unavailable_in_span.add(electrode)
+
+                # For each unavailable electrode in the span, find which selected
+                # electrode(s) caused it to be unavailable (i.e. it is in their wiring map).
+                to_deselect = set()
+                for u in unavailable_in_span:
+                    for s in self.electrodes.selected:
+                        if u in self.electrodes.wiring_map[s]:
+                            to_deselect.add(s)
+
+                print(f"  → deselecting {len(to_deselect)} responsible selected electrode(s)")
+                for s in to_deselect:
+                    self.electrodes.deselect(s)
+
         # Update electrode visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
@@ -1815,6 +1839,7 @@ class ChannelmapGUI(param.Parameterized):
         deselect_box_string = "Deselect Electrodes"
         zigzagselect_box_string = "Zigzag-select Electrodes"
         interleavedselect_box_string = "Interleaved-select Electrodes"
+        dependentdeselect_box_string = "Deselect Dependents"
 
         self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
 
@@ -1828,6 +1853,10 @@ class ChannelmapGUI(param.Parameterized):
 
         self.box_interleavedselect_tool = BoxSelectTool(
             description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
+        )
+
+        self.box_dependent_deselect_tool = BoxSelectTool(
+            description=dependentdeselect_box_string, icon=GUI_ASSETS_DIR / "dependent_deselector.png"
         )
 
         # Always-on gesture tools — hidden from toolbar (visible=False).
@@ -1860,6 +1889,7 @@ class ChannelmapGUI(param.Parameterized):
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
             self.box_interleavedselect_tool,
+            self.box_dependent_deselect_tool,
         ]
 
         self.plot = figure(
@@ -1921,7 +1951,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
-        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string)
+        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string)
 
     def setup_interactions(self):
         """Setup click and selection interactions"""
@@ -1940,7 +1970,7 @@ class ChannelmapGUI(param.Parameterized):
         # Python callbacks for interactions - this is the key part
         self.electrode_source.selected.on_change("indices", self.on_electrode_selection)
 
-    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string):
+    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string):
         """JS callback to expose active tools in toolbar"""
         # workaround https://stackoverflow.com/questions/58210752/how-to-get-currently-active-tool-in-bokeh-figure
 
@@ -1954,6 +1984,7 @@ class ChannelmapGUI(param.Parameterized):
             let deselect_tool = null;
             let zigzagselect_tool = null;
             let interleavedselect_tool = null;
+            let dependentdeselect_tool = null;
 
             tools.forEach((tool, index) => {
                 if (tool.description === 'select_box_string') {
@@ -1968,9 +1999,12 @@ class ChannelmapGUI(param.Parameterized):
                 if (tool.description === 'interleavedselect_box_string') {
                     interleavedselect_tool = tool;
                 }
+                if (tool.description === 'dependentdeselect_box_string') {
+                    dependentdeselect_tool = tool;
+                }
             });
 
-            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool) {
+            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool && dependentdeselect_tool) {
                 if (select_tool.active) {
                     tools_info = 'select';
                 } else if (deselect_tool.active) {
@@ -1979,6 +2013,8 @@ class ChannelmapGUI(param.Parameterized):
                     tools_info = 'zigzag_select';
                 } else if (interleavedselect_tool.active) {
                     tools_info = 'interleaved_select';
+                } else if (dependentdeselect_tool.active) {
+                    tools_info = 'dependent_deselect';
                 } else {
                     tools_info = 'neither_active';
                 }
@@ -1989,6 +2025,7 @@ class ChannelmapGUI(param.Parameterized):
 
         tool_state.data = {active_tool: [tools_info]};
         """
+        js_code = js_code.replace("dependentdeselect_box_string", dependentdeselect_box_string)
         js_code = js_code.replace("interleavedselect_box_string", interleavedselect_box_string)
         js_code = js_code.replace("zigzagselect_box_string", zigzagselect_box_string)
         js_code = js_code.replace("deselect_box_string", deselect_box_string)
@@ -2020,6 +2057,9 @@ class ChannelmapGUI(param.Parameterized):
             elif active_tool == "interleaved_select":
                 self.select_mode = "interleaved_select"
                 print("→ INTERLEAVED-SELECT box activated")
+            elif active_tool == "dependent_deselect":
+                self.select_mode = "dependent_deselect"
+                print("→ DESELECT-DEPENDENTS box activated")
             else:
                 self.select_mode = "select"
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
@@ -2516,7 +2556,7 @@ class ChannelmapGUI(param.Parameterized):
             <b>You can mix and match four selection methods:</b><br>
             • <b>Presets:</b> Pre-configured channelmaps that respect wiring constraints<br>
             • <b>Textual selection:</b> Type electrode ranges (e.g., "1-10,20-25") to add to the current selection<br>
-            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, or "zigzag/interleaved selection") to manually select multiple sites<br>
+            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, zigzag/interleaved selection, or "deselect dependents") to manually select multiple sites<br>
             • <b>Selection from pre-existing IMRO file</b>: you can pre-load an IMRO file as a starting point before doing any of the above.<br><br>
 
             Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like. Use this IMRO file in SpikeGLX to record from the selected channels, and then use the Kilosort .json file to spikesort your data accordingly.<br><br>
