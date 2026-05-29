@@ -952,11 +952,13 @@ class ChannelmapGUI(param.Parameterized):
 
         # Collect survey overlay data (if loaded)
         survey_colors = None
+        survey_range = None
         if self.survey_values is not None:
             survey_colors = {
                 (e.shank_id, e.electrode_id): self._get_survey_color(e)
                 for e in self.survey_values
             }
+            survey_range = (self.survey_cmap.low, self.survey_cmap.high)
 
         # Create memory buffer
         buffer = BytesIO()
@@ -974,6 +976,7 @@ class ChannelmapGUI(param.Parameterized):
                 save_plot=False,
                 anatomy_bands=anatomy_bands,
                 survey_colors=survey_colors,
+                survey_range=survey_range,
             )
 
             # Save current figure to buffer

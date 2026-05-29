@@ -5,6 +5,8 @@
 from pathlib import Path
 import pickle
 
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -644,7 +646,7 @@ def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
 
 def plot_probe_layout(
     probe_type, imro_list, positions_file, wiring_file, title, figsize=(2, 30), save_plot=False, saveDir=None,
-    anatomy_bands=None, survey_colors=None
+    anatomy_bands=None, survey_colors=None, survey_range=None
 ):
     """
     Create visualization of probe layout with selected electrodes
@@ -686,6 +688,17 @@ def plot_probe_layout(
         electrode_height = 10  # Reasonable height
         electrode_width = shank_width * electrode_width_ratio
 
+        # Survey bar geometry (bars sit just outside the right shank edge)
+        survey_bar_width = 6
+        survey_bar_gap = 2  # gap between shank edge and bar
+        if survey_colors is not None:
+            # Bar center on the right side; labels go further right to clear the bar
+            survey_bar_center_x = shank_width // 2 + survey_bar_gap + survey_bar_width / 2
+            right_label_x = shank_width // 2 + survey_bar_gap + survey_bar_width + tick_width * 2
+        else:
+            survey_bar_center_x = None
+            right_label_x = shank_width // 2 + tick_width * 2
+
         # Draw shank outline with pointy tip
         max_y = np.max(positions[:, -1])
         min_y = np.min(positions[:, -1])
@@ -722,7 +735,7 @@ def plot_probe_layout(
                 ax.add_patch(rect)
                 y_mid = (band["y_min"] + band["y_max"]) / 2
                 ax.text(
-                    shank_width // 2 + 3, y_mid, band["acronym"],
+                    right_label_x, y_mid, band["acronym"],
                     ha="left", va="center", fontsize=6, clip_on=False,
                     color=_darken_hex(band["color"], 0.6),
                 )
@@ -755,8 +768,6 @@ def plot_probe_layout(
             )
 
         # Draw electrodes (and optional survey sidebar bars)
-        survey_bar_width = 3
-        survey_bar_gap = 1
         for electrode, orig_x, y in positions[:, 1:]:
             if electrode in selected_electrodes[:, 1]:
                 color = selected_color
@@ -791,13 +802,11 @@ def plot_probe_layout(
             )
             ax.add_patch(rect)
 
-            # Survey sidebar bar
+            # Survey sidebar bar (always on right side in PDF)
             if survey_colors is not None:
                 bar_color = survey_colors.get((0, int(electrode)), "#dddddd")
-                side = 1 if x >= 0 else -1
-                bar_x = side * (shank_width // 2 + survey_bar_gap + survey_bar_width / 2)
                 bar_rect = patches.Rectangle(
-                    (bar_x - survey_bar_width / 2, y - electrode_height / 2),
+                    (survey_bar_center_x - survey_bar_width / 2, y - electrode_height / 2),
                     survey_bar_width, electrode_height,
                     linewidth=0, facecolor=bar_color, alpha=1.0, zorder=50,
                 )
@@ -838,8 +847,8 @@ def plot_probe_layout(
             for distance in distance_ticks:
                 # Tick mark on right edge of shank
                 ax.plot([shank_width // 2, shank_width // 2 + tick_width], [distance, distance], "k-", linewidth=1)
-                # Label on right side
-                ax.text(shank_width // 2 + tick_width * 2, distance, f"{distance}", ha="left", va="center", fontsize=8)
+                # Label on right side (pushed past survey bars when active)
+                ax.text(right_label_x, distance, f"{distance}", ha="left", va="center", fontsize=8)
 
     # multi-shank
     else:
@@ -852,6 +861,16 @@ def plot_probe_layout(
         electrode_height = 10
         electrode_width = shank_width * electrode_width_ratio
         tick_width = 5
+
+        # Survey bar geometry (bars sit just outside each shank's right edge)
+        ms_survey_bar_width = 8
+        ms_survey_bar_gap = 3
+        if survey_colors is not None:
+            ms_survey_bar_center_offset = shank_width // 2 + ms_survey_bar_gap + ms_survey_bar_width / 2
+            ms_right_label_offset = shank_width // 2 + ms_survey_bar_gap + ms_survey_bar_width + tick_width * 2
+        else:
+            ms_survey_bar_center_offset = None
+            ms_right_label_offset = shank_width // 2 + tick_width * 2
 
         for shank_id in range(n_shanks):
             shank_m = positions[:, 0] == shank_id
@@ -892,7 +911,7 @@ def plot_probe_layout(
                     ax.add_patch(rect)
                     y_mid = (band["y_min"] + band["y_max"]) / 2
                     ax.text(
-                        x_center + shank_width // 2 + 5, y_mid, band["acronym"],
+                        x_center + ms_right_label_offset, y_mid, band["acronym"],
                         ha="left", va="center", fontsize=6, clip_on=False,
                         color=_darken_hex(band["color"], 0.6),
                     )
@@ -926,8 +945,6 @@ def plot_probe_layout(
                     )
 
             # Draw electrodes (and optional survey sidebar bars)
-            ms_survey_bar_width = 3
-            ms_survey_bar_gap = 1
             for shank_id_pos, electrode, orig_x, y in positions[shank_m]:
                 if shank_id_pos != shank_id:
                     continue
@@ -960,11 +977,10 @@ def plot_probe_layout(
                 )
                 ax.add_patch(rect)
 
-                # Survey sidebar bar
+                # Survey sidebar bar (always on right side of each shank in PDF)
                 if survey_colors is not None:
                     bar_color = survey_colors.get((int(shank_id_pos), int(electrode)), "#dddddd")
-                    side = 1 if (x - x_center) >= 0 else -1
-                    bar_x = x_center + side * (shank_width // 2 + ms_survey_bar_gap + ms_survey_bar_width / 2)
+                    bar_x = x_center + ms_survey_bar_center_offset
                     bar_rect = patches.Rectangle(
                         (bar_x - ms_survey_bar_width / 2, y - electrode_height / 2),
                         ms_survey_bar_width, electrode_height,
@@ -1028,8 +1044,8 @@ def plot_probe_layout(
             for distance in distance_ticks:
                 # Tick mark on right edge of rightmost active shank
                 ax.plot([rightmost_x, rightmost_x + tick_width], [distance, distance], "k-", linewidth=1)
-                # Label on right side
-                ax.text(rightmost_x + 2 * tick_width, distance, f"{distance}", ha="left", va="center", fontsize=8)
+                # Label on right side (pushed past survey bars when active)
+                ax.text(rightmost_x + ms_right_label_offset - shank_width // 2, distance, f"{distance}", ha="left", va="center", fontsize=8)
 
     ax.set_ylabel("Vertical position (channel/μm)")
     # Remove grid
@@ -1057,6 +1073,44 @@ def plot_probe_layout(
     ax.legend(title="Electrode state:", handles=legend_elements, bbox_to_anchor=(0.9, 0))
 
     plt.tight_layout()
+
+    # Survey colorbar: matched to the legend box style, placed directly above it.
+    # Must come after tight_layout so legend bounding boxes are finalised.
+    if survey_colors is not None and survey_range is not None:
+        vmin, vmax = survey_range
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        sm = cm.ScalarMappable(norm=norm, cmap="viridis")
+        sm.set_array([])
+
+        # Render canvas so bounding boxes are available.
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        leg = ax.get_legend()
+        leg_bb = leg.get_window_extent(renderer)
+        # Convert display coords → figure fraction.
+        leg_frac = leg_bb.transformed(fig.transFigure.inverted())
+
+        fig_h = fig.get_size_inches()[1]
+
+        # Same width as legend; capped at 0.14" tall.
+        cb_w = leg_frac.width
+        cb_h = min(0.14 / fig_h, leg_frac.height * 0.5)
+        cb_left = leg_frac.x0
+        # 0.25" gap: enough to clear the tick labels that hang below cb_bottom.
+        cb_bottom = leg_frac.y1 + 0.25 / fig_h
+
+        cax = fig.add_axes([cb_left, cb_bottom, cb_w, cb_h])
+        cbar = plt.colorbar(sm, cax=cax, orientation="horizontal")
+
+        # Mirror legend aesthetics: title on top, ticks below, boxed border.
+        cbar.ax.set_title("Survey value", fontsize=9, pad=4)
+        cbar.ax.tick_params(labelsize=8, bottom=True, labelbottom=True,
+                            top=False, labeltop=False, length=3)
+        cax.patch.set_facecolor("white")
+        for spine in cax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(0.8)
+            spine.set_color("#aaaaaa")
 
     if save_plot:
         if saveDir is None:
