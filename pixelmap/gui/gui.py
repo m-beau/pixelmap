@@ -193,7 +193,7 @@ class ChannelmapGUI(param.Parameterized):
     probe_subtype = param.Selector(
         default=PROBE_TYPE_MAP[default_type][0],
         objects=PROBE_TYPE_MAP[default_type],
-        doc="IMEC probe part number (does not affect probe geometry, but affects indexing of reference and bank. Plug your probe in SpikeGLX and save an imro file to find out its subtype.)",
+        doc="IMEC probe part number - affects imro file format. Look at your IMEC order, or plug your probe in SpikeGLX release >= 20260115 and save an imro file to find out its part number.",
     )
 
     legacy_imro_mode = param.Boolean(
@@ -296,6 +296,8 @@ class ChannelmapGUI(param.Parameterized):
 
         # Probe subtype update
         self.param.probe_subtype.objects = PROBE_TYPE_MAP[self.probe_type]
+        if hasattr(self, '_subtype_widget'):
+            self._subtype_widget.options = self._build_subtype_options()
         self.probe_subtype = self.param.probe_subtype.objects[0]
 
         # Load data
@@ -2014,6 +2016,59 @@ class ChannelmapGUI(param.Parameterized):
                 self.select_mode = "select"
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
 
+    def _build_subtype_options(self):
+        """Dict of {'NP2013 – Description': 'NP2013'} for the current probe_type."""
+        return {
+            f"{pn_} \u2013 {PROBE_FEATURES[pn_]['probe_name']}": pn_
+            for pn_ in PROBE_TYPE_MAP[self.probe_type]
+        }
+
+    # JavaScript injected alongside the probe-subtype selector:
+    # - Stores full "NP2013 – Description" labels on init / option change.
+    # - On mousedown (dropdown opens): restores full labels so the list shows descriptions.
+    # - On change / blur (dropdown closes): collapses the selected option back to part number only.
+    _SUBTYPE_SELECT_JS = """
+<script>
+(function () {
+    function setupSelect(sel) {
+        var full = {};
+        function readLabels() {
+            full = {};
+            for (var i = 0; i < sel.options.length; i++)
+                full[sel.options[i].value] = sel.options[i].text;
+        }
+        function collapseSelected() {
+            var v = sel.value;
+            for (var i = 0; i < sel.options.length; i++)
+                if (sel.options[i].value === v) sel.options[i].text = v;
+        }
+        function expandAll() {
+            for (var i = 0; i < sel.options.length; i++)
+                sel.options[i].text = full[sel.options[i].value] || sel.options[i].value;
+        }
+        // Re-read labels when Bokeh rewrites the <option> list (probe-type change).
+        new MutationObserver(function () {
+            readLabels();
+            setTimeout(collapseSelected, 50);
+        }).observe(sel, { childList: true });
+        sel.addEventListener('mousedown', expandAll);
+        sel.addEventListener('change',    function () { setTimeout(collapseSelected, 50); });
+        sel.addEventListener('blur',      function () { setTimeout(collapseSelected, 50); });
+        readLabels();
+        collapseSelected();
+    }
+    function init() {
+        var wrap = document.querySelector('.probe-subtype-select');
+        if (!wrap) { setTimeout(init, 200); return; }
+        var sel = wrap.querySelector('select');
+        if (!sel) { setTimeout(init, 200); return; }
+        setupSelect(sel);
+    }
+    init();
+})();
+</script>
+"""
+
     def create_widgets(self):
         """Create Panel widgets"""
         # Probe type selector
@@ -2023,17 +2078,37 @@ class ChannelmapGUI(param.Parameterized):
             widgets={"probe_type": {"type": pn.widgets.Select, "width": 300, "margin": 0}},
             show_name=False,
         )
+        # Probe subtype selector – uses pn.Param for correct label/tooltip/sizing,
+        # then overrides options with a descriptive dict so the dropdown shows
+        # "NP2013 – Description" while the param value stays the bare part number.
         self.probe_subtype_selector = pn.Param(
             self,
             parameters=["probe_subtype"],
-            widgets={"probe_subtype": {"type": pn.widgets.Select, "width": 140, "margin": 0}},
+            widgets={"probe_subtype": {
+                "type": pn.widgets.Select,
+                "width": 140,
+                "margin": 0,
+                "css_classes": ["probe-subtype-select"],
+            }},
             show_name=False,
         )
-        self.legacy_imro_mode_checkbox = pn.Param(
-            self,
-            parameters=["legacy_imro_mode"],
-            widgets={"legacy_imro_mode": {"type": pn.widgets.Checkbox, "name": "Compatible with SpikeGLX < 20260115"}},
-            show_name=False,
+        # Grab the underlying widget and replace its options with the descriptive dict.
+        # pn.Param's auto-sync fires synchronously when probe_subtype.objects changes,
+        # so our override in load_probe_data (which runs after) always wins.
+        self._subtype_widget = self.probe_subtype_selector._widgets["probe_subtype"]
+        self._subtype_widget.options = self._build_subtype_options()
+        # Zero-height pane that injects the collapse/expand JS (placed in layout alongside the widget)
+        self._subtype_js_pane = pn.pane.HTML(self._SUBTYPE_SELECT_JS, height=0, margin=0)
+        _legacy_cb = pn.widgets.Checkbox(name="", value=self.legacy_imro_mode)
+        _legacy_cb.link(self, value="legacy_imro_mode", bidirectional=True)
+        self.legacy_imro_mode_checkbox = pn.Row(
+            _legacy_cb,
+            pn.pane.HTML(
+                'Make legacy IMRO (SpikeGLX pre-20260115 - see '
+                '<a href="https://billkarsh.github.io/SpikeGLX/help/imroTables/#probe-type" target="_blank">🔗</a>)',
+                margin=(3, 0, 0, 0),
+            ),
+            align="start",
         )
 
         # Preset selector
@@ -2477,6 +2552,7 @@ class ChannelmapGUI(param.Parameterized):
                 pn.Row(
                     self.probe_subtype_selector,
                     self.reference_selector_widget,
+                    self._subtype_js_pane,
                     sizing_mode="stretch_width",
                 ),
                 self.legacy_imro_mode_checkbox,

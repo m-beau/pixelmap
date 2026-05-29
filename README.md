@@ -74,6 +74,7 @@ See the [full documentation](https://pixelmap.readthedocs.io) for the complete A
 | 1.0           | Supported |
 | 2.0, 1-shank  | Supported |
 | 2.0, 4-shanks | Supported |
+| NHP           | Planned |
 | Quadbase      | Planned |
 | NXT           | Planned |
 
