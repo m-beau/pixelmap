@@ -9,7 +9,13 @@ import pandas as pd
 import panel as pn
 
 from pixelmap.backend import format_imro_string, get_electrodes
-from pixelmap.constants import PROBE_N, PROBE_TYPE_MAP, REF_ELECTRODES
+from pixelmap.constants import (
+    PROBE_FEATURES,
+    PROBE_TYPE_MAP,
+    LEGACY_PROBE_TYPE_MAP,
+    LEGACY_INT_TO_IMRO_FORMAT,
+    REF_ELECTRODES,
+)
 
 def save_to_imro_file(imro_list, filename="channelmap.imro"):
     """
@@ -57,9 +63,13 @@ def parse_imro_file(content):
     entries[0] = entries[0].lstrip("(")
     entries[-1] = entries[-1].rstrip(")")
 
-    # Parse header (first entry: "24,384")
+    # Parse header (first entry: "NP2003,384" or legacy "24,384")
     header_parts = entries[0].split(",")
-    header = (int(header_parts[0]), int(header_parts[1]))
+    try:
+        probe_id = int(header_parts[0])
+    except ValueError:
+        probe_id = header_parts[0]  # part-number string, e.g. "NP2003"
+    header = (probe_id, int(header_parts[1]))
 
     # Parse channel entries (format: "0 1 0 2 288")
     channel_entries = []
@@ -104,15 +114,19 @@ def parse_imro_list(imro_list):
     probe_subtype = header[0]
     entries = imro_list[1:]
 
-    # Determine probe type from subtype
-    if probe_subtype in PROBE_TYPE_MAP["1.0"]:
-        probe_type = "1.0"
-    elif probe_subtype in PROBE_TYPE_MAP["2.0-1shank"]:
-        probe_type = "2.0-1shank"
-    elif probe_subtype in PROBE_TYPE_MAP["2.0-4shanks"]:
-        probe_type = "2.0-4shanks"
-    # elif probe_subtype in PROBE_TYPE_MAP["NXT"]:
-    #     probe_type = "NXT"
+    # Determine probe type and IMRO format from subtype (str part number or int legacy)
+    if isinstance(probe_subtype, str) and probe_subtype in PROBE_FEATURES:
+        imro_fmt = PROBE_FEATURES[probe_subtype]["IMRO_format"]
+        probe_type = PROBE_FEATURES[probe_subtype]["pixelmap_probe_type"]
+    elif isinstance(probe_subtype, int) and probe_subtype in LEGACY_INT_TO_IMRO_FORMAT:
+        imro_fmt = LEGACY_INT_TO_IMRO_FORMAT[probe_subtype]
+        probe_type = None
+        for pt, nums in LEGACY_PROBE_TYPE_MAP.items():
+            if probe_subtype in nums:
+                probe_type = pt
+                break
+    else:
+        raise ValueError(f"Unknown probe subtype in IMRO header: {probe_subtype!r}")
 
     selected_electrodes = []
 
@@ -121,7 +135,7 @@ def parse_imro_list(imro_list):
         check_entry_elements(6,  entries[0], probe_type)
         
         reference_id = entries[0][2]  # Same for all entries
-        reference_string = ref_id_to_string(reference_id, probe_subtype)
+        reference_string = ref_id_to_string(reference_id, imro_fmt)
 
         ap_gain = entries[0][3]
         lf_gain = entries[0][4]
@@ -138,7 +152,7 @@ def parse_imro_list(imro_list):
         check_entry_elements(4,  entries[0], probe_type)
 
         reference_id = entries[0][2]
-        reference_string = ref_id_to_string(reference_id, probe_subtype)
+        reference_string = ref_id_to_string(reference_id, imro_fmt)
 
         ap_gain = lf_gain = hp_filter = None  # Not used in 2.0 IMRO tables
 
@@ -157,7 +171,7 @@ def parse_imro_list(imro_list):
             reference_string = 'Join Tips'
         else:
             reference_id = reference_ids[0]
-            reference_string = ref_id_to_string(reference_id, probe_subtype)
+            reference_string = ref_id_to_string(reference_id, imro_fmt)
 
         ap_gain = lf_gain = hp_filter = None  # Not used in 2.0 IMRO tables
 
@@ -178,10 +192,10 @@ def parse_imro_list(imro_list):
             hp_filter)
 
 
-def ref_id_to_string(reference_id, probe_subtype):
-    ref_map = {v: k for k, v in REF_ELECTRODES[probe_subtype].items() if k != "Join Tips"}
+def ref_id_to_string(reference_id, imro_fmt):
+    ref_map = {v: k for k, v in REF_ELECTRODES[imro_fmt].items() if k != "Join Tips"}
     if reference_id not in ref_map:
-        error_message = f"Unexpected reference id {reference_id} for probe subtype {probe_subtype}!"
+        error_message = f"Unexpected reference id {reference_id} for IMRO format {imro_fmt}!"
         pn.state.notifications.error(error_message,
                                     duration=10_000)
         raise AssertionError(error_message)
@@ -234,7 +248,7 @@ def generate_imro_channelmap(
     wiring_df = pd.read_csv(wiring_file)
 
     # 2) Select electrodes from presets or custom
-    selected_electrodes = get_electrodes(probe_type, wiring_df, layout_preset, custom_electrodes)
+    selected_electrodes = get_electrodes(probe_type, wiring_df, layout_preset, custom_electrodes, probe_subtype=probe_subtype)
 
     # 3) Generate IMRO table with appropriate format
     imro_list = format_imro_string(
@@ -242,7 +256,10 @@ def generate_imro_channelmap(
     )
 
     n_selected = len(imro_list) - 1
-    n_possible = PROBE_N[probe_type]["n"]
+    if probe_subtype in PROBE_FEATURES:
+        n_possible = PROBE_FEATURES[probe_subtype]["n_readouts_total"]
+    else:
+        n_possible = 384
 
     if n_selected != n_possible:
         print(

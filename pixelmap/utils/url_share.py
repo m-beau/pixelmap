@@ -16,7 +16,8 @@ from typing import Any
 QUERY_PARAM = "cfg"
 
 # Bump this when the on-wire schema changes incompatibly.
-_SCHEMA_VERSION = 1
+# v2: probe_subtype is now a part-number string (e.g. "NP2003") instead of int.
+_SCHEMA_VERSION = 2
 
 # Hard cap on decoded payload size to prevent zip-bomb-style abuse on the
 # server. A normal payload for 384 selected electrodes is a few KB.
@@ -36,7 +37,7 @@ def encode_state(
     payload = {
         "v": _SCHEMA_VERSION,
         "pt": probe_type,
-        "ps": int(probe_subtype),
+        "ps": probe_subtype,
         "ref": reference_id,
         "ag": ap_gain,
         "lg": lf_gain,
@@ -66,6 +67,9 @@ def decode_state(encoded: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or payload.get("v") != _SCHEMA_VERSION:
         return None
     if not isinstance(payload.get("pt"), str):
+        return None
+    ps = payload.get("ps")
+    if ps is not None and not isinstance(ps, (str, int)):
         return None
 
     electrodes_raw = payload.get("e", [])

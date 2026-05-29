@@ -40,8 +40,9 @@ from bokeh.util.logconfig import basicConfig
 from pixelmap import __version__, backend
 from pixelmap.analytics import AnalyticsSessionTracker
 from pixelmap.constants import (
-    PROBE_N,
+    PROBE_FEATURES,
     PROBE_TYPE_MAP,
+    LEGACY_INT_TO_IMRO_FORMAT,
     REF_ELECTRODES,
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
@@ -192,12 +193,17 @@ class ChannelmapGUI(param.Parameterized):
     probe_subtype = param.Selector(
         default=PROBE_TYPE_MAP[default_type][0],
         objects=PROBE_TYPE_MAP[default_type],
-        doc="Specific probe subtype (does not affect probe geometry, but affects indexing of reference and bank. Plug your probe in SpikeGLX and save an imro file to find out its subtype.)",
+        doc="IMEC probe part number (does not affect probe geometry, but affects indexing of reference and bank. Plug your probe in SpikeGLX and save an imro file to find out its subtype.)",
+    )
+
+    legacy_imro_mode = param.Boolean(
+        default=False,
+        doc="When True, use legacy integer probe number in IMRO header (SpikeGLX < 20260115 compatibility).",
     )
 
     reference_id = param.Selector(
         default="External",
-        objects=list(REF_ELECTRODES[PROBE_TYPE_MAP[default_type][0]].keys()),
+        objects=list(REF_ELECTRODES[PROBE_FEATURES[PROBE_TYPE_MAP[default_type][0]]["IMRO_format"]].keys()),
         doc=(
             "Reference to use for recording (probe tip, external pad, or circuit ground (possible for some versions)."
             " Specific channels not implemented."
@@ -297,7 +303,7 @@ class ChannelmapGUI(param.Parameterized):
         self.wiring_df = pd.read_csv(self.wiring_file)
 
         # Initialize electrodes
-        self.electrodes = Electrodes(self.wiring_maps[self.probe_type], PROBE_N[self.probe_type]['n'])
+        self.electrodes = Electrodes(self.wiring_maps[self.probe_type], PROBE_FEATURES[self.probe_subtype]["n_readouts_total"])
 
         # Update preset options based on probe type
         if self.probe_type in ["1.0", "2.0-1shank"]:
@@ -694,7 +700,7 @@ class ChannelmapGUI(param.Parameterized):
 
 
     def get_zigzag_subset(self):
-        N_per_shank = PROBE_N[self.probe_type]["N"]
+        N_per_shank = PROBE_FEATURES[self.probe_subtype]["n_sites_per_shank"]
         if self.probe_type == "1.0":
             zigzag_subset = np.arange(0, N_per_shank, 2)
         else:
@@ -710,7 +716,7 @@ class ChannelmapGUI(param.Parameterized):
     def get_interleaved_subset(self):
         """Return electrode IDs for the interleaved pattern: pairs 0-1, skip 2-3, pairs 4-5, ...
         Selects every other row (two adjacent electrodes per row), e.g. 0,1,4,5,8,9,..."""
-        N_per_shank = PROBE_N[self.probe_type]["N"]
+        N_per_shank = PROBE_FEATURES[self.probe_subtype]["n_sites_per_shank"]
         if self.probe_type == "1.0":
             # 1.0 has one electrode per row; select every other pair of rows
             interleaved_subset = []
@@ -844,7 +850,7 @@ class ChannelmapGUI(param.Parameterized):
         # Convert selection to array format
         selected_array = np.array([[e.shank_id, e.electrode_id] for e in  self.electrodes.selected])
 
-        # Generate IMRO list
+        # Generate IMRO list (always use string part number for feature lookup)
         self.imro_list = imro.generate_imro_channelmap(
             probe_type=self.probe_type,
             custom_electrodes=selected_array,
@@ -856,6 +862,11 @@ class ChannelmapGUI(param.Parameterized):
             lf_gain=self.lf_gain_input.value,
             hp_filter=self.hardware_hp_filter_on,
         )
+
+        # In legacy mode, replace the part-number header with the legacy integer
+        if self.legacy_imro_mode and self.probe_subtype in PROBE_FEATURES:
+            legacy_id = PROBE_FEATURES[self.probe_subtype]["SpikeGLX_probe_number"]
+            self.imro_list[0] = (legacy_id, self.imro_list[0][1])
 
     def generate_imro_content(self):
         if not self.ready_to_download():
@@ -958,16 +969,37 @@ class ChannelmapGUI(param.Parameterized):
 
         try:
             (imro_electrodes,
-            self.probe_type,  # probe_type value is a monitored param - simply setting its value will update the plot
-            self.probe_subtype,
-            self.reference_id,
-            self.ap_gain_input.value,
-            self.lf_gain_input.value,
-            self.hardware_hp_filter_on,
+            parsed_probe_type,
+            parsed_probe_subtype,
+            parsed_reference_id,
+            parsed_ap_gain,
+            parsed_lf_gain,
+            parsed_hp_filter,
             ) = imro.parse_imro_list(imro_list)
         except:
             pn.state.notifications.error("Failed to parse uploaded imro file.")
             return
+
+        # Setting probe_type triggers load_probe_data, which updates probe_subtype.objects
+        self.probe_type = parsed_probe_type
+
+        # Map probe_subtype: part-number string → direct; legacy int → nearest matching part number
+        if parsed_probe_subtype in self.param.probe_subtype.objects:
+            self.probe_subtype = parsed_probe_subtype
+        elif isinstance(parsed_probe_subtype, int) and parsed_probe_subtype in LEGACY_INT_TO_IMRO_FORMAT:
+            imro_fmt = LEGACY_INT_TO_IMRO_FORMAT[parsed_probe_subtype]
+            for pn in self.param.probe_subtype.objects:
+                if PROBE_FEATURES[pn]["IMRO_format"] == imro_fmt:
+                    self.probe_subtype = pn
+                    break
+
+        self.reference_id = parsed_reference_id
+        if parsed_ap_gain is not None:
+            self.ap_gain_input.value = parsed_ap_gain
+        if parsed_lf_gain is not None:
+            self.lf_gain_input.value = parsed_lf_gain
+        if parsed_hp_filter is not None:
+            self.hardware_hp_filter_on = parsed_hp_filter
 
         self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
@@ -1997,6 +2029,12 @@ class ChannelmapGUI(param.Parameterized):
             widgets={"probe_subtype": {"type": pn.widgets.Select, "width": 140, "margin": 0}},
             show_name=False,
         )
+        self.legacy_imro_mode_checkbox = pn.Param(
+            self,
+            parameters=["legacy_imro_mode"],
+            widgets={"legacy_imro_mode": {"type": pn.widgets.Checkbox, "name": "Compatible with SpikeGLX < 20260115"}},
+            show_name=False,
+        )
 
         # Preset selector
         self.preset_selector = pn.Param(
@@ -2441,6 +2479,7 @@ class ChannelmapGUI(param.Parameterized):
                     self.reference_selector_widget,
                     sizing_mode="stretch_width",
                 ),
+                self.legacy_imro_mode_checkbox,
                 pn.pane.Markdown("<b>For 1.0 only (2.0 gains not in channelmap):</b>", margin=(0, 0, -15, 10)),
                 self.hardware_hp_filter_on_selector_widget,
                 pn.Row(
@@ -2605,8 +2644,9 @@ class ChannelmapGUI(param.Parameterized):
         Handle probe subtype changes - update reference_id objects based on REF_ELECTRODES mapping.
         Param module monitors value changes of probe_subtype.
         """
-        # Update reference_id parameter objects based on the new probe_subtype
-        self.param.reference_id.objects = list(REF_ELECTRODES[self.probe_subtype].keys())
+        # Update reference_id parameter objects based on the new probe_subtype's IMRO format
+        imro_fmt = PROBE_FEATURES[self.probe_subtype]["IMRO_format"]
+        self.param.reference_id.objects = list(REF_ELECTRODES[imro_fmt].keys())
 
         # Set reference_id to the first available option if current selection is not available
         if self.reference_id not in self.param.reference_id.objects:

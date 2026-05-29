@@ -11,8 +11,10 @@ import numpy as np
 import pandas as pd
 
 from .constants import (
-    PROBE_N,
+    PROBE_FEATURES,
     PROBE_TYPE_MAP,
+    LEGACY_PROBE_TYPE_MAP,
+    LEGACY_INT_TO_IMRO_FORMAT,
     WIRING_FILE_MAP,
     REF_BANKS,
     REF_ELECTRODES,
@@ -27,13 +29,14 @@ from .types import Electrode
 ############################
 
 
-def get_electrodes(probe_type, wiring_df, preset=None, custom_electrodes=None):
+def get_electrodes(probe_type, wiring_df, preset=None, custom_electrodes=None, probe_subtype=None):
     """
     Get electrode selection based on preset, avoiding channel conflicts.
-    - probe_type: Type of probe (e.g., "1.0", "2.0-1shank", "2.0-4shanks", "NXT")
+    - probe_type: Type of probe (e.g., "1.0", "2.0-1shank", "2.0-4shanks")
     - wiring_df: Wiring DataFrame containing wiring information
     - preset: Preset layout configuration
     - custom_electrodes: Optional list of custom (shank_id, electrode_id) pairs
+    - probe_subtype: Part number string (e.g. "NP2003") for per-shank cap lookup
     """
 
     if custom_electrodes is None:
@@ -44,14 +47,18 @@ def get_electrodes(probe_type, wiring_df, preset=None, custom_electrodes=None):
             custom_electrodes = np.vstack([custom_electrodes * 0, custom_electrodes]).T
         selected_electrodes = np.array(custom_electrodes).astype(int)
 
-    _verify_hardware_violations(probe_type, selected_electrodes, wiring_df)
+    _verify_hardware_violations(probe_type, selected_electrodes, wiring_df, probe_subtype)
 
     return selected_electrodes
 
 
-def _verify_hardware_violations(probe_type, selected_electrodes, wiring_df):
-    # Check for probe type illegal numbers
-    max_n_per_shank = PROBE_N[probe_type]["n_per_shank"]
+def _verify_hardware_violations(probe_type, selected_electrodes, wiring_df, probe_subtype=None):
+    # Determine per-shank readout cap from probe features when available.
+    if probe_subtype is not None and probe_subtype in PROBE_FEATURES:
+        max_n_per_shank = PROBE_FEATURES[probe_subtype]["n_readouts_per_shank"]
+    else:
+        # Fallback for probes without explicit features (legacy paths).
+        max_n_per_shank = 384
     for shank in np.unique(selected_electrodes[:, 0]):
         n_electrodes_shank = np.sum(shank == selected_electrodes[:, 0])
         assert n_electrodes_shank <= max_n_per_shank, (
@@ -148,22 +155,37 @@ def format_wiring_df(wiring_df):
     return df
 
 
+def _imro_format_for(probe_subtype, probe_type):
+    """Return the IMRO format string for a given probe_subtype (str part number or int legacy)."""
+    if isinstance(probe_subtype, str) and probe_subtype in PROBE_FEATURES:
+        return PROBE_FEATURES[probe_subtype]["IMRO_format"]
+    if isinstance(probe_subtype, int) and probe_subtype in LEGACY_INT_TO_IMRO_FORMAT:
+        return LEGACY_INT_TO_IMRO_FORMAT[probe_subtype]
+    # Fallback: infer from probe_type
+    return {"1.0": "imro_np1000", "2.0-1shank": "imro_np2003", "2.0-4shanks": "imro_np2013"}.get(probe_type, "imro_np1000")
+
+
 def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, reference_id, ap_gain, lf_gain, hp_filter):
     """
     Format IMRO string based on probe type.
-    See see https://billkarsh.github.io/SpikeGLX/help/imroTables/ for details.
+    See https://billkarsh.github.io/SpikeGLX/help/imroTables/ for details.
+
+    probe_subtype may be:
+      - a part-number string such as "NP2003" (new default, SpikeGLX >= 20260115)
+      - a legacy integer such as 2003 (SpikeGLX < 20260115 compatibility mode)
     """
 
     assert probe_subtype is not None
 
+    imro_fmt = _imro_format_for(probe_subtype, probe_type)
     df_coordinates = find_electrode_coordinates(electrodes, wiring_df)
     electrodes = [[int(se[0]), int(se[1])] for se in electrodes]
 
-    # Generate entries based on probe type
+    # Generate entries based on probe type / IMRO format
     entries = []
     if probe_type == "1.0":
         # Format: (channel_id bank ref ap_gain lf_gain hp_filter)
-        ref_value = REF_ELECTRODES[probe_subtype][reference_id]
+        ref_value = REF_ELECTRODES[imro_fmt][reference_id]
 
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
@@ -173,7 +195,7 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
 
     elif probe_type == "2.0-1shank":
         # Format: (channel_id bank_mask ref electrode_id)
-        ref_value = REF_ELECTRODES[probe_subtype][reference_id]
+        ref_value = REF_ELECTRODES[imro_fmt][reference_id]
 
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
@@ -182,27 +204,28 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
             entry = (channel, bank_mask, ref_value, electrode_id)
             entries.append(entry)
 
-    elif probe_type in ["2.0-4shanks", "NXT"]:
+    elif probe_type == "2.0-4shanks":
+        # Format: (channel_id shank_id bank ref electrode_id)
+        n_total = len(electrodes)
         if reference_id == "Join Tips":
-            ref_values = REF_ELECTRODES[probe_subtype][reference_id]
-        else:  # apart from join tips, all electrodes share the same reference.
-            ref_values = [REF_ELECTRODES[probe_subtype][reference_id]] * PROBE_N[probe_type]['n']
-        assert len(ref_values) == len(electrodes),\
+            ref_values = REF_ELECTRODES[imro_fmt][reference_id]
+        else:
+            ref_values = [REF_ELECTRODES[imro_fmt][reference_id]] * n_total
+        assert len(ref_values) == n_total, \
             "Major error - mismatch between number of electrodes and number of reference ids"
 
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
             bank = int(wiring_df.columns[col][-1])
-            entry = [channel, shank_id, bank, electrode_id] # reference added after sorting per channel
+            entry = [channel, shank_id, bank, electrode_id]  # reference added after sorting
             entries.append(entry)
 
-    # Sort by channel and format
+    # Sort by channel
     entries.sort(key=lambda x: x[0])
-    
-    # Only apply ref_values formatting for 4-shank probes
-    if probe_type in ["2.0-4shanks", "NXT"]:
+
+    if probe_type == "2.0-4shanks":
         entries = [(e[0], e[1], e[2], ref, e[3]) for e, ref in zip(entries, ref_values)]
-    
+
     header = (probe_subtype, len(entries))
     imro_list = [header] + entries
 
@@ -480,25 +503,27 @@ def get_preset_candidates(preset, probe_type, wiring_df):
 
 
 def find_selected_electrodes(imro_list):
-    "imro_list: list of tuples starting with (version, )"
-    probe_type, n_channels = imro_list[0]
-    if probe_type in PROBE_TYPE_MAP["1.0"]:
-        probe_type = "1.0"
-    elif probe_type in PROBE_TYPE_MAP["2.0-1shank"]:
-        probe_type = "2.0-1shank"
-    elif probe_type in PROBE_TYPE_MAP["2.0-4shanks"]:
-        probe_type = "2.0-4shanks"
-    elif probe_type in PROBE_TYPE_MAP["NXT"]:
-        probe_type = "NXT"
+    "imro_list: list of tuples starting with (probe_id, n_channels)"
+    probe_id, n_channels = imro_list[0]
+    # probe_id is a part-number string (new) or legacy integer
+    if isinstance(probe_id, str) and probe_id in PROBE_FEATURES:
+        probe_type = PROBE_FEATURES[probe_id]["pixelmap_probe_type"]
+    else:
+        # Legacy integer: reverse-map via LEGACY_PROBE_TYPE_MAP
+        probe_type = None
+        for pt, nums in LEGACY_PROBE_TYPE_MAP.items():
+            if probe_id in nums:
+                probe_type = pt
+                break
 
     imro_table = np.array(imro_list[1:])
-    if probe_type in ["1.0"]:
+    if probe_type == "1.0":
         selected_electrodes = imro_table[:, 0] + 384 * imro_table[:, 1]
         selected_shanks = selected_electrodes * 0
-    elif probe_type in ["2.0-1shank"]:
+    elif probe_type == "2.0-1shank":
         selected_electrodes = imro_table[:, -1]
         selected_shanks = selected_electrodes * 0
-    elif probe_type in ["2.0-4shanks", "NXT"]:
+    else:  # "2.0-4shanks" or any future multi-shank type
         selected_electrodes = imro_table[:, -1]
         selected_shanks = imro_table[:, 1]
     selected_electrodes = np.vstack([selected_shanks, selected_electrodes]).T
@@ -569,9 +594,9 @@ def plot_probe_layout(
 
     if probe_type in ["1.0", "2.0-1shank"]:
         n_shanks = 1
-    elif probe_type in ["2.0-4shanks", "NXT"]:
+    else:  # "2.0-4shanks" and future multi-shank types
         n_shanks = 4
-    electrode_vpitch = {"1.0": 20, "2.0-1shank": 15, "2.0-4shanks": 15, "NXT": 15}
+    electrode_vpitch = {"1.0": 20, "2.0-1shank": 15, "2.0-4shanks": 15}
 
     # Get physical electrode ids
     selected_electrodes = find_selected_electrodes(imro_list)
