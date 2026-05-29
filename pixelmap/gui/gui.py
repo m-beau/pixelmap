@@ -47,6 +47,7 @@ from pixelmap.constants import (
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
+    SUPPORTED_QuadBase_PRESETS,
 )
 from pixelmap.types import Electrode
 from pixelmap.utils import imro, survey
@@ -188,7 +189,9 @@ class ChannelmapGUI(param.Parameterized):
     download_button_color = param.String(default="default")
     download_button_label = param.String(default="Select...")
 
-    probe_type = param.Selector(default=default_type, objects=list(PROBE_TYPE_MAP.keys()), doc="Neuropixels probe type")
+    probe_type = param.Selector(default=default_type,
+                                objects=list(WIRING_FILE_MAP.keys()),
+                                doc="Neuropixels hardware type (same sites, readout channels, layout, wiring)")
 
     probe_subtype = param.Selector(
         default=PROBE_TYPE_MAP[default_type][0],
@@ -313,6 +316,11 @@ class ChannelmapGUI(param.Parameterized):
             # For single shank probes, only shank 0 is available
             self.param.shank_selector.objects = [0]
             self.shank_selector = 0
+        elif self.probe_type == "QuadBase":
+            self.param.preset.objects = SUPPORTED_QuadBase_PRESETS
+            self.param.shank_selector.objects = [0, 1, 2, 3]
+            if self.shank_selector not in [0, 1, 2, 3]:
+                self.shank_selector = 0
         else:
             self.param.preset.objects = SUPPORTED_4shanks_PRESETS
             # For multi-shank probes, all 4 shanks are available

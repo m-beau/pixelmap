@@ -109,7 +109,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1016": {
     "SpikeGLX_probe_number": 0,
@@ -123,7 +123,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1017": {
     "SpikeGLX_probe_number": 0,
@@ -137,7 +137,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1020": {
     "SpikeGLX_probe_number": 1020,
@@ -151,7 +151,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-medium-staggered"
   },
   "NP1021": {
     "SpikeGLX_probe_number": 1021,
@@ -165,7 +165,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-medium-staggered"
   },
   "NP1022": {
     "SpikeGLX_probe_number": 1022,
@@ -179,7 +179,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-medium-linear"
   },
   "NP1030": {
     "SpikeGLX_probe_number": 1030,
@@ -193,7 +193,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-staggered"
   },
   "NP1031": {
     "SpikeGLX_probe_number": 1031,
@@ -207,7 +207,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-staggered"
   },
   "NP1032": {
     "SpikeGLX_probe_number": 1032,
@@ -221,7 +221,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1033": {
     "SpikeGLX_probe_number": 1033,
@@ -235,7 +235,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1040": {
     "SpikeGLX_probe_number": 1040,
@@ -249,7 +249,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1041": {
     "SpikeGLX_probe_number": 1041,
@@ -263,7 +263,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1042": {
     "SpikeGLX_probe_number": 1042,
@@ -277,7 +277,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1050": {
     "SpikeGLX_probe_number": 1050,
@@ -291,7 +291,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1051": {
     "SpikeGLX_probe_number": 1051,
@@ -305,7 +305,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1100": {
     "SpikeGLX_probe_number": 1100,
@@ -319,7 +319,7 @@
     "vertical_pitch": 6.0,
     "layout_geometry": "8x48",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "UHD1"
   },
   "NP1110": {
     "SpikeGLX_probe_number": 1110,
@@ -333,7 +333,7 @@
     "vertical_pitch": 6.0,
     "layout_geometry": "8x768",
     "num_shanks": 1,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "UHD2"
   },
   "NP1120": {
     "SpikeGLX_probe_number": 1120,
@@ -347,7 +347,7 @@
     "vertical_pitch": 4.5,
     "layout_geometry": "2x192",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "UHD3-2x192"
   },
   "NP1121": {
     "SpikeGLX_probe_number": 1121,
@@ -361,7 +361,7 @@
     "vertical_pitch": 3.0,
     "layout_geometry": "1x384",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "UHD3-1x384"
   },
   "NP1122": {
     "SpikeGLX_probe_number": 1122,
@@ -375,7 +375,7 @@
     "vertical_pitch": 3.0,
     "layout_geometry": "16x24",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "UHD3-16x24"
   },
   "NP1123": {
     "SpikeGLX_probe_number": 1123,
@@ -389,7 +389,7 @@
     "vertical_pitch": 4.5,
     "layout_geometry": "12x32",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "UHD3-12x32"
   },
   "NP1200": {
     "SpikeGLX_probe_number": 1200,
@@ -403,7 +403,7 @@
     "vertical_pitch": 31.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-passive"
   },
   "NP1210": {
     "SpikeGLX_probe_number": 1210,
@@ -417,7 +417,7 @@
     "vertical_pitch": 31.0,
     "layout_geometry": "staggered",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NHP-passive"
   },
   "NP1300": {
     "SpikeGLX_probe_number": 1300,
@@ -431,7 +431,7 @@
     "vertical_pitch": 20.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "Opto"
   },
   "NP2000": {
     "SpikeGLX_probe_number": 21,
@@ -557,7 +557,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": "2.0-4shanks"
+    "pixelmap_probe_type": "QuadBase"
   },
   "NP2021": {
     "SpikeGLX_probe_number": 2021,
@@ -571,7 +571,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": "2.0-4shanks"
+    "pixelmap_probe_type": "QuadBase"
   },
   "NP3000": {
     "SpikeGLX_probe_number": 3000,
@@ -585,7 +585,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "1x128",
     "num_shanks": 1,
-    "pixelmap_probe_type": "1.0"
+    "pixelmap_probe_type": "NXT-passive"
   },
   "NP3010": {
     "SpikeGLX_probe_number": 3010,
@@ -599,7 +599,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-1shank"
   },
   "NP3011": {
     "SpikeGLX_probe_number": 3011,
@@ -613,7 +613,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 1,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-1shank"
   },
   "NP3020": {
     "SpikeGLX_probe_number": 3020,
@@ -627,7 +627,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3021": {
     "SpikeGLX_probe_number": 3021,
@@ -641,7 +641,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3022": {
     "SpikeGLX_probe_number": 3022,
@@ -655,7 +655,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3023": {
     "SpikeGLX_probe_number": 3023,
@@ -669,7 +669,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3024": {
     "SpikeGLX_probe_number": 3024,
@@ -683,7 +683,7 @@
     "vertical_pitch": 15.0,
     "layout_geometry": "linear",
     "num_shanks": 4,
-    "pixelmap_probe_type": null
+    "pixelmap_probe_type": "NXT-4shank"
   },
   "PRB2_1_2_0640_0": {
     "SpikeGLX_probe_number": 21,

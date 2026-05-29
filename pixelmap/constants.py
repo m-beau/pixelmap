@@ -17,6 +17,7 @@ WIRING_FILE_MAP = {
     "1.0": ("1.0_positions.csv", "1.0_wiring.csv"),
     "2.0-1shank": ("2.0-1shank_positions.csv", "2.0-1shank_wiring.csv"),
     "2.0-4shanks": ("2.0-4shanks_positions.csv", "2.0-4shanks_wiring.csv"),
+    "QuadBase": ("QuadBase_positions.csv", "QuadBase_wiring.csv"),
 }
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,7 @@ REF_BANKS = {
     "1.0":         {0: 0, 1: 1, 2: 2},
     "2.0-1shank":  {0: 0, 1: 2, 2: 4, 3: 8},  # bank_mask – powers of 2
     "2.0-4shanks": {0: 0, 1: 1, 2: 2, 3: 3},
+    "QuadBase":    {0: 0, 1: 1, 2: 2, 3: 3},
 }
 
 # ---------------------------------------------------------------------------
@@ -86,4 +88,13 @@ SUPPORTED_4shanks_PRESETS = [
     "tip_s1b0_top_s3b0", "tip_s3b0_top_s1b0",
     "gliding_0-3", "gliding_3-0",
     "zigzag_0", "zigzag_1", "zigzag_2", "zigzag_3",
+]
+
+SUPPORTED_QuadBase_PRESETS = [
+    "tips_all",         # electrodes 0-383 (bank 0) on all 4 shanks — 1536 total
+    "bank1_all",        # electrodes 384-767 (bank 1) on all 4 shanks — 1536 total
+    "bank2_all",        # electrodes 768-1151 (bank 2) on all 4 shanks — 1536 total
+    "tip_s0", "tip_s1", "tip_s2", "tip_s3",  # bank 0 on one shank (384 ch)
+    "tip_b0_top_b1_s0", "tip_b0_top_b1_s1",
+    "tip_b0_top_b1_s2", "tip_b0_top_b1_s3",
 ]

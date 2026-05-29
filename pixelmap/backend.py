@@ -20,6 +20,7 @@ from .constants import (
     REF_ELECTRODES,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
+    SUPPORTED_QuadBase_PRESETS,
 )
 
 from .types import Electrode
@@ -107,11 +108,14 @@ def make_wiring_maps(wiring_maps_dir):
     assert wiring_maps_dir.exists(), f"{wiring_maps_dir} does not exist!"
     cache_file = wiring_maps_dir / "wiring_maps.pkl"
 
-    # If pickled result found, preloads it
+    # If pickled result found and covers all current probe types, preload it
+    expected_keys = set(WIRING_FILE_MAP.keys())
     if cache_file.exists():
         with open(cache_file, 'rb') as f:
-                wiring_maps = pickle.load(f)
-                return wiring_maps
+            wiring_maps = pickle.load(f)
+        if set(wiring_maps.keys()) == expected_keys:
+            return wiring_maps
+        # Cache is stale (probe types changed) — rebuild below
     
     # Generate wiring maps
     wiring_maps = {}
@@ -220,6 +224,17 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
             entry = [channel, shank_id, bank, electrode_id]  # reference added after sorting
             entries.append(entry)
 
+    elif probe_type == "QuadBase":
+        # Format: (channel_id shank_id bank refid electrode_id)
+        # Channel is 0-1535 (384 dedicated per shank); ref applies per-shank (no Join Tips)
+        ref_value = REF_ELECTRODES[imro_fmt][reference_id]
+
+        for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
+            channel = int(wiring_df.loc[row, "channel"])
+            bank = int(wiring_df.columns[col][-1])
+            entry = (channel, shank_id, bank, ref_value, electrode_id)
+            entries.append(entry)
+
     # Sort by channel
     entries.sort(key=lambda x: x[0])
 
@@ -265,6 +280,10 @@ def get_preset_candidates(preset, probe_type, wiring_df):
     elif probe_type in ["2.0-4shanks", "NXT"]:
         assert preset in SUPPORTED_4shanks_PRESETS, (
             f"Preset {preset} is not supported for probe type {probe_type}. Supported presets: {SUPPORTED_4shanks_PRESETS}"
+        )
+    elif probe_type == "QuadBase":
+        assert preset in SUPPORTED_QuadBase_PRESETS, (
+            f"Preset {preset} is not supported for QuadBase. Supported presets: {SUPPORTED_QuadBase_PRESETS}"
         )
 
     preset_electrodes = []
@@ -494,6 +513,52 @@ def get_preset_candidates(preset, probe_type, wiring_df):
             electrodes_bank1 = np.vstack([electrodes_bank1 * 0 + shank, electrodes_bank1]).T
             preset_electrodes = np.vstack([electrodes_bank0, electrodes_bank1])
 
+    elif probe_type == "QuadBase":
+        # QuadBase wiring_df has 1536 rows: rows s*384 to s*384+383 belong to shank s.
+        # Only one shank's columns are populated per row.
+        CH_PER_SHANK = 384
+
+        if preset == "tips_all":
+            # Bank 0 on all shanks (1536 total = 384/shank × 4 shanks)
+            for s in range(4):
+                for row in range(s * CH_PER_SHANK, (s + 1) * CH_PER_SHANK):
+                    el = wiring_df.loc[row, f"shank{s}-bank0"]
+                    if not pd.isna(el):
+                        preset_electrodes.append([s, int(el)])
+
+        elif preset == "bank1_all":
+            for s in range(4):
+                for row in range(s * CH_PER_SHANK, (s + 1) * CH_PER_SHANK):
+                    el = wiring_df.loc[row, f"shank{s}-bank1"]
+                    if not pd.isna(el):
+                        preset_electrodes.append([s, int(el)])
+
+        elif preset == "bank2_all":
+            for s in range(4):
+                for row in range(s * CH_PER_SHANK, (s + 1) * CH_PER_SHANK):
+                    el = wiring_df.loc[row, f"shank{s}-bank2"]
+                    if not pd.isna(el):
+                        preset_electrodes.append([s, int(el)])
+
+        elif preset.startswith("tip_s") and len(preset) == 6 and preset[5].isdigit():
+            s = int(preset[5])
+            for row in range(s * CH_PER_SHANK, (s + 1) * CH_PER_SHANK):
+                el = wiring_df.loc[row, f"shank{s}-bank0"]
+                if not pd.isna(el):
+                    preset_electrodes.append([s, int(el)])
+
+        elif preset.startswith("tip_b0_top_b1_s"):
+            s = int(preset[-1])
+            # First 192 channels from bank 0, next 192 channels from bank 1
+            for row in range(s * CH_PER_SHANK, s * CH_PER_SHANK + 192):
+                el = wiring_df.loc[row, f"shank{s}-bank0"]
+                if not pd.isna(el):
+                    preset_electrodes.append([s, int(el)])
+            for row in range(s * CH_PER_SHANK + 192, (s + 1) * CH_PER_SHANK):
+                el = wiring_df.loc[row, f"shank{s}-bank1"]
+                if not pd.isna(el):
+                    preset_electrodes.append([s, int(el)])
+
     return np.array(preset_electrodes, dtype=int)  # (n_electrodes, 2) array - [[shank_id, electrode_id], ...]
 
 
@@ -596,7 +661,7 @@ def plot_probe_layout(
         n_shanks = 1
     else:  # "2.0-4shanks" and future multi-shank types
         n_shanks = 4
-    electrode_vpitch = {"1.0": 20, "2.0-1shank": 15, "2.0-4shanks": 15}
+    electrode_vpitch = {"1.0": 20, "2.0-1shank": 15, "2.0-4shanks": 15, "QuadBase": 15}
 
     # Get physical electrode ids
     selected_electrodes = find_selected_electrodes(imro_list)
