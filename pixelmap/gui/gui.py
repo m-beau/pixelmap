@@ -2502,7 +2502,7 @@ class ChannelmapGUI(param.Parameterized):
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
             pn.Column(
-                pn.pane.Markdown("## Survey overlay", margin=(-5, 0, 0, 0)),
+                pn.pane.Markdown("## Survey overlay ⚡", margin=(-5, 0, 0, 0)),
                 self.survey_file_loader,
                 pn.Row(self.apply_survey_button, self.clear_survey_button),
                 pn.Row(self.survey_vmin_input, self.survey_vmax_input),

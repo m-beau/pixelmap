@@ -2,7 +2,7 @@
 
 The PixelMap GUI is a browser-based interface for designing Neuropixels channelmaps.
 
-## 1) Launching the GUI
+## 1️⃣ Launching the GUI
 
 ```bash
 uv run pixelmap   # or: pixelmap (if installed with pip)
@@ -10,7 +10,7 @@ uv run pixelmap   # or: pixelmap (if installed with pip)
 
 Or use the [online version](https://pixelmap.pni.princeton.edu/app) — no installation required.
 
-## 2) Set your probe metadata
+## 2️⃣ Set your probe metadata
 
 ### Probe type and subtype
 
@@ -50,11 +50,11 @@ These three settings are encoded directly in the IMRO table and apply **only to 
 | **Low-pass 'lf' gain** | 250 | Amplification factor for the LF (local field potential) band — the low-frequency component (<~1000 Hz). Common value: 250. |
 | **Hardware HP filter** | On (1) | Whether to enable the probe's on-board analog high-pass filter, equivalent to a 1st-order 300 Hz Butterworth high-pass filter. Set to `1` (on) to remove slow drifts from the AP band; set to `0` (off) to preserve the full-bandwidth signal. `None` leaves the field unspecified. |
 
-## 3) Build your channelmap
+## 3️⃣ Build your channelmap
 
 ### The core of PixelMap: color-coded electrode selection status
 
-Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable, and while it was possible to predict incompatibilities with Neuropixels 1.0 probes, it became very difficult with 2.0 single-shank scrambled wiring (see Neuropixels 2.0 paper to understand the motivation behind this scrambled wiring) and 4-shanks probes. PixelMap visualizes these constraints in real time, allowing you to craft your channelmap much more easily:
+Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. This is due to real-estate constraints: readout lines in each shank, [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head, are shared by multiple sites. Therefore selecting one site for recording makes others unavailable (if they share the same readout line in the shank, or ADC in the head). While it was possible to rather easily predict incompatibilities with Neuropixels 1.0 probes, it became very difficult with 2.0 single-shank scrambled wiring (see Neuropixels 2.0 paper to understand the motivation behind this scrambled wiring) and 4-shanks probes. PixelMap visualizes these constraints in real time, allowing you to craft your channelmap much more easily:
 
 ::::{grid} 2
 :gutter: 3
@@ -132,7 +132,24 @@ Upload an existing `.imro` file to use as a starting point. This is useful for:
 This is really useful if you want to slightly edit a pre-existing channelmap! Upload your current `.imro` file, then use the deselection boxes to make specific electrodes available again, and then use the selection boxes to select your new target electrodes. This is much faster than trying to recreate the same channelmap from scratch using the presets or textual selection.
 :::
 
-## 4) Download and share your channelmap (IMRO file)
+### Use PixelMap's power features: activity survey ⚡ and anatomical 🧠 overlays
+
+You can optionally overlay the probe plot with additional information critical to guide your channelmap design.
+
+First, you can overlay a heatmap encoding a **SpikeGLX activity survey** across all sites after implantation to identify the sites with most activity. Because recording in white matter is common and yields fewer units than recording from neuron somata, tailoring your channelmap to areas with high spiking activity (which is likely to be grey matter) can dramatically increase the unit yield of your recordings. For more details on how to run a survey and export the data, see the [SpikeGLX survey overlay section below](#power-feature-1-spikeglx-activity-survey-overlay).
+
+
+Second, you can overlay **anatomical region boundaries** from any brain atlas available in [brainglobe](https://brainglobe.info/index.html) to plan your channelmap around specific brain regions of interest. For more details on how to compute and interpret the anatomical overlay, see the [anatomical overlay section below](#power-feature-2-anatomical-overlay).
+
+The most powerful workflow is to use both together:
+1. Before implantation, use the anatomical overlay to plan a channelmap that covers your target brain regions.
+2. After implantation, either chronic or, if you're quick about it, acute, run a quick survey recording in SpikeGLX. Export the activity survey, and load it as an overlay in PixelMap to visually identify the most active sites.
+3. Adjust your predicted anatomy overlay by moving your probe around to match the ephys activity map (which is the only thing you can actually trust!).
+4. Build your channelmap to select sites in your brain regions of interest.
+
+Voilà!
+
+## 4️⃣ Download and share your channelmap (IMRO file)
 
 ### As files
 
@@ -149,7 +166,7 @@ Click **Get shareable link** in the right panel to encode your entire current co
 Clicking the button again always re-copies the latest link, even if the configuration hasn't changed.
 
 
-## 5) Load and use your IMRO file in SpikeGLX
+## 5️⃣ Load and use your IMRO file in SpikeGLX
 
 Load your `.imro` file in [SpikeGLX](https://billkarsh.github.io/SpikeGLX/help/imroTables/) using either:
 
@@ -165,7 +182,7 @@ Hit record, and off you go!
 To spikesort your data, make sure to feed the imro table to your favorite spike-sorter. E.g. for Kilosort, simply use the Kilosort txt file that you can download from PixelMap alongside the `.imro` and pdf files.
 ___
 
-## Optional feature: SpikeGLX Survey Overlay
+## ⚡ Power Feature 1: SpikeGLX Activity Survey Overlay 
 
 SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap overlays these values *alongside* the probe so you can visually identify the most active contacts before committing to a channelmap.
 
@@ -198,8 +215,9 @@ Click **Clear overlay** to remove the survey overlay. The overlay is also cleare
 The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
 :::
 
+___
 
-## Optional feature: Anatomical Overlay
+## 🧠 Power Feature 2: Anatomical Overlay
 
 The anatomical overlay maps every electrode on your probe to a brain region from a standard atlas, and displays the result directly on the probe visualization. It is designed to help you approximately plan where your probe will be recording before the animal is implanted, or to review the anatomy of an existing insertion.
 
