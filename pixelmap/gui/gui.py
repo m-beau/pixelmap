@@ -930,6 +930,34 @@ class ChannelmapGUI(param.Parameterized):
         self.update_filename()
         self.generate_imro()
 
+        # Collect anatomy overlay data (if active)
+        anatomy_bands = None
+        if getattr(self, "_anatomy_overlay_active", False):
+            band_src = self.region_band_source.data
+            if band_src["x"]:
+                plot_centers = self._shank_plot_centers()
+                center_to_shank = {round(v, 3): k for k, v in plot_centers.items()}
+                anatomy_bands = []
+                for i in range(len(band_src["x"])):
+                    shank_id = center_to_shank.get(round(band_src["x"][i], 3), 0)
+                    y_mid = band_src["y"][i]
+                    height = band_src["height"][i]
+                    anatomy_bands.append({
+                        "shank_id": shank_id,
+                        "y_min": y_mid - height / 2,
+                        "y_max": y_mid + height / 2,
+                        "color": band_src["color"][i],
+                        "acronym": band_src["acronym"][i],
+                    })
+
+        # Collect survey overlay data (if loaded)
+        survey_colors = None
+        if self.survey_values is not None:
+            survey_colors = {
+                (e.shank_id, e.electrode_id): self._get_survey_color(e)
+                for e in self.survey_values
+            }
+
         # Create memory buffer
         buffer = BytesIO()
 
@@ -944,6 +972,8 @@ class ChannelmapGUI(param.Parameterized):
                 title,
                 figsize=(2, 30),
                 save_plot=False,
+                anatomy_bands=anatomy_bands,
+                survey_colors=survey_colors,
             )
 
             # Save current figure to buffer
@@ -2065,9 +2095,13 @@ class ChannelmapGUI(param.Parameterized):
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
 
     def _build_subtype_options(self):
-        """Dict of {'NP2013 – Description': 'NP2013'} for the current probe_type."""
+        """Dict of {'NP2013 – Description (SpikeGLX number: 2013, IMRO format: imro_np2013)': 'NP2013'} for the current probe_type."""
         return {
-            f"{pn_} \u2013 {PROBE_FEATURES[pn_]['probe_name']}": pn_
+            (
+                f"{pn_} \u2013 {PROBE_FEATURES[pn_]['probe_name']}"
+                f" (SpikeGLX number: {PROBE_FEATURES[pn_]['SpikeGLX_probe_number']},"
+                f" IMRO format: {PROBE_FEATURES[pn_]['IMRO_format']})"
+            ): pn_
             for pn_ in PROBE_TYPE_MAP[self.probe_type]
         }
 

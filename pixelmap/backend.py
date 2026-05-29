@@ -185,31 +185,29 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
     df_coordinates = find_electrode_coordinates(electrodes, wiring_df)
     electrodes = [[int(se[0]), int(se[1])] for se in electrodes]
 
-    # Generate entries based on probe type / IMRO format
+    # Generate entries based on IMRO format (the actual determinant of wire format)
     entries = []
-    if probe_type == "1.0":
+
+    if imro_fmt in ("imro_np1000", "imro_np1110"):
         # Format: (channel_id bank ref ap_gain lf_gain hp_filter)
         ref_value = REF_ELECTRODES[imro_fmt][reference_id]
-
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
             bank = int(wiring_df.columns[col][-1])
-            entry = (channel, bank, ref_value, ap_gain, lf_gain, hp_filter)
-            entries.append(entry)
+            entries.append((channel, bank, ref_value, ap_gain, lf_gain, hp_filter))
 
-    elif probe_type == "2.0-1shank":
-        # Format: (channel_id bank_mask ref electrode_id)
+    elif imro_fmt in ("imro_np2000", "imro_np2003"):
+        # Format: (channel_id bank_mask ref electrode_id) — single-shank 2.0
         ref_value = REF_ELECTRODES[imro_fmt][reference_id]
-
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
             bank = int(wiring_df.columns[col][-1])
-            bank_mask = REF_BANKS["2.0-1shank"][bank]  # {1=bnk-0, 2=bnk-1, 4=bnk-2, 8=bnk-3}
-            entry = (channel, bank_mask, ref_value, electrode_id)
-            entries.append(entry)
+            bank_mask = REF_BANKS["2.0-1shank"][bank]
+            entries.append((channel, bank_mask, ref_value, electrode_id))
 
-    elif probe_type == "2.0-4shanks":
-        # Format: (channel_id shank_id bank ref electrode_id)
+    elif imro_fmt in ("imro_np2010", "imro_np2013"):
+        # Format: (channel_id shank_id bank ref electrode_id) — 4-shank 2.0
+        # Reference is inserted after sorting to support per-entry Join Tips
         n_total = len(electrodes)
         if reference_id == "Join Tips":
             ref_values = REF_ELECTRODES[imro_fmt][reference_id]
@@ -217,28 +215,24 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
             ref_values = [REF_ELECTRODES[imro_fmt][reference_id]] * n_total
         assert len(ref_values) == n_total, \
             "Major error - mismatch between number of electrodes and number of reference ids"
-
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
             bank = int(wiring_df.columns[col][-1])
-            entry = [channel, shank_id, bank, electrode_id]  # reference added after sorting
-            entries.append(entry)
+            entries.append([channel, shank_id, bank, electrode_id])  # ref inserted after sort
 
-    elif probe_type == "QuadBase":
-        # Format: (channel_id shank_id bank refid electrode_id)
-        # Channel is 0-1535 (384 dedicated per shank); ref applies per-shank (no Join Tips)
+    elif imro_fmt == "imro_np2020":
+        # Format: (channel_id shank_id bank refid electrode_id) — QuadBase
+        # Each shank has dedicated channels; no Join Tips concept
         ref_value = REF_ELECTRODES[imro_fmt][reference_id]
-
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
             channel = int(wiring_df.loc[row, "channel"])
             bank = int(wiring_df.columns[col][-1])
-            entry = (channel, shank_id, bank, ref_value, electrode_id)
-            entries.append(entry)
+            entries.append((channel, shank_id, bank, ref_value, electrode_id))
 
     # Sort by channel
     entries.sort(key=lambda x: x[0])
 
-    if probe_type == "2.0-4shanks":
+    if imro_fmt in ("imro_np2010", "imro_np2013"):
         entries = [(e[0], e[1], e[2], ref, e[3]) for e, ref in zip(entries, ref_values)]
 
     header = (probe_subtype, len(entries))
@@ -390,12 +384,10 @@ def get_preset_candidates(preset, probe_type, wiring_df):
         # Multi-shank configurations
         if preset == "tips_all":
             # 0-95 (384/4) of each shank's bank 0
-            preset_electrodes = np.arange(96)
-            preset_electrodes = np.vstack([preset_electrodes * 0, preset_electrodes]).T
-            for shank in range(3):
-                preset_electrodes_ = preset_electrodes.copy()
-                preset_electrodes_[:, 0] = shank + 1
-                preset_electrodes = np.vstack([preset_electrodes, preset_electrodes_])
+            base = np.arange(96)
+            for shank in range(4):
+                shank_col = np.full(96, shank)
+                preset_electrodes.extend(np.vstack([shank_col, base]).T.tolist())
 
         elif preset.startswith("tip_s") and len(preset) == 6 and preset[5].isdigit():
             # "tip_sX" with X in [0-3] - 0-383 on shank X
@@ -642,8 +634,17 @@ def generate_kilosort_channelmap_dict(imro_list, positions_file):
     return kilosort_dict
 
 
+def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
+    """Return hex_color darkened by factor (0=black, 1=unchanged)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def plot_probe_layout(
-    probe_type, imro_list, positions_file, wiring_file, title, figsize=(2, 30), save_plot=False, saveDir=None
+    probe_type, imro_list, positions_file, wiring_file, title, figsize=(2, 30), save_plot=False, saveDir=None,
+    anatomy_bands=None, survey_colors=None
 ):
     """
     Create visualization of probe layout with selected electrodes
@@ -708,6 +709,32 @@ def plot_probe_layout(
         )
         ax.add_patch(shank_poly_front)
 
+        # Draw anatomy overlay (colored region bands behind the shank)
+        if anatomy_bands:
+            shank_bands = [b for b in anatomy_bands if b["shank_id"] == 0]
+            seen_boundary_ys: set = set()
+            for band in shank_bands:
+                h = band["y_max"] - band["y_min"]
+                rect = patches.Rectangle(
+                    (-shank_width // 2, band["y_min"]), shank_width, h,
+                    linewidth=0, facecolor=band["color"], alpha=0.25, zorder=-50
+                )
+                ax.add_patch(rect)
+                y_mid = (band["y_min"] + band["y_max"]) / 2
+                ax.text(
+                    shank_width // 2 + 3, y_mid, band["acronym"],
+                    ha="left", va="center", fontsize=6, clip_on=False,
+                    color=_darken_hex(band["color"], 0.6),
+                )
+                for by in (band["y_min"], band["y_max"]):
+                    key = round(by, 2)
+                    if key not in seen_boundary_ys:
+                        seen_boundary_ys.add(key)
+                        ax.plot(
+                            [-shank_width // 2, shank_width // 2], [by, by],
+                            ls="--", lw=0.7, c="#555555", zorder=-40,
+                        )
+
         # Draw bank borders
         x_borders = [-shank_width // 2, shank_width // 2]
         for bank_i in np.arange(0, len(positions), 384):
@@ -727,7 +754,9 @@ def plot_probe_layout(
                 zorder=-10,
             )
 
-        # Draw electrodes
+        # Draw electrodes (and optional survey sidebar bars)
+        survey_bar_width = 3
+        survey_bar_gap = 1
         for electrode, orig_x, y in positions[:, 1:]:
             if electrode in selected_electrodes[:, 1]:
                 color = selected_color
@@ -762,6 +791,18 @@ def plot_probe_layout(
             )
             ax.add_patch(rect)
 
+            # Survey sidebar bar
+            if survey_colors is not None:
+                bar_color = survey_colors.get((0, int(electrode)), "#dddddd")
+                side = 1 if x >= 0 else -1
+                bar_x = side * (shank_width // 2 + survey_bar_gap + survey_bar_width / 2)
+                bar_rect = patches.Rectangle(
+                    (bar_x - survey_bar_width / 2, y - electrode_height / 2),
+                    survey_bar_width, electrode_height,
+                    linewidth=0, facecolor=bar_color, alpha=1.0, zorder=50,
+                )
+                ax.add_patch(bar_rect)
+
         ax.set_xlim(-shank_width // 2 - 20, shank_width // 2 + 20)
         ax.set_ylim(min_y - tip_height - 50, max_y + 100)
 
@@ -790,13 +831,15 @@ def plot_probe_layout(
                     -shank_width // 2 - tick_width * 2, y_pos, str(electrode_idx), ha="right", va="center", fontsize=8
                 )
 
-        # Add distance ticks on the right (every 500 μm)
-        distance_ticks = range(0, int(max_y), 500)
-        for distance in distance_ticks:
-            # Tick mark on right edge of shank
-            ax.plot([shank_width // 2, shank_width // 2 + tick_width], [distance, distance], "k-", linewidth=1)
-            # Label on right side
-            ax.text(shank_width // 2 + tick_width * 2, distance, f"{distance}", ha="left", va="center", fontsize=8)
+        # Add distance ticks on the right (every 500 μm), omitted when anatomy
+        # labels already serve as depth reference.
+        if not anatomy_bands:
+            distance_ticks = range(0, int(max_y), 500)
+            for distance in distance_ticks:
+                # Tick mark on right edge of shank
+                ax.plot([shank_width // 2, shank_width // 2 + tick_width], [distance, distance], "k-", linewidth=1)
+                # Label on right side
+                ax.text(shank_width // 2 + tick_width * 2, distance, f"{distance}", ha="left", va="center", fontsize=8)
 
     # multi-shank
     else:
@@ -836,6 +879,32 @@ def plot_probe_layout(
             )
             ax.add_patch(shank_poly_front)
 
+            # Draw anatomy overlay for this shank
+            if anatomy_bands:
+                shank_bands = [b for b in anatomy_bands if b["shank_id"] == shank_id]
+                seen_boundary_ys_ms: set = set()
+                for band in shank_bands:
+                    h = band["y_max"] - band["y_min"]
+                    rect = patches.Rectangle(
+                        (x_center - shank_width // 2, band["y_min"]), shank_width, h,
+                        linewidth=0, facecolor=band["color"], alpha=0.25, zorder=-50
+                    )
+                    ax.add_patch(rect)
+                    y_mid = (band["y_min"] + band["y_max"]) / 2
+                    ax.text(
+                        x_center + shank_width // 2 + 5, y_mid, band["acronym"],
+                        ha="left", va="center", fontsize=6, clip_on=False,
+                        color=_darken_hex(band["color"], 0.6),
+                    )
+                    for by in (band["y_min"], band["y_max"]):
+                        key = (shank_id, round(by, 2))
+                        if key not in seen_boundary_ys_ms:
+                            seen_boundary_ys_ms.add(key)
+                            ax.plot(
+                                [x_center - shank_width // 2, x_center + shank_width // 2],
+                                [by, by], ls="--", lw=0.7, c="#555555", zorder=-40,
+                            )
+
             # Draw bank borders
             x_borders = [x_center - shank_width // 2, x_center + shank_width // 2]
             for bank_i in np.arange(0, len(positions[shank_m]), 384):
@@ -856,7 +925,9 @@ def plot_probe_layout(
                         zorder=-10,
                     )
 
-            # Draw electrodes
+            # Draw electrodes (and optional survey sidebar bars)
+            ms_survey_bar_width = 3
+            ms_survey_bar_gap = 1
             for shank_id_pos, electrode, orig_x, y in positions[shank_m]:
                 if shank_id_pos != shank_id:
                     continue
@@ -888,6 +959,18 @@ def plot_probe_layout(
                     alpha=alpha,
                 )
                 ax.add_patch(rect)
+
+                # Survey sidebar bar
+                if survey_colors is not None:
+                    bar_color = survey_colors.get((int(shank_id_pos), int(electrode)), "#dddddd")
+                    side = 1 if (x - x_center) >= 0 else -1
+                    bar_x = x_center + side * (shank_width // 2 + ms_survey_bar_gap + ms_survey_bar_width / 2)
+                    bar_rect = patches.Rectangle(
+                        (bar_x - ms_survey_bar_width / 2, y - electrode_height / 2),
+                        ms_survey_bar_width, electrode_height,
+                        linewidth=0, facecolor=bar_color, alpha=1.0, zorder=50,
+                    )
+                    ax.add_patch(bar_rect)
 
             # Add shank label
             ax.text(
@@ -938,13 +1021,15 @@ def plot_probe_layout(
                 # Label on left side
                 ax.text(leftmost_x - 2 * tick_width, y_pos, str(electrode_idx), ha="right", va="center", fontsize=8)
 
-        # Add distance ticks on the right of rightmost active shank (every 500 μm)
-        distance_ticks = range(0, int(overall_max_y), 500)
-        for distance in distance_ticks:
-            # Tick mark on right edge of rightmost active shank
-            ax.plot([rightmost_x, rightmost_x + tick_width], [distance, distance], "k-", linewidth=1)
-            # Label on right side
-            ax.text(rightmost_x + 2 * tick_width, distance, f"{distance}", ha="left", va="center", fontsize=8)
+        # Add distance ticks on the right of rightmost active shank (every 500 μm),
+        # omitted when anatomy labels already serve as depth reference.
+        if not anatomy_bands:
+            distance_ticks = range(0, int(overall_max_y), 500)
+            for distance in distance_ticks:
+                # Tick mark on right edge of rightmost active shank
+                ax.plot([rightmost_x, rightmost_x + tick_width], [distance, distance], "k-", linewidth=1)
+                # Label on right side
+                ax.text(rightmost_x + 2 * tick_width, distance, f"{distance}", ha="left", va="center", fontsize=8)
 
     ax.set_ylabel("Vertical position (channel/μm)")
     # Remove grid
