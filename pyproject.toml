@@ -40,7 +40,7 @@ pixelmap = "pixelmap.gui.app_util:main"
 
 [project.urls]
 Homepage = "https://github.com/m-beau/pixelmap"
-Documentation = "https://pixelmap.readthedocs.io"
+Documentation = "https://pixelmap-neuropixels.readthedocs.io"
 Repository = "https://github.com/m-beau/pixelmap"
 Issues = "https://github.com/m-beau/pixelmap/issues"
 
@@ -54,9 +54,10 @@ include = ["pixelmap*"]
 [tool.setuptools.package-data]
 pixelmap = [
     "wiring_maps/*.csv",
+    "wiring_maps/*.json",
+    "wiring_maps/*.pkl",
     "gui/*/*.png",
     "gui/*/*.svg",
-    "example_layouts/*.pdf",
 ]
 
 [project.optional-dependencies]

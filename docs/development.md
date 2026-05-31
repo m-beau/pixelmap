@@ -12,8 +12,8 @@ This guide is for contributors and developers who want to work on PixelMap.
 ### Installation
 
 ```bash
-git clone https://github.com/m-beau/channelmap_generator.git
-cd channelmap_generator
+git clone https://github.com/m-beau/pixelmap.git
+cd pixelmap
 
 # Install with dev dependencies
 uv sync
@@ -26,27 +26,27 @@ pip install -e ".[dev]"
 
 ```bash
 # Launch the GUI
-uv run cmap_gui
+uv run pixelmap
 
 # Or if installed with pip
-cmap_gui
+pixelmap
 ```
 
 ## Architecture Overview
 
 ```
-channelmap_generator/
+pixelmap/
 ├── __init__.py          # Public API exports
 ├── backend.py           # Core electrode selection logic
 ├── constants.py         # Probe configurations and presets
 ├── types.py             # Data classes (Electrode, etc.)
 ├── gui/
-│   ├── gui.py           # NiceGUI frontend
+│   ├── gui.py           # Panel frontend
 │   ├── app_util.py      # GUI helper functions
 │   └── assets/          # Images and static files
 ├── utils/
 │   └── imro.py          # IMRO file reading/writing
-└── wiring_maps/         # CSV files defining electrode-ADC wiring
+└── wiring_maps/         # CSV/JSON files defining electrode-ADC wiring
 ```
 
 ### Key Modules
@@ -73,7 +73,7 @@ channelmap_generator/
 pytest
 
 # Run with coverage
-pytest --cov=channelmap_generator
+pytest --cov=pixelmap
 
 # Run specific test file
 pytest tests/test_backend.py
@@ -128,4 +128,4 @@ To contribute:
 3. Make your changes and run tests: `pytest`
 4. Push to your fork and open a pull request **to the `dev` branch**
 
-See [CONTRIBUTING.md](https://github.com/m-beau/channelmap_generator/blob/main/CONTRIBUTING.md) for full guidelines on reporting bugs, requesting features, and code style.
+See [CONTRIBUTING.md](https://github.com/m-beau/pixelmap/blob/main/CONTRIBUTING.md) for full guidelines on reporting bugs, requesting features, and code style.

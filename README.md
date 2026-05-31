@@ -35,7 +35,7 @@ cd pixelmap
 uv run pixelmap  # installs dependencies automatically and launches the GUI
 ```
 
-Also available via [pip, conda, or Docker](https://pixelmap.readthedocs.io/en/latest/getting-started.html).
+Also available via [pip, conda, or Docker](https://pixelmap-neuropixels.readthedocs.io/en/latest/getting-started.html).
 
 ## Quick Start
 
@@ -65,7 +65,7 @@ imro_list = cmg.generate_imro_channelmap(
 cmg.save_to_imro_file(imro_list, "my_channelmap.imro")
 ```
 
-See the [full documentation](https://pixelmap.readthedocs.io) for the complete API reference, GUI guide, preset reference, and troubleshooting.
+See the [full documentation](https://pixelmap-neuropixels.readthedocs.io) for the complete API reference, GUI guide, preset reference, and troubleshooting.
 
 ## Supported Probes
 
