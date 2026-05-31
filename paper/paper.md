@@ -6,7 +6,7 @@ tags:
   - Electrophysiology
   - Neuropixels
   - Panel
-authors:"fixe paper
+authors:
   - name: Maxime Beau
     orcid: 0000-0002-8907-6612
     corresponding: true
