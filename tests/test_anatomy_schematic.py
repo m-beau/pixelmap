@@ -17,7 +17,7 @@ from pixelmap.anatomy.schematic import render_locator
 class _FakeAtlas:
     """Fake atlas: left half (ML 1-4) region 1, right half (ML 5-8) region 2."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, **_kwargs):
         self.name = name
         self.orientation = "asr"
         self.resolution = (25.0, 25.0, 25.0)  # (AP, DV, ML) µm/voxel

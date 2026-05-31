@@ -17,7 +17,7 @@ from pixelmap.anatomy import regions as regions_module
 class _FakeAtlas:
     """A 3-voxel-cube fake atlas: half is region 1, half is region 2."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, **_kwargs):
         self.name = name
         self.orientation = "asr"
         self.resolution = (25.0, 25.0, 25.0)  # µm per voxel
@@ -76,8 +76,8 @@ class TestLookup:
     def test_zero_label_returns_none(self, monkeypatch):
         # Override the fake atlas to have all zeros (outside-brain everywhere).
         class Zeros(_FakeAtlas):
-            def __init__(self, name):
-                super().__init__(name)
+            def __init__(self, name, **kwargs):
+                super().__init__(name, **kwargs)
                 self.annotation = np.zeros((4, 4, 4), dtype=np.int32)
 
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", Zeros)
@@ -111,7 +111,7 @@ def _atlas_cls(orientation, annotation, structures=None):
     }
 
     class _A:
-        def __init__(self, name):
+        def __init__(self, name, **_kwargs):
             self.name = name
             self.orientation = orientation
             self.resolution = (25.0, 25.0, 25.0)

@@ -2788,6 +2788,7 @@ class ChannelmapGUI(param.Parameterized):
         if hasattr(self, "survey_vmin_input"):
             self._set_survey_range_inputs(None, None, enabled=False)
 
+        self.clear_anatomy_overlay()
         self.clear_bokeh_data()
         self.load_probe_data()
         self.setup_bokeh_plot()

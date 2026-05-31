@@ -12,7 +12,7 @@ from pixelmap.anatomy.visualization import compute_region_bands
 class _LayeredAtlas:
     """Layered along the DV axis: bottom half = region 1, top half = region 2."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, **_kwargs):
         self.name = name
         self.orientation = "asr"
         self.resolution = (25.0, 25.0, 25.0)

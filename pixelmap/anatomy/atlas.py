@@ -39,20 +39,31 @@ def get_atlas(name: str = _DEFAULT_ATLAS):
 
     First call for a given atlas may download tens of MB. We delegate the
     download/caching to brainglobe — its on-disk cache is shared across
-    processes.
+    processes.  ``check_latest=False`` skips the remote version check so the
+    app doesn't hang when the GIN server is unreachable.
     """
-    return BrainGlobeAtlas(name)
+    return BrainGlobeAtlas(name, check_latest=False)
 
 
 def list_atlases() -> list[str]:
     """List every atlas in the brainglobe registry, not just downloaded ones.
 
-    ``get_all_atlases_lastversions`` returns the full set published to the
-    brainglobe registry (Allen mouse at several resolutions, Waxholm rat,
-    Kim Lab mouse, zebrafish, axolotl, etc.). It does *not* trigger any
-    atlas download — only an HTTP HEAD/JSON fetch of the registry index,
-    which is cached locally by brainglobe.
+    Reads the locally cached registry index first so the app starts instantly
+    even when the GIN server is unreachable.  Falls back to
+    ``get_all_atlases_lastversions`` (which may hit the network) only if the
+    cache file is missing.
     """
+    try:
+        from brainglobe_atlasapi import config, utils
+
+        cache_path = config.get_brainglobe_dir() / "last_versions.conf"
+        if cache_path.exists():
+            data = utils.conf_from_file(cache_path)
+            return sorted(data["atlases"].keys())
+    except Exception:
+        pass
+    # Cache missing or unreadable — fall back to the (potentially slow)
+    # network fetch so the full list is still available on first run.
     return sorted(get_all_atlases_lastversions().keys())
 
 
