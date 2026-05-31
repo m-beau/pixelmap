@@ -3,7 +3,7 @@
 import pixelmap
 
 project = "PixelMap"
-copyright = "2024, Maxime Beau"
+copyright = "2025, Maxime Beau"
 author = "Maxime Beau"
 version = pixelmap.__version__
 release = version
@@ -56,3 +56,5 @@ html_theme_options = {
     "source_branch": "main",
     "source_directory": "docs/",
 }
+
+html_css_files = ["custom.css"]

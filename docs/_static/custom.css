@@ -1,0 +1,9 @@
+/* Minimal theme kepano-style colorful headings */
+h1 { color: #d04255; }
+h2 { color: #d5763f; }
+h3 { color: #e5b567; }
+h4 { color: #a8c373; }
+h5 { color: #6c99bb; }
+h6 { color: #9e86c8; }
+
+strong { color: #b05279; }

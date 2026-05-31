@@ -4,6 +4,7 @@ Interactive GUI for Neuropixels Channelmap Generation
 Using Bokeh for better interactivity with hover, click, and rectangular selection
 """
 
+import base64
 import gc
 import json
 import logging
@@ -20,30 +21,41 @@ import param
 from bokeh import events
 from bokeh.models import (
     BoxSelectTool,
+    ColorBar,
     ColumnDataSource,
     CustomJS,
     HoverTool,
+    LinearColorMapper,
     PanTool,
     Range1d,
     ResetTool,
     TapTool,
+    Title,
     WheelZoomTool,
 )
+from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
 from bokeh.util.logconfig import basicConfig
 
 from pixelmap import __version__, backend
 from pixelmap.analytics import AnalyticsSessionTracker
 from pixelmap.constants import (
-    PROBE_N,
+    PROBE_FEATURES,
     PROBE_TYPE_MAP,
+    LEGACY_INT_TO_IMRO_FORMAT,
     REF_ELECTRODES,
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
+    SUPPORTED_QuadBase_PRESETS,
 )
 from pixelmap.types import Electrode
-from pixelmap.utils import imro
+from pixelmap.utils import imro, survey
+from pixelmap.utils import url_share
+from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.schematic import render_locator
+from pixelmap.anatomy.transform import bregma_to_atlas_um
+from pixelmap.anatomy.visualization import compute_region_bands
 
 ## Configure logging
 basicConfig(level=logging.ERROR)  # no warnings
@@ -57,6 +69,14 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions
 pn.extension("tabulator", notifications=True)
+
+
+def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
+    """Return ``hex_color`` darkened by ``factor`` (0=black, 1=unchanged)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 ###################################
@@ -73,6 +93,11 @@ class Electrodes:
     available: set[Electrode] = field(default_factory=set)
     selected: set[Electrode] = field(default_factory=set)
     unavailable: set[Electrode] = field(default_factory=set)
+    # Undo/redo stacks store frozen snapshots of `selected`; available and
+    # unavailable are re-derived on restore so we never store stale views.
+    _undo_stack: list[frozenset[Electrode]] = field(default_factory=list)
+    _redo_stack: list[frozenset[Electrode]] = field(default_factory=list)
+    _max_history: int = 100
 
     def __post_init__(self):
         self.available = set(self.wiring_map.keys())
@@ -103,6 +128,54 @@ class Electrodes:
         self.selected = set()
         self.unavailable = set()
 
+    # --- undo / redo --------------------------------------------------
+
+    def push_undo_snapshot(self):
+        """Snapshot the current selection so the next mutation is undoable.
+
+        Must be called *before* any mutation that should be one undo step.
+        The redo stack is cleared because any new action invalidates the
+        previously-undone branch of history.
+        """
+        self._undo_stack.append(frozenset(self.selected))
+        if len(self._undo_stack) > self._max_history:
+            del self._undo_stack[0]
+        self._redo_stack.clear()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo_stack)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo_stack)
+
+    def undo(self) -> bool:
+        if not self._undo_stack:
+            return False
+        self._redo_stack.append(frozenset(self.selected))
+        self._restore_selection(self._undo_stack.pop())
+        return True
+
+    def redo(self) -> bool:
+        if not self._redo_stack:
+            return False
+        self._undo_stack.append(frozenset(self.selected))
+        self._restore_selection(self._redo_stack.pop())
+        return True
+
+    def _restore_selection(self, target: frozenset[Electrode]):
+        """Replace `selected` with `target` and recompute derived sets."""
+        self.available = set(self.wiring_map.keys())
+        self.selected = set()
+        self.unavailable = set()
+        for electrode in target:
+            if electrode in self.available:
+                self.selected.add(electrode)
+                self.available.discard(electrode)
+                conflicting = self.wiring_map[electrode]
+                newly_unavailable = conflicting & self.available
+                self.available -= newly_unavailable
+                self.unavailable |= newly_unavailable
+
 
 #################
 #### GUI app ####
@@ -116,17 +189,24 @@ class ChannelmapGUI(param.Parameterized):
     download_button_color = param.String(default="default")
     download_button_label = param.String(default="Select...")
 
-    probe_type = param.Selector(default=default_type, objects=list(PROBE_TYPE_MAP.keys()), doc="Neuropixels probe type")
+    probe_type = param.Selector(default=default_type,
+                                objects=list(WIRING_FILE_MAP.keys()),
+                                doc="Neuropixels hardware type (same sites, readout channels, layout, wiring)")
 
     probe_subtype = param.Selector(
         default=PROBE_TYPE_MAP[default_type][0],
         objects=PROBE_TYPE_MAP[default_type],
-        doc="Specific probe subtype (does not affect probe geometry, but affects indexing of reference and bank. Plug your probe in SpikeGLX and save an imro file to find out its subtype.)",
+        doc="IMEC probe part number - affects imro file format. Look at your IMEC order, or plug your probe in SpikeGLX release >= 20260115 and save an imro file to find out its part number.",
+    )
+
+    legacy_imro_mode = param.Boolean(
+        default=False,
+        doc="When True, use legacy integer probe number in IMRO header (SpikeGLX < 20260115 compatibility).",
     )
 
     reference_id = param.Selector(
         default="External",
-        objects=list(REF_ELECTRODES[PROBE_TYPE_MAP[default_type][0]].keys()),
+        objects=list(REF_ELECTRODES[PROBE_FEATURES[PROBE_TYPE_MAP[default_type][0]]["IMRO_format"]].keys()),
         doc=(
             "Reference to use for recording (probe tip, external pad, or circuit ground (possible for some versions)."
             " Specific channels not implemented."
@@ -167,6 +247,13 @@ class ChannelmapGUI(param.Parameterized):
         # Probe metadata
         self.ap_gain_default = 500
         self.lf_gain_default = 250
+
+        # Survey overlay state
+        self.survey_values: dict[Electrode, float] | None = None
+        self.survey_cmap = LinearColorMapper(palette=Viridis256, low=0.0, high=1.0)
+        self.survey_color_bar = None
+        self.survey_color_bar_title = None
+        self._survey_range_suspend = False
 
         # Load initial data
         self.load_probe_data()
@@ -212,6 +299,8 @@ class ChannelmapGUI(param.Parameterized):
 
         # Probe subtype update
         self.param.probe_subtype.objects = PROBE_TYPE_MAP[self.probe_type]
+        if hasattr(self, '_subtype_widget'):
+            self._subtype_widget.options = self._build_subtype_options()
         self.probe_subtype = self.param.probe_subtype.objects[0]
 
         # Load data
@@ -219,7 +308,7 @@ class ChannelmapGUI(param.Parameterized):
         self.wiring_df = pd.read_csv(self.wiring_file)
 
         # Initialize electrodes
-        self.electrodes = Electrodes(self.wiring_maps[self.probe_type], PROBE_N[self.probe_type]['n'])
+        self.electrodes = Electrodes(self.wiring_maps[self.probe_type], PROBE_FEATURES[self.probe_subtype]["n_readouts_total"])
 
         # Update preset options based on probe type
         if self.probe_type in ["1.0", "2.0-1shank"]:
@@ -227,6 +316,11 @@ class ChannelmapGUI(param.Parameterized):
             # For single shank probes, only shank 0 is available
             self.param.shank_selector.objects = [0]
             self.shank_selector = 0
+        elif self.probe_type == "QuadBase":
+            self.param.preset.objects = SUPPORTED_QuadBase_PRESETS
+            self.param.shank_selector.objects = [0, 1, 2, 3]
+            if self.shank_selector not in [0, 1, 2, 3]:
+                self.shank_selector = 0
         else:
             self.param.preset.objects = SUPPORTED_4shanks_PRESETS
             # For multi-shank probes, all 4 shanks are available
@@ -253,14 +347,23 @@ class ChannelmapGUI(param.Parameterized):
             "line_color": [],
             "line_width": [],
             "status": [],
+            "val": [],
+            "bar_x": [],
+            "bar_height": [],
+            "bar_color": [],
+            "bar_alpha": [],
         }
 
         # Parameters for visualization
+        BAR_WIDTH = 16
+        BAR_GAP = 4  # gap between shank outline and survey bar
+
         if self.probe_type in ["1.0", "2.0-1shank"]:
             # Single shank
             shank_width = 100
             electrode_width = 15
             electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
+            shank_spacing = None
         else:
             # Multi-shank
             shank_width = 100
@@ -268,24 +371,39 @@ class ChannelmapGUI(param.Parameterized):
             electrode_width = 12
             electrode_height = 8
 
+        # Bars sit just outside the shank outline, mirroring the column the
+        # electrode lives in: left-column contacts → bar on the left of the
+        # outline, right-column contacts → bar on the right.
+        bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+
         for shank_id, electrode_id, orig_x, y in positions:
 
             # Map x position to shank width
             if self.probe_type == "1.0":
                 x_norm = (orig_x - 35) / 24
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             elif self.probe_type == "2.0-1shank":
                 x_norm = (orig_x - 16) / 16
                 x = x_norm * (shank_width * 0.7) / 2
+                x_center_shank = 0.0
             else: # 4-shanks 2.0 or NXT
                 # Calculate shank center
-                x_center = shank_id * shank_spacing
+                x_center_shank = shank_id * shank_spacing
                 # Map electrode position within shank
-                x_norm = (orig_x - x_center - 16) / 16
-                x = x_center + x_norm * (shank_width * 0.7) / 2
+                x_norm = (orig_x - x_center_shank - 16) / 16
+                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
+
+            # Bar x: just outside the shank outline, on the side matching
+            # the electrode's column relative to the shank center.
+            side = 1 if (x - x_center_shank) >= 0 else -1
+            bar_x = x_center_shank + side * bar_offset
 
             # Determine electrode status and color
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(Electrode(shank_id, electrode_id))
+            electrode = Electrode(shank_id, electrode_id)
+            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
+            val = self._get_survey_val(electrode)
+            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
 
             electrode_data["x"].append(x)
             electrode_data["y"].append(y)
@@ -298,22 +416,53 @@ class ChannelmapGUI(param.Parameterized):
             electrode_data["line_color"].append(line_color)
             electrode_data["line_width"].append(line_width)
             electrode_data["status"].append(status)
+            electrode_data["val"].append(val)
+            electrode_data["bar_x"].append(bar_x)
+            electrode_data["bar_height"].append(electrode_height * 1.5)
+            electrode_data["bar_color"].append(bar_color)
+            electrode_data["bar_alpha"].append(bar_alpha)
 
         # Create ColumnDataSource
         self.electrode_source = ColumnDataSource(data=electrode_data)
 
 
     def get_electrode_plotting_params(self, electrode: Electrode):
-        """
-        Get electrode appearance based on its status
-        status, color, alpha, line_color, line_width
-        """
+        """Get electrode fill/border appearance based on selection state."""
         if electrode in self.electrodes.selected:
             return "Selected", "red", 1.0, "darkred", 0
         elif electrode in self.electrodes.unavailable:
             return "Unavailable", "black", 1.0, "darkgray", 0
-        else:  # unselected electrodes
+        else:
             return "Unselected", "lightgray", 0.8, "gray", 0
+
+    def _get_survey_val(self, electrode: Electrode) -> float:
+        """Return the survey Val for an electrode, or NaN if none loaded."""
+        if self.survey_values is None:
+            return float("nan")
+        return self.survey_values.get(electrode, float("nan"))
+
+    def _get_survey_color(self, electrode: Electrode) -> str:
+        """Map a survey Val to a hex color using the current colormap bounds."""
+        val = self._get_survey_val(electrode)
+        if not np.isfinite(val):
+            return "#dddddd"  # neutral gray for electrodes without survey data
+        low = self.survey_cmap.low
+        high = self.survey_cmap.high
+        if high <= low:
+            frac = 0.0
+        else:
+            frac = (val - low) / (high - low)
+        frac = max(0.0, min(1.0, frac))
+        idx = int(round(frac * (len(Viridis256) - 1)))
+        return Viridis256[idx]
+
+    def _get_bar_color_alpha(self, electrode: Electrode) -> tuple[str, float]:
+        """Return (fill_color, fill_alpha) for the survey sidebar of an electrode."""
+        if self.survey_values is None:
+            return "#000000", 0.0
+        color = self._get_survey_color(electrode)
+        alpha = 0.4 if electrode in self.electrodes.unavailable else 1.0
+        return color, alpha
 
 
     def setup_electrode_visualization(self):
@@ -332,6 +481,19 @@ class ChannelmapGUI(param.Parameterized):
             hover_fill_color="yellow",
             hover_line_color="orange",
             hover_line_width=3,
+        )
+
+        # Survey sidebar bars: thin rectangles flanking each electrode contact,
+        # colored by survey Val. Invisible (alpha=0) until a survey is loaded.
+        self.survey_bar_renderer = self.plot.rect(
+            x="bar_x",
+            y="y",
+            width=16,
+            height="bar_height",
+            fill_color="bar_color",
+            fill_alpha="bar_alpha",
+            line_alpha=0,
+            source=self.electrode_source,
         )
 
         # Add shank outlines and labels
@@ -365,7 +527,7 @@ class ChannelmapGUI(param.Parameterized):
                         [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
                     )
                     self.plot.text(
-                        [shank_width / 2 + 3],
+                        [shank_width / 2 + 17],
                         [bank_y],
                         text=[f"Bank {bank_i // 384}"],
                         text_font_size="10pt",
@@ -423,7 +585,7 @@ class ChannelmapGUI(param.Parameterized):
                         )
                         if shank_id == 3:  # Bank labels (only on rightmost shank)
                             self.plot.text(
-                                [x_center + shank_width / 2 + 5],
+                                [x_center + shank_width / 2 + 17],
                                 [bank_y],
                                 text=[f"Bank {bank_i // 384}"],
                                 text_font_size="10pt",
@@ -445,6 +607,9 @@ class ChannelmapGUI(param.Parameterized):
         line_colors = np.empty(n_electrodes, dtype=object)
         line_widths = np.empty(n_electrodes, dtype=np.int32)
         statuses = np.empty(n_electrodes, dtype=object)
+        vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = np.empty(n_electrodes, dtype=object)
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
 
         for i in range(n_electrodes):
             shank_id = self.electrode_source.data["shank_id"][i]
@@ -458,12 +623,15 @@ class ChannelmapGUI(param.Parameterized):
             line_colors[i] = line_color
             line_widths[i] = line_width
             statuses[i] = status
+            vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
 
         # Update the data source with new data, replacing old arrays
         self.electrode_source.data.update(
             {"color": colors.tolist(), "alpha": alphas.tolist(),
              "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist()}
+             "status": statuses.tolist(), "val": vals.tolist(),
+             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
         )
 
 
@@ -477,6 +645,9 @@ class ChannelmapGUI(param.Parameterized):
             return
 
         print(f"Selection changed: {old} -> {new}")
+
+        # One interactive gesture (tap, box drag, zigzag drag) = one undo step.
+        self.electrodes.push_undo_snapshot()
 
         # Single electrode selection - toggle
         if len(new) == 1:
@@ -517,9 +688,44 @@ class ChannelmapGUI(param.Parameterized):
                     if electrode_id in zigzag_subset:
                         self.electrodes.select(Electrode(shank_id, electrode_id))
 
+            elif self.select_mode == "interleaved_select":
+                # interleaved logic - rows 0,1 then skip 2,3, then rows 4,5... (0,1,4,5,8,9...)
+                print(f"Box interleaved select: {len(new)} electrodes")
+                interleaved_subset = self.get_interleaved_subset()
+                for idx in new:
+                    shank_id = self.electrode_source.data["shank_id"][idx]
+                    electrode_id = self.electrode_source.data["electrode_id"][idx]
+                    if electrode_id in interleaved_subset:
+                        self.electrodes.select(Electrode(shank_id, electrode_id))
+
+            elif self.select_mode == "dependent_deselect":
+                # Find unavailable (black) electrodes in the box span, then deselect
+                # all selected electrodes whose wiring conflicts caused them to be unavailable.
+                print(f"Box deselect-dependents: {len(new)} electrodes in span")
+                unavailable_in_span = set()
+                for idx in new:
+                    shank_id = self.electrode_source.data["shank_id"][idx]
+                    electrode_id = self.electrode_source.data["electrode_id"][idx]
+                    electrode = Electrode(shank_id, electrode_id)
+                    if electrode in self.electrodes.unavailable:
+                        unavailable_in_span.add(electrode)
+
+                # For each unavailable electrode in the span, find which selected
+                # electrode(s) caused it to be unavailable (i.e. it is in their wiring map).
+                to_deselect = set()
+                for u in unavailable_in_span:
+                    for s in self.electrodes.selected:
+                        if u in self.electrodes.wiring_map[s]:
+                            to_deselect.add(s)
+
+                print(f"  → deselecting {len(to_deselect)} responsible selected electrode(s)")
+                for s in to_deselect:
+                    self.electrodes.deselect(s)
+
         # Update electrode visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
 
         # Clear the selection to allow for new interactions
         self.electrode_source.selected.indices = []
@@ -528,7 +734,7 @@ class ChannelmapGUI(param.Parameterized):
 
 
     def get_zigzag_subset(self):
-        N_per_shank = PROBE_N[self.probe_type]["N"]
+        N_per_shank = PROBE_FEATURES[self.probe_subtype]["n_sites_per_shank"]
         if self.probe_type == "1.0":
             zigzag_subset = np.arange(0, N_per_shank, 2)
         else:
@@ -541,10 +747,36 @@ class ChannelmapGUI(param.Parameterized):
             zigzag_subset = np.array(zigzag_subset)
         return zigzag_subset
 
+    def get_interleaved_subset(self):
+        """Return electrode IDs for the interleaved pattern: pairs 0-1, skip 2-3, pairs 4-5, ...
+        Selects every other row (two adjacent electrodes per row), e.g. 0,1,4,5,8,9,..."""
+        N_per_shank = PROBE_FEATURES[self.probe_subtype]["n_sites_per_shank"]
+        if self.probe_type == "1.0":
+            # 1.0 has one electrode per row; select every other pair of rows
+            interleaved_subset = []
+            i = 0
+            while i < N_per_shank:
+                interleaved_subset.append(i)
+                interleaved_subset.append(i + 1)
+                i += 4
+            interleaved_subset = np.array(interleaved_subset)
+        else:
+            # 2.0 probes: 2 electrodes per row, groups of 4 = 2 rows.
+            # Select first row of each pair of rows (electrodes 0,1 then 4,5 then 8,9...)
+            interleaved_subset = []
+            i = 0
+            while i < N_per_shank:
+                interleaved_subset.append(i)
+                interleaved_subset.append(i + 1)
+                i += 4
+            interleaved_subset = np.array(interleaved_subset)
+        return interleaved_subset
+
 
     def apply_preset(self):
         """Apply selected preset configuration"""
         if self.preset:
+            self.electrodes.push_undo_snapshot()
             self.electrodes.clear_selection()
             preset_electrodes = backend.get_preset_candidates(self.preset, self.probe_type, self.wiring_df)
             for shank_id, electrode_id in preset_electrodes:
@@ -553,6 +785,7 @@ class ChannelmapGUI(param.Parameterized):
             # Update visualization
             self.update_electrode_colors()
             self.update_electrode_counter()
+            self.refresh_undo_buttons()
 
 
     def parse_electrode_input(self, text):
@@ -593,13 +826,17 @@ class ChannelmapGUI(param.Parameterized):
         try:
             text = self.electrode_input.value
             electrodes = self.parse_electrode_input(text)
+            if not electrodes:
+                return
 
+            self.electrodes.push_undo_snapshot()
             for (shank_id, electrode_id) in electrodes:
                 self.electrodes.select(Electrode(shank_id, electrode_id))
 
             # Update visualization
             self.update_electrode_colors()
             self.update_electrode_counter()
+            self.refresh_undo_buttons()
 
         except Exception as e:
             print(f"Error parsing electrode input: {e}")
@@ -607,11 +844,14 @@ class ChannelmapGUI(param.Parameterized):
 
     def clear_selection(self):
         """Clear all selected electrodes"""
+        if self.electrodes.selected:
+            self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
 
         # Update visualization
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
 
 
     ###############################
@@ -644,7 +884,7 @@ class ChannelmapGUI(param.Parameterized):
         # Convert selection to array format
         selected_array = np.array([[e.shank_id, e.electrode_id] for e in  self.electrodes.selected])
 
-        # Generate IMRO list
+        # Generate IMRO list (always use string part number for feature lookup)
         self.imro_list = imro.generate_imro_channelmap(
             probe_type=self.probe_type,
             custom_electrodes=selected_array,
@@ -656,6 +896,11 @@ class ChannelmapGUI(param.Parameterized):
             lf_gain=self.lf_gain_input.value,
             hp_filter=self.hardware_hp_filter_on,
         )
+
+        # In legacy mode, replace the part-number header with the legacy integer
+        if self.legacy_imro_mode and self.probe_subtype in PROBE_FEATURES:
+            legacy_id = PROBE_FEATURES[self.probe_subtype]["SpikeGLX_probe_number"]
+            self.imro_list[0] = (legacy_id, self.imro_list[0][1])
 
     def generate_imro_content(self):
         if not self.ready_to_download():
@@ -685,6 +930,36 @@ class ChannelmapGUI(param.Parameterized):
         self.update_filename()
         self.generate_imro()
 
+        # Collect anatomy overlay data (if active)
+        anatomy_bands = None
+        if getattr(self, "_anatomy_overlay_active", False):
+            band_src = self.region_band_source.data
+            if band_src["x"]:
+                plot_centers = self._shank_plot_centers()
+                center_to_shank = {round(v, 3): k for k, v in plot_centers.items()}
+                anatomy_bands = []
+                for i in range(len(band_src["x"])):
+                    shank_id = center_to_shank.get(round(band_src["x"][i], 3), 0)
+                    y_mid = band_src["y"][i]
+                    height = band_src["height"][i]
+                    anatomy_bands.append({
+                        "shank_id": shank_id,
+                        "y_min": y_mid - height / 2,
+                        "y_max": y_mid + height / 2,
+                        "color": band_src["color"][i],
+                        "acronym": band_src["acronym"][i],
+                    })
+
+        # Collect survey overlay data (if loaded)
+        survey_colors = None
+        survey_range = None
+        if self.survey_values is not None:
+            survey_colors = {
+                (e.shank_id, e.electrode_id): self._get_survey_color(e)
+                for e in self.survey_values
+            }
+            survey_range = (self.survey_cmap.low, self.survey_cmap.high)
+
         # Create memory buffer
         buffer = BytesIO()
 
@@ -699,6 +974,9 @@ class ChannelmapGUI(param.Parameterized):
                 title,
                 figsize=(2, 30),
                 save_plot=False,
+                anatomy_bands=anatomy_bands,
+                survey_colors=survey_colors,
+                survey_range=survey_range,
             )
 
             # Save current figure to buffer
@@ -758,23 +1036,828 @@ class ChannelmapGUI(param.Parameterized):
 
         try:
             (imro_electrodes,
-            self.probe_type,  # probe_type value is a monitored param - simply setting its value will update the plot
-            self.probe_subtype,
-            self.reference_id,
-            self.ap_gain_input.value,
-            self.lf_gain_input.value,
-            self.hardware_hp_filter_on,
+            parsed_probe_type,
+            parsed_probe_subtype,
+            parsed_reference_id,
+            parsed_ap_gain,
+            parsed_lf_gain,
+            parsed_hp_filter,
             ) = imro.parse_imro_list(imro_list)
         except:
             pn.state.notifications.error("Failed to parse uploaded imro file.")
             return
 
+        # Setting probe_type triggers load_probe_data, which updates probe_subtype.objects
+        self.probe_type = parsed_probe_type
+
+        # Map probe_subtype: part-number string → direct; legacy int → nearest matching part number
+        if parsed_probe_subtype in self.param.probe_subtype.objects:
+            self.probe_subtype = parsed_probe_subtype
+        elif isinstance(parsed_probe_subtype, int) and parsed_probe_subtype in LEGACY_INT_TO_IMRO_FORMAT:
+            imro_fmt = LEGACY_INT_TO_IMRO_FORMAT[parsed_probe_subtype]
+            for pn in self.param.probe_subtype.objects:
+                if PROBE_FEATURES[pn]["IMRO_format"] == imro_fmt:
+                    self.probe_subtype = pn
+                    break
+
+        self.reference_id = parsed_reference_id
+        if parsed_ap_gain is not None:
+            self.ap_gain_input.value = parsed_ap_gain
+        if parsed_lf_gain is not None:
+            self.lf_gain_input.value = parsed_lf_gain
+        if parsed_hp_filter is not None:
+            self.hardware_hp_filter_on = parsed_hp_filter
+
+        self.electrodes.push_undo_snapshot()
         self.electrodes.clear_selection()
         for shank_id, electrode_id in imro_electrodes:
             self.electrodes.select(Electrode(shank_id, electrode_id))
 
         self.update_electrode_colors()
         self.update_electrode_counter()
+        self.refresh_undo_buttons()
+
+    ###################################
+    ##### Anatomical overlay logic ####
+    ###################################
+
+    def setup_region_bands(self):
+        """Initialize the empty Bokeh sources + glyphs for the anatomy overlay.
+
+        Three layers, drawn back-to-front so labels stay on top of bands:
+          - colored band rectangles (fill behind the shank),
+          - boundary tick marks (horizontal lines at region transitions),
+          - region acronym text labels next to each band.
+        """
+        self.region_band_source = ColumnDataSource(
+            data={"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        )
+        self.region_band_renderer = self.plot.rect(
+            x="x", y="y", width="width", height="height",
+            fill_color="color", fill_alpha=0.25, line_color=None,
+            source=self.region_band_source,
+        )
+
+        self.region_boundary_source = ColumnDataSource(
+            data={"x0": [], "x1": [], "y0": [], "y1": []}
+        )
+        self.region_boundary_renderer = self.plot.segment(
+            x0="x0", y0="y0", x1="x1", y1="y1",
+            line_color="#444444", line_width=1, line_dash="dashed",
+            source=self.region_boundary_source,
+        )
+
+        self.region_label_source = ColumnDataSource(
+            data={"x": [], "y": [], "text": [], "color": [], "center": []}
+        )
+        self.region_label_renderer = self.plot.text(
+            x="x", y="y", text="text", text_color="color",
+            text_font_size="10pt", text_baseline="middle", text_align="left",
+            source=self.region_label_source,
+        )
+
+    def _available_atlases(self) -> tuple[list[str], str]:
+        """List atlases known to brainglobe; fall back to a single default."""
+        default = "allen_mouse_25um"
+        try:
+            atlases = anatomy_atlas.list_atlases()
+        except Exception:
+            return [default], default
+        if not atlases:
+            return [default], default
+        if default not in atlases:
+            atlases = [default] + list(atlases)
+        return list(atlases), default
+
+    def _shank_probe_xs(self) -> dict[int, float]:
+        """Probe-local x (µm) at the *median* of each shank's electrodes."""
+        return {
+            int(s): float(self.positions_df[self.positions_df["shank"] == s]["x"].median())
+            for s in sorted(self.positions_df["shank"].unique())
+        }
+
+    def _shank_plot_centers(self) -> dict[int, float]:
+        """Bokeh-plot x at the center of each shank's drawn outline."""
+        if self.probe_type in ["1.0", "2.0-1shank"]:
+            return {0: 0.0}
+        return {sid: sid * 250.0 for sid in self._shank_probe_xs()}
+
+    def _shank_plot_width(self) -> float:
+        """Width (in plot units) to draw region bands at, narrower than the shank."""
+        return 90.0  # shank outlines are 100 wide
+
+    def _region_label_offset(self, half_width: float) -> float:
+        """Horizontal offset for region acronym labels. Pushed out to clear the
+        survey sidebar bars (outer edge ~half_width + 25) when a survey overlay
+        is loaded; snug to the bands otherwise."""
+        if self.survey_values is not None:
+            return half_width + 33
+        return half_width + 14
+
+    def _reposition_region_labels(self):
+        """Re-place anatomy region labels for the current survey state. Idempotent;
+        a no-op when no anatomy overlay is shown."""
+        data = self.region_label_source.data
+        centers = data.get("center")
+        if not centers:
+            return
+        offset = self._region_label_offset(self._shank_plot_width() / 2)
+        new = dict(data)
+        new["x"] = [c + offset for c in centers]
+        self.region_label_source.data = new
+
+    def compute_anatomy_overlay(self):
+        """Compute region bands for the current pose and render them."""
+        atlas_name = str(self.atlas_name_input.value).strip()
+        if not anatomy_atlas.is_downloaded(atlas_name):
+            self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
+            self.compute_anatomy_button.disabled = True
+
+        probe_xs = self._shank_probe_xs()
+        plot_centers = self._shank_plot_centers()
+        y_max = float(self.positions_df["y"].max())
+
+        # If the origin landmark was "pending" (AC of a not-yet-downloaded
+        # atlas), computing below downloads it — remember to fill it in after.
+        origin_was_pending = (
+            self._origin_spec(self.atlas_name_input.value)["status"] == "ac_pending"
+        )
+
+        tip = self._tip_atlas_um()
+
+        try:
+            bands = compute_region_bands(
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
+                atlas_name=atlas_name,
+                step_um=25.0,
+            )
+        except Exception as exc:
+            print(f"Anatomy lookup failed: {exc}")
+            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+            self.compute_anatomy_button.disabled = False
+            return
+
+        width = self._shank_plot_width()
+        half_width = width / 2
+        # Pull label text outside the shank outline so it doesn't overlap the
+        # electrode rects; the offset widens when a survey overlay is loaded so
+        # labels clear the survey sidebar bars (see _region_label_offset).
+        label_offset = self._region_label_offset(half_width)
+
+        band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
+        label_data = {"x": [], "y": [], "text": [], "color": [], "center": []}
+        boundary_data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        # Track which boundaries we've already drawn per shank so adjacent
+        # bands sharing a transition don't double up on the line.
+        seen_boundaries: set[tuple[int, float]] = set()
+
+        for band in bands:
+            plot_center = plot_centers.get(band.shank_id)
+            if plot_center is None:
+                continue
+            y_mid = (band.y_min + band.y_max) / 2
+            color_hex = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+
+            band_data["x"].append(plot_center)
+            band_data["y"].append(y_mid)
+            band_data["width"].append(width)
+            band_data["height"].append(band.y_max - band.y_min)
+            band_data["color"].append(color_hex)
+            band_data["acronym"].append(band.acronym)
+
+            label_data["x"].append(plot_center + label_offset)
+            label_data["center"].append(plot_center)
+            label_data["y"].append(y_mid)
+            label_data["text"].append(band.acronym)
+            # Slightly darker than the swatch so labels stay readable on white.
+            label_data["color"].append(_darken_hex(color_hex, factor=0.6))
+
+            for boundary_y in (band.y_min, band.y_max):
+                key = (band.shank_id, round(boundary_y, 3))
+                if key in seen_boundaries:
+                    continue
+                seen_boundaries.add(key)
+                boundary_data["x0"].append(plot_center - half_width)
+                boundary_data["x1"].append(plot_center + half_width)
+                boundary_data["y0"].append(boundary_y)
+                boundary_data["y1"].append(boundary_y)
+
+        self.region_band_source.data = band_data
+        self.region_label_source.data = label_data
+        self.region_boundary_source.data = boundary_data
+
+        self._update_anatomy_legend(bands)
+        # The atlas is now downloaded, so the origin corner can be shown.
+        self._update_anatomy_origin_note()
+
+        # Bregma dot whenever an estimate exists or we're in bregma mode (using
+        # the current, possibly-edited, values). DV-squish + tilt warp the brain
+        # image only in bregma mode (where the squish/tilt inputs are live).
+        bregma_mode = bool(self.bregma_relative_toggle.value)
+        # The atlas is downloaded now (bands were computed), so a previously
+        # "pending" AC landmark can be filled in (without clobbering user edits).
+        if origin_was_pending:
+            self._update_reference_params()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        has_origin = self._origin_spec(atlas_name)["status"] in ("defined", "estimate")
+        bregma_um = None
+        ap_squish = ml_squish = dv_squish = 1.0
+        tilt_deg = 0.0
+        if bregma_mode or has_origin:
+            bregma_um = (
+                float(self.bregma_ap_input.value),
+                float(self.bregma_ml_input.value),
+                float(self.bregma_dv_input.value),
+            )
+        if bregma_mode:
+            ap_squish = float(self.ap_squish_input.value) or 1.0
+            ml_squish = float(self.ml_squish_input.value) or 1.0
+            dv_squish = float(self.dv_squish_input.value) or 1.0
+            tilt_deg = float(self.tilt_input.value)
+
+        try:
+            _fig = render_locator(
+                atlas_name,
+                tip_atlas=tip,
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                shank_orientation_deg=float(self.shank_orientation_input.value),
+                shank_positions=probe_xs,
+                y_range=(0.0, y_max),
+                bregma_um=bregma_um,
+                ap_squish=ap_squish,
+                ml_squish=ml_squish,
+                dv_squish=dv_squish,
+                tilt_deg=tilt_deg,
+            )
+            self.anatomy_locator.object = self._fig_to_locator_html(_fig)
+            plt.close(_fig)
+        except Exception as exc:  # a failed locator shouldn't sink the overlay
+            print(f"Locator render failed: {exc}")
+
+        # Overlay now exists → later input edits live-update it.
+        self._anatomy_overlay_active = True
+        self.anatomy_locator_section.visible = True
+        self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+        self.compute_anatomy_button.disabled = False
+
+    def clear_anatomy_overlay(self):
+        """Wipe the region bands, labels, boundaries and reset the legend."""
+        self._anatomy_overlay_active = False  # stop live-updating
+        self.region_band_source.data = {
+            "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
+        }
+        self.region_label_source.data = {"x": [], "y": [], "text": [], "color": [], "center": []}
+        self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        self.anatomy_legend.object = self._empty_legend_html()
+        self.anatomy_locator.object = ""
+        self.anatomy_locator_section.visible = False
+
+    def _fig_to_locator_html(self, fig) -> str:
+        """Convert a matplotlib figure to an HTML img with click-to-lightbox."""
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=300)
+        buf.seek(0)
+        b64 = base64.b64encode(buf.read()).decode("utf-8")
+        src = f"data:image/png;base64,{b64}"
+        return (
+            '<div style="cursor:zoom-in;"'
+            ' onclick="(function(el){'
+            'var src=el.querySelector(\'img\').src;'
+            'var lb=document.createElement(\'div\');'
+            'lb.style.cssText=\'position:fixed;top:0;left:0;width:100vw;height:100vh;'
+            'background:rgba(0,0,0,0.85);z-index:9999;display:flex;'
+            'align-items:center;justify-content:center;cursor:zoom-out;\';'
+            'var img=document.createElement(\'img\');'
+            'img.src=src;'
+            'img.style.cssText=\'max-width:90vw;max-height:90vh;width:auto;height:auto;'
+            'border-radius:8px;box-shadow:0 0 40px rgba(0,0,0,0.5);\';'
+            'lb.appendChild(img);'
+            'lb.addEventListener(\'click\',function(){document.body.removeChild(lb);});'
+            'document.body.appendChild(lb);'
+            '})(this)">'
+            f'<img src="{src}" style="width:320px;display:block;">'
+            '</div>'
+        )
+
+    def _empty_legend_html(self) -> str:
+        return (
+            '<div style="font-size: 12px; color: #666; padding: 4px 12px;">'
+            "No anatomical overlay computed yet."
+            "</div>"
+        )
+
+    def _anatomy_coord_note_html(self) -> str:
+        """Coordinate-space note: the fixed tip frame + the atlas's native code.
+
+        Tip coordinates use one fixed frame for every atlas; the atlas's own
+        voxel orientation is read and remapped under the hood. We surface that
+        native code as an FYI, but only when the atlas is already downloaded so
+        switching atlases in the dropdown stays cheap.
+        """
+        name = str(self.atlas_name_input.value).strip()
+        native = None
+        try:
+            if anatomy_atlas.is_downloaded(name):
+                native = (
+                    anatomy_atlas.orientation_code(name),
+                    anatomy_atlas.origin_corner(name),
+                )
+        except Exception:
+            native = None
+        if native:
+            code, origin = native
+            native_line = (
+                f"<b>{name}</b> native voxel orientation: <code>{code}</code> "
+                f"(origin {origin})."
+            )
+        else:
+            native_line = (
+                f"<b>{name}</b>'s native orientation is shown once the atlas is "
+                "downloaded (on first overlay compute)."
+            )
+        return (
+            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
+            "Tip coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
+            "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
+            "with AP increasing posteriorly, DV ventrally and ML from the right. "
+            "Tick the <i>Tip relative to …</i> toggle below to enter coordinates "
+            "from the atlas's landmark instead (the values below convert them)."
+            f"<br>{native_line}"
+            "</div>"
+        )
+
+    def _on_atlas_change(self, *events):
+        """Atlas changed: reset bregma/squish/tilt + tip + notes, then recompute.
+
+        The field updates are batched under a recompute guard so a single atlas
+        switch triggers one overlay refresh, not one per field changed.
+        """
+        self._suppress_anatomy_recompute = True
+        try:
+            self._update_reference_params(*events)
+            self._update_tip_to_atlas_center(*events)
+            self._update_anatomy_origin_note(*events)
+            self._update_landmark_labels()
+            self.bregma_estimate_header.object = self._bregma_header_html()
+        finally:
+            self._suppress_anatomy_recompute = False
+        # Reflect download state in the button label so users know before clicking.
+        name = str(self.atlas_name_input.value).strip()
+        if anatomy_atlas.is_downloaded(name):
+            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
+        else:
+            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
+        self._recompute_anatomy_if_active()
+
+    def _update_landmark_labels(self):
+        """Rename the toggle + coordinate fields to the atlas's landmark.
+
+        e.g. "Tip relative to bregma" for rodents, "...to anterior commissure"
+        for other vertebrates.
+        """
+        lm = self._origin_spec(self.atlas_name_input.value)["landmark"]
+        if lm is None:
+            toggle, prefix = "origin", "Origin"
+        elif lm == "anterior commissure":
+            toggle, prefix = "anterior commissure", "AC"
+        else:  # bregma, interaural, …
+            toggle, prefix = lm, lm.capitalize()
+        self.bregma_relative_toggle.name = f"Tip relative to {toggle}"
+        self.bregma_ap_input.name = f"{prefix} AP (µm)"
+        self.bregma_ml_input.name = f"{prefix} ML (µm)"
+        self.bregma_dv_input.name = f"{prefix} DV (µm)"
+
+    def _bregma_header_html(self) -> str:
+        """Banner above the bregma fields: explain the estimate, or prompt for one."""
+        spec = self._origin_spec(self.atlas_name_input.value)
+        status, lm, src = spec["status"], spec["landmark"], spec.get("source", "")
+        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")   # defined / real value
+        ORANGE = ("#ffe7d1", "#f0a35e", "#9a4a00")  # rough estimate
+        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")    # info / pending
+        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")     # user must define
+        if status == "defined" and lm == "bregma":  # WHS rat
+            icon, palette = "✓", GREEN
+            body = (f"<b>Bregma (defined, not an estimate)</b> — from {src}. "
+                    "Edit only if needed.")
+        elif status == "defined":  # AC is the species' established origin (human)
+            icon, palette = "✓", GREEN
+            body = (f"<b>Origin = {lm} (defined)</b> — {src}; the established "
+                    "reference for this species. Edit only if needed.")
+        elif status == "estimate":  # Allen-family mouse
+            icon, palette = "⚠", ORANGE
+            body = (f"<b>Bregma estimate (rough)</b> — from {src}. Edit if you "
+                    "have better values.")
+        elif status == "ac_pending":
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>Origin = {lm}</b> — located from the atlas on the first "
+                    "<i>Compute</i>.")
+        elif status == "landmark_undefined":  # rodent/cat: bregma, but no value here
+            icon, palette = "ℹ", BLUE
+            body = (f"<b>{lm.capitalize()}</b> is the standard origin for this "
+                    f"species, but isn't located in this atlas — set {lm} in the "
+                    "fields below.")
+        else:  # user_origin — no skull landmark for this species
+            icon, palette = "⚠", RED
+            body = ("<b>No skull-bregma landmark</b> for this species — "
+                    "coordinates are atlas-defined; set an <b>origin</b> (0,0,0) "
+                    "yourself below if you want relative coordinates.")
+        bg, border, color = palette
+        return (
+            f'<div style="font-size: 11px; color: {color}; background: {bg}; '
+            f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
+            f'margin: 4px 0; text-align: justify;">{icon} {body}</div>'
+        )
+
+    def _update_anatomy_origin_note(self, *events):
+        """Refresh the coordinate note when the atlas selection changes."""
+        self.anatomy_coord_note.object = self._anatomy_coord_note_html()
+
+    def _atlas_tip_center(self, name: str):
+        """Atlas center as ``(AP, ML, DV)`` µm, or ``None`` if not readable cheaply.
+
+        Only computed for already-downloaded atlases so it can't trigger a
+        download (used on init and on every atlas-selection change).
+        """
+        name = str(name).strip()
+        try:
+            if not anatomy_atlas.is_downloaded(name):
+                return None
+            return anatomy_atlas.volume_center_um(name)
+        except Exception:
+            return None
+
+    def _update_tip_to_atlas_center(self, *events):
+        """Seed the tip inputs with the selected atlas's center, when available."""
+        if self.bregma_relative_toggle.value:
+            return  # in bregma mode the tip is relative, not absolute CCF
+        center = self._atlas_tip_center(self.atlas_name_input.value)
+        if center is None:
+            return
+        ap, ml, dv = center
+        self.tip_ap_input.value = round(ap, 1)
+        self.tip_ml_input.value = round(ml, 1)
+        self.tip_dv_input.value = round(dv, 1)
+
+    def _tip_atlas_um(self) -> tuple[float, float, float]:
+        """Current tip in canonical atlas (AP, ML, DV) µm, honoring bregma mode."""
+        raw = (
+            float(self.tip_ap_input.value),
+            float(self.tip_ml_input.value),
+            float(self.tip_dv_input.value),
+        )
+        if not self.bregma_relative_toggle.value:
+            return raw
+        # Translation only: DV-squish and tilt are applied as a *visual* warp of
+        # the atlas image in the locator, not by relocating the tip in CCF.
+        return bregma_to_atlas_um(
+            raw,
+            bregma_um=(
+                float(self.bregma_ap_input.value),
+                float(self.bregma_ml_input.value),
+                float(self.bregma_dv_input.value),
+            ),
+            dv_squish=1.0,
+            tilt_deg=0.0,
+        )
+
+    def _origin_spec(self, name) -> dict:
+        """Resolve the recommended coordinate origin + banner status for an atlas.
+
+        Rodents use a hardcoded bregma; other vertebrates fall back to the
+        anterior commissure (derived from the annotation when downloaded);
+        invertebrate / spinal atlases have no point landmark. Cheap unless it
+        needs to derive the AC, which only happens for a downloaded atlas.
+        """
+        name = str(name).strip()
+        ref = anatomy_atlas.reference_params(name)
+        if ref:
+            ref["landmark"] = "bregma"
+            ref["status"] = "defined" if ref.get("defined") else "estimate"
+            return ref
+        spec = {"bregma_um": None, "ap_squish": 1.0, "ml_squish": 1.0,
+                "dv_squish": 1.0, "tilt_deg": 0.0, "landmark": None,
+                "status": "user_origin", "source": ""}
+        landmark = anatomy_atlas.landmark_policy(name)
+        if landmark is None:
+            return spec  # no skull landmark for this species → user defines origin
+        spec["landmark"] = landmark
+        if landmark == "anterior commissure":
+            # Human (AC-PC): derive it from the annotation when downloaded.
+            if not anatomy_atlas.is_downloaded(name):
+                spec["status"] = "ac_pending"
+                return spec
+            try:
+                ac = anatomy_atlas.derive_origin_from_ac(name)
+            except Exception:
+                ac = None
+            if ac is None:
+                # AC is the convention but this atlas doesn't delineate it
+                # (e.g. the coarse human atlas) → keep the name, user sets it.
+                spec["status"] = "landmark_undefined"
+                return spec
+            spec["bregma_um"] = ac
+            spec["status"] = "defined"
+            spec["source"] = ("the anterior-commissure decussation, computed "
+                              "from this atlas's annotation")
+            return spec
+        # landmark == "bregma" but no hardcoded value (other rodents / cat):
+        # the convention is bregma, but it's a skull point we can't locate here.
+        spec["status"] = "landmark_undefined"
+        return spec
+
+    def _update_reference_params(self, *events):
+        """Fill bregma / per-axis squish / tilt from the atlas's origin spec."""
+        spec = self._origin_spec(self.atlas_name_input.value)
+        b_ap, b_ml, b_dv = spec["bregma_um"] or (0.0, 0.0, 0.0)
+        self.bregma_ap_input.value = round(b_ap, 1)
+        self.bregma_ml_input.value = round(b_ml, 1)
+        self.bregma_dv_input.value = round(b_dv, 1)
+        self.ap_squish_input.value = spec["ap_squish"]
+        self.ml_squish_input.value = spec["ml_squish"]
+        self.dv_squish_input.value = spec["dv_squish"]
+        self.tilt_input.value = spec["tilt_deg"]
+
+    def _on_bregma_toggle(self, *events):
+        """Swap the tip defaults and enable squish/tilt for bregma-relative mode."""
+        on = bool(self.bregma_relative_toggle.value)
+        for w in (self.dv_squish_input, self.ap_squish_input,
+                  self.ml_squish_input, self.tilt_input):
+            w.disabled = not on
+        self._suppress_anatomy_recompute = True
+        try:
+            if on:
+                # Sensible bregma-relative default: at bregma, 4 mm deep.
+                self.tip_ap_input.value = 0.0
+                self.tip_ml_input.value = 0.0
+                self.tip_dv_input.value = 4000.0
+            else:
+                self._update_tip_to_atlas_center()
+        finally:
+            self._suppress_anatomy_recompute = False
+        self._recompute_anatomy_if_active()
+
+    def _recompute_anatomy_if_active(self, *events):
+        """Re-run the overlay on input changes, but only once one exists."""
+        if getattr(self, "_suppress_anatomy_recompute", False):
+            return
+        if getattr(self, "_anatomy_overlay_active", False):
+            self.compute_anatomy_overlay()
+
+    def _update_anatomy_legend(self, bands: list):
+        """Render a deduplicated region legend on the right-side panel."""
+        if not bands:
+            self.anatomy_legend.object = (
+                '<div style="font-size: 12px; color: #b00; padding: 4px 12px;">'
+                "No regions found at the given pose (probe outside atlas volume?)."
+                "</div>"
+            )
+            return
+
+        # Deduplicate by atlas_id, preserve a stable display order.
+        seen = {}
+        for band in bands:
+            seen.setdefault(band.atlas_id, band)
+
+        rows = []
+        for band in sorted(seen.values(), key=lambda b: b.acronym.lower()):
+            swatch = "#{:02x}{:02x}{:02x}".format(*band.rgb)
+            rows.append(
+                f'<div style="display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px;">'
+                f'<span style="display: inline-block; width: 14px; height: 14px; '
+                f'background: {swatch}; border: 1px solid #888;"></span>'
+                f'<span style="font-weight: bold; min-width: 60px;">{band.acronym}</span>'
+                f'<span style="color: #444;">{band.name}</span>'
+                f"</div>"
+            )
+        self.anatomy_legend.object = (
+            '<div style="padding: 4px 12px; max-height: 280px; overflow-y: auto;">'
+            + "".join(rows)
+            + "</div>"
+        )
+
+    def apply_url_state(self, encoded: str) -> bool:
+        """Restore a selection previously serialized via build_share_link.
+
+        Returns True if the state was applied, False if the payload was
+        invalid or the embedded probe/subtype is unknown.
+        """
+        state = url_share.decode_state(encoded)
+        if state is None:
+            return False
+        if state["probe_type"] not in PROBE_TYPE_MAP:
+            return False
+
+        # Setting probe_type triggers on_probe_type_change which rebuilds
+        # widgets and clears the selection — must be set first.
+        if state["probe_type"] != self.probe_type:
+            self.probe_type = state["probe_type"]
+
+        subtype = state["probe_subtype"]
+        if subtype is not None and subtype in self.param.probe_subtype.objects:
+            self.probe_subtype = subtype
+
+        ref = state["reference_id"]
+        if ref is not None and ref in self.param.reference_id.objects:
+            self.reference_id = ref
+
+        if state["ap_gain"] is not None:
+            self.ap_gain_input.value = float(state["ap_gain"])
+        if state["lf_gain"] is not None:
+            self.lf_gain_input.value = float(state["lf_gain"])
+        if state["hp_filter"] in self.param.hardware_hp_filter_on.objects:
+            self.hardware_hp_filter_on = state["hp_filter"]
+
+        if self.electrodes.selected:
+            self.electrodes.push_undo_snapshot()
+        self.electrodes.clear_selection()
+        for shank_id, electrode_id in state["electrodes"]:
+            self.electrodes.select(Electrode(shank_id, electrode_id))
+
+        self.update_electrode_colors()
+        self.update_electrode_counter()
+        self.refresh_undo_buttons()
+        return True
+
+    def update_share_link(self):
+        """Refresh the share-link text field and update the URL bar."""
+        query = self.build_share_link()
+        full_url = query
+        try:
+            location = pn.state.location
+            if location is not None:
+                origin = (getattr(location, "protocol", "") or "") + "//" + (getattr(location, "hostname", "") or "")
+                port = getattr(location, "port", "") or ""
+                if port and port not in ("80", "443"):
+                    origin = f"{origin}:{port}"
+                pathname = getattr(location, "pathname", "") or ""
+                if origin.startswith("//"):  # no protocol info available
+                    full_url = pathname + query
+                else:
+                    full_url = origin + pathname + query
+                # Reflect the new state in the address bar so it's also copyable from there.
+                location.search = query
+        except Exception:
+            pass
+        # Trigger the JS clipboard copy via the hidden TextInput watcher.
+        # Counter prefix ensures value always changes so jscallback fires on re-click.
+        self._share_link_counter += 1
+        self.share_link_trigger.value = f"{self._share_link_counter}:{full_url}"
+        self.share_link_button.name = "Copy shareable link to clipboard 🔗"
+        self.share_link_output.object = (
+            f'<input type="text" readonly value="{full_url}" '
+            f'style="width:100%;font-family:monospace;font-size:12px;color:#555;'
+            f'border:1px solid #ddd;border-radius:4px;padding:4px 6px;'
+            f'background:#f5f5f5;box-sizing:border-box;cursor:text;">'
+        )
+        if pn.state.notifications is not None:
+            pn.state.notifications.success("Link copied to clipboard!", duration=3_000)
+
+    def do_undo(self):
+        """Roll back to the previous selection snapshot."""
+        if self.electrodes.undo():
+            self.update_electrode_colors()
+            self.update_electrode_counter()
+            self.refresh_undo_buttons()
+
+    def do_redo(self):
+        """Re-apply a previously-undone selection snapshot."""
+        if self.electrodes.redo():
+            self.update_electrode_colors()
+            self.update_electrode_counter()
+            self.refresh_undo_buttons()
+
+    def refresh_undo_buttons(self):
+        """Sync the disabled flag of the undo/redo buttons with stack state."""
+        if hasattr(self, "undo_button"):
+            self.undo_button.disabled = not self.electrodes.can_undo()
+        if hasattr(self, "redo_button"):
+            self.redo_button.disabled = not self.electrodes.can_redo()
+
+    def build_share_link(self) -> str:
+        """Encode the current selection as a query string fragment.
+
+        Returns just the query string (e.g. ``?cfg=...``) — the GUI prepends
+        the live origin + path on the client side so this method stays
+        independent of how the app is being served.
+        """
+        encoded = url_share.encode_state(
+            probe_type=self.probe_type,
+            probe_subtype=self.probe_subtype,
+            reference_id=self.reference_id,
+            ap_gain=self.ap_gain_input.value,
+            lf_gain=self.lf_gain_input.value,
+            hp_filter=self.hardware_hp_filter_on,
+            electrodes=[(e.shank_id, e.electrode_id) for e in self.electrodes.selected],
+        )
+        return f"?{url_share.QUERY_PARAM}={encoded}"
+
+    ###################################
+    ##### Survey overlay handlers #####
+    ###################################
+
+    def load_survey_file(self):
+        """Parse an uploaded SpikeGLX survey .txt file and overlay Val on the probe."""
+        if self.survey_file_loader.value is None:
+            pn.state.notifications.warning(
+                "No survey file found - upload one before clicking this button.",
+                duration=10_000,
+            )
+            return
+
+        file_extension = str(self.survey_file_loader.filename).split(".")[-1].lower()
+        if file_extension not in ("txt", "tsv"):
+            pn.state.notifications.error(
+                f"You must upload a .txt survey file, not .{file_extension}!",
+                duration=10_000,
+            )
+            return
+
+        content = self.survey_file_loader.value
+        if isinstance(content, bytes):
+            content = content.decode("utf-8")
+
+        try:
+            survey_df = survey.parse_survey_file(content)
+        except ValueError as e:
+            pn.state.notifications.error(f"Failed to parse survey file: {e}", duration=10_000)
+            return
+
+        try:
+            values, n_unmatched = survey.validate_probe_match(survey_df, self.positions_df)
+        except ValueError as e:
+            pn.state.notifications.error(str(e), duration=10_000)
+            return
+
+        self.survey_values = values
+
+        vals = np.array(list(values.values()), dtype=float)
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        if vmax <= vmin:
+            vmax = vmin + 1.0  # avoid degenerate colormap range
+
+        self.survey_cmap.low = vmin
+        self.survey_cmap.high = vmax
+        self._set_survey_range_inputs(vmin, vmax, enabled=True)
+        if self.survey_color_bar is not None:
+            self.survey_color_bar.visible = True
+            self.survey_color_bar_title.visible = True
+
+        self.update_electrode_colors()
+        self._reposition_region_labels()
+
+        msg = f"Loaded survey: {len(values)} contacts mapped."
+        if n_unmatched:
+            msg += f" {n_unmatched} row(s) did not match the probe and were ignored."
+            pn.state.notifications.warning(msg, duration=10_000)
+        else:
+            pn.state.notifications.success(msg, duration=5_000)
+
+    def clear_survey_overlay(self):
+        """Remove any loaded survey overlay."""
+        if self.survey_values is None:
+            return
+        self.survey_values = None
+        self._set_survey_range_inputs(None, None, enabled=False)
+        if self.survey_color_bar is not None:
+            self.survey_color_bar.visible = False
+            self.survey_color_bar_title.visible = False
+        self.update_electrode_colors()
+        self._reposition_region_labels()
+
+    def _set_survey_range_inputs(self, vmin, vmax, enabled: bool):
+        """Update the vmin/vmax widgets without re-triggering their watchers."""
+        if not hasattr(self, "survey_vmin_input"):
+            return
+        self._survey_range_suspend = True
+        try:
+            self.survey_vmin_input.disabled = not enabled
+            self.survey_vmax_input.disabled = not enabled
+            self.survey_vmin_input.value = vmin if vmin is not None else 0.0
+            self.survey_vmax_input.value = vmax if vmax is not None else 1.0
+        finally:
+            self._survey_range_suspend = False
+
+    def _on_survey_range_change(self, _event=None):
+        """User edited vmin/vmax — update colormap and redraw."""
+        if self._survey_range_suspend or self.survey_values is None:
+            return
+        low = float(self.survey_vmin_input.value)
+        high = float(self.survey_vmax_input.value)
+        if high <= low:
+            pn.state.notifications.warning(
+                "Survey vmax must be greater than vmin.", duration=5_000
+            )
+            return
+        self.survey_cmap.low = low
+        self.survey_cmap.high = high
+        self.update_electrode_colors()
 
     ######################
     ##### GUI layout #####
@@ -788,52 +1871,120 @@ class ChannelmapGUI(param.Parameterized):
         select_box_string = "Select Electrodes"
         deselect_box_string = "Deselect Electrodes"
         zigzagselect_box_string = "Zigzag-select Electrodes"
+        interleavedselect_box_string = "Interleaved-select Electrodes"
+        dependentdeselect_box_string = "Deselect Dependents"
 
-        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=str(GUI_ASSETS_DIR / "selector.png"))
+        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
 
         self.box_deselect_tool = BoxSelectTool(
-            description=deselect_box_string, icon=str(GUI_ASSETS_DIR / "deselector.png")
+            description=deselect_box_string, icon=GUI_ASSETS_DIR / "deselector.png"
         )
 
         self.box_zigzagselect_tool = BoxSelectTool(
-            description=zigzagselect_box_string, icon=str(GUI_ASSETS_DIR / "zigzag_selector.png")
+            description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
         )
 
-        # Create figure with proper tools
+        self.box_interleavedselect_tool = BoxSelectTool(
+            description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
+        )
+
+        self.box_dependent_deselect_tool = BoxSelectTool(
+            description=dependentdeselect_box_string, icon=GUI_ASSETS_DIR / "dependent_deselector.png"
+        )
+
+        # Always-on gesture tools — hidden from toolbar (visible=False).
+        # Left-click drag = pan; scroll = zoom.
+        # Note: right-click drag zoom is not supported by this Bokeh version.
+        pan_tool = PanTool(visible=True)
+        wheel_zoom_tool = WheelZoomTool(visible=False)
+
+        # Tap and hover are always active but don't need toolbar buttons.
+        tap_tool = TapTool(description="Tap to select/deselect single electrode", visible=False)
+        hover_tool = HoverTool(
+            visible=False,
+            tooltips=[
+                ("Electrode", "@electrode_id"),
+                ("Shank", "@shank_id"),
+                ("Z position", "@y μm"),
+                ("Status", "@status"),
+                ("Survey value", "@val"),
+            ],
+        )
+
+        # Toolbar only shows the selection tools and reset.
         tools = [
-            PanTool(),
-            WheelZoomTool(),
+            ResetTool(),
+            pan_tool,
+            wheel_zoom_tool,
+            hover_tool,
+            tap_tool,
             self.box_select_tool,
             self.box_deselect_tool,
             self.box_zigzagselect_tool,
-            TapTool(),
-            ResetTool(),
-            HoverTool(
-                tooltips=[
-                    ("Electrode", "@electrode_id"),
-                    ("Shank", "@shank_id"),
-                    ("Z position", "@y μm"),
-                    ("Status", "@status"),
-                ]
-            ),
+            self.box_interleavedselect_tool,
+            self.box_dependent_deselect_tool,
         ]
 
         self.plot = figure(
-            width=self.probe_plot_width,
+            sizing_mode="stretch_width",
             height=self.probe_plot_height,
             tools=tools,
             title=f"Neuropixels {self.probe_type} Electrode Layout",
             toolbar_location="right",
+            active_drag=pan_tool,
+            active_scroll=wheel_zoom_tool,
         )
+        self.plot.toolbar.logo = None
+
+        # Region bands must be added *before* the electrode rects so they
+        # render behind everything else.
+        self.setup_region_bands()
 
         # Create electrode data and visualization
         self.create_electrode_data()
         self.setup_electrode_visualization()
+        # Restrict hover tool to electrode rectangles only (prevents ??? on overlay glyphs)
+        hover_tool.renderers = [self.electrode_renderer]
+
+        # Set initial y_range so only the bottom third of the probe is visible:
+        # probe tips pinned at the bottom, top two-thirds hidden above the frame.
+        all_y = self.electrode_source.data["y"]
+        _min_y = min(all_y)
+        _max_y = max(all_y)
+        _probe_height = _max_y - _min_y
+        _tip_overhang = _probe_height * 0.08  # matches tip_height ratio in add_shank_outlines
+        self.plot.y_range = Range1d(
+            start=_min_y - _tip_overhang - 300,     # a little below the tip
+            end=_min_y + _probe_height / 3,          # 1/3 of probe height up from tip
+        )
+
         self.setup_interactions()  # Only necessary for the tap tool
+
+        # Survey overlay color bar (hidden until a survey is loaded).
+        # Title is a separate annotation so text_align="center" is honored
+        # over the full bar width.
+        self.survey_color_bar = ColorBar(
+            color_mapper=self.survey_cmap,
+            label_standoff=6,
+            location="bottom",
+            orientation="horizontal",
+            height=15,
+            width=300,
+            visible=self.survey_values is not None,
+        )
+        self.survey_color_bar_title = Title(
+            text="Survey value",
+            align="center",
+            text_font_size="11px",
+            text_font_style="normal",
+            visible=self.survey_values is not None,
+        )
+        self.plot.add_layout(self.survey_color_bar, "above")
+        self.plot.add_layout(self.survey_color_bar_title, "above")
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
-        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string)
+        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string)
 
     def setup_interactions(self):
         """Setup click and selection interactions"""
@@ -852,7 +2003,7 @@ class ChannelmapGUI(param.Parameterized):
         # Python callbacks for interactions - this is the key part
         self.electrode_source.selected.on_change("indices", self.on_electrode_selection)
 
-    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string):
+    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string):
         """JS callback to expose active tools in toolbar"""
         # workaround https://stackoverflow.com/questions/58210752/how-to-get-currently-active-tool-in-bokeh-figure
 
@@ -865,6 +2016,8 @@ class ChannelmapGUI(param.Parameterized):
             let select_tool = null;
             let deselect_tool = null;
             let zigzagselect_tool = null;
+            let interleavedselect_tool = null;
+            let dependentdeselect_tool = null;
 
             tools.forEach((tool, index) => {
                 if (tool.description === 'select_box_string') {
@@ -876,15 +2029,25 @@ class ChannelmapGUI(param.Parameterized):
                 if (tool.description === 'zigzagselect_box_string') {
                     zigzagselect_tool = tool;
                 }
+                if (tool.description === 'interleavedselect_box_string') {
+                    interleavedselect_tool = tool;
+                }
+                if (tool.description === 'dependentdeselect_box_string') {
+                    dependentdeselect_tool = tool;
+                }
             });
 
-            if (select_tool && deselect_tool && zigzagselect_tool) {
+            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool && dependentdeselect_tool) {
                 if (select_tool.active) {
                     tools_info = 'select';
                 } else if (deselect_tool.active) {
                     tools_info = 'deselect';
                 } else if (zigzagselect_tool.active) {
                     tools_info = 'zigzag_select';
+                } else if (interleavedselect_tool.active) {
+                    tools_info = 'interleaved_select';
+                } else if (dependentdeselect_tool.active) {
+                    tools_info = 'dependent_deselect';
                 } else {
                     tools_info = 'neither_active';
                 }
@@ -895,6 +2058,8 @@ class ChannelmapGUI(param.Parameterized):
 
         tool_state.data = {active_tool: [tools_info]};
         """
+        js_code = js_code.replace("dependentdeselect_box_string", dependentdeselect_box_string)
+        js_code = js_code.replace("interleavedselect_box_string", interleavedselect_box_string)
         js_code = js_code.replace("zigzagselect_box_string", zigzagselect_box_string)
         js_code = js_code.replace("deselect_box_string", deselect_box_string)
         js_code = js_code.replace("select_box_string", select_box_string)
@@ -922,9 +2087,72 @@ class ChannelmapGUI(param.Parameterized):
             elif active_tool == "zigzag_select":
                 self.select_mode = "zigzag_select"
                 print("→ ZIGZAG-SELECT box activated")
+            elif active_tool == "interleaved_select":
+                self.select_mode = "interleaved_select"
+                print("→ INTERLEAVED-SELECT box activated")
+            elif active_tool == "dependent_deselect":
+                self.select_mode = "dependent_deselect"
+                print("→ DESELECT-DEPENDENTS box activated")
             else:
                 self.select_mode = "select"
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
+
+    def _build_subtype_options(self):
+        """Dict of {'NP2013 – Description (SpikeGLX number: 2013, IMRO format: imro_np2013)': 'NP2013'} for the current probe_type."""
+        return {
+            (
+                f"{pn_} \u2013 {PROBE_FEATURES[pn_]['probe_name']}"
+                f" (SpikeGLX number: {PROBE_FEATURES[pn_]['SpikeGLX_probe_number']},"
+                f" IMRO format: {PROBE_FEATURES[pn_]['IMRO_format']})"
+            ): pn_
+            for pn_ in PROBE_TYPE_MAP[self.probe_type]
+        }
+
+    # JavaScript injected alongside the probe-subtype selector:
+    # - Stores full "NP2013 – Description" labels on init / option change.
+    # - On mousedown (dropdown opens): restores full labels so the list shows descriptions.
+    # - On change / blur (dropdown closes): collapses the selected option back to part number only.
+    _SUBTYPE_SELECT_JS = """
+<script>
+(function () {
+    function setupSelect(sel) {
+        var full = {};
+        function readLabels() {
+            full = {};
+            for (var i = 0; i < sel.options.length; i++)
+                full[sel.options[i].value] = sel.options[i].text;
+        }
+        function collapseSelected() {
+            var v = sel.value;
+            for (var i = 0; i < sel.options.length; i++)
+                if (sel.options[i].value === v) sel.options[i].text = v;
+        }
+        function expandAll() {
+            for (var i = 0; i < sel.options.length; i++)
+                sel.options[i].text = full[sel.options[i].value] || sel.options[i].value;
+        }
+        // Re-read labels when Bokeh rewrites the <option> list (probe-type change).
+        new MutationObserver(function () {
+            readLabels();
+            setTimeout(collapseSelected, 50);
+        }).observe(sel, { childList: true });
+        sel.addEventListener('mousedown', expandAll);
+        sel.addEventListener('change',    function () { setTimeout(collapseSelected, 50); });
+        sel.addEventListener('blur',      function () { setTimeout(collapseSelected, 50); });
+        readLabels();
+        collapseSelected();
+    }
+    function init() {
+        var wrap = document.querySelector('.probe-subtype-select');
+        if (!wrap) { setTimeout(init, 200); return; }
+        var sel = wrap.querySelector('select');
+        if (!sel) { setTimeout(init, 200); return; }
+        setupSelect(sel);
+    }
+    init();
+})();
+</script>
+"""
 
     def create_widgets(self):
         """Create Panel widgets"""
@@ -935,11 +2163,37 @@ class ChannelmapGUI(param.Parameterized):
             widgets={"probe_type": {"type": pn.widgets.Select, "width": 300, "margin": 0}},
             show_name=False,
         )
+        # Probe subtype selector – uses pn.Param for correct label/tooltip/sizing,
+        # then overrides options with a descriptive dict so the dropdown shows
+        # "NP2013 – Description" while the param value stays the bare part number.
         self.probe_subtype_selector = pn.Param(
             self,
             parameters=["probe_subtype"],
-            widgets={"probe_subtype": {"type": pn.widgets.Select, "width": 140, "margin": 0}},
+            widgets={"probe_subtype": {
+                "type": pn.widgets.Select,
+                "width": 140,
+                "margin": 0,
+                "css_classes": ["probe-subtype-select"],
+            }},
             show_name=False,
+        )
+        # Grab the underlying widget and replace its options with the descriptive dict.
+        # pn.Param's auto-sync fires synchronously when probe_subtype.objects changes,
+        # so our override in load_probe_data (which runs after) always wins.
+        self._subtype_widget = self.probe_subtype_selector._widgets["probe_subtype"]
+        self._subtype_widget.options = self._build_subtype_options()
+        # Zero-height pane that injects the collapse/expand JS (placed in layout alongside the widget)
+        self._subtype_js_pane = pn.pane.HTML(self._SUBTYPE_SELECT_JS, height=0, margin=0)
+        _legacy_cb = pn.widgets.Checkbox(name="", value=self.legacy_imro_mode)
+        _legacy_cb.link(self, value="legacy_imro_mode", bidirectional=True)
+        self.legacy_imro_mode_checkbox = pn.Row(
+            _legacy_cb,
+            pn.pane.HTML(
+                'Make legacy IMRO (SpikeGLX pre-20260115 - see '
+                '<a href="https://billkarsh.github.io/SpikeGLX/help/imroTables/#probe-type" target="_blank">🔗</a>)',
+                margin=(3, 0, 0, 0),
+            ),
+            align="start",
         )
 
         # Preset selector
@@ -1009,12 +2263,9 @@ class ChannelmapGUI(param.Parameterized):
             align="center",
         )
 
-        # Bokeh pane with proper scrolling - larger viewport for better visibility
-        self.plot_pane = pn.pane.Bokeh(
-            self.plot,
-            width=self.probe_plot_width,
-            height=self.probe_plot_height,  # Larger viewport height for better electrode visibility
-        )
+        # Bokeh pane - let the Bokeh figure's own sizing_mode/height control rendering.
+        # Do not impose Panel-level height; the container crops via CSS overflow.
+        self.plot_pane = pn.pane.Bokeh(self.plot)
 
         # Reference and gain inputs
         self.reference_selector_widget = pn.Param(
@@ -1039,12 +2290,225 @@ class ChannelmapGUI(param.Parameterized):
             show_name=False,
         )
 
+        # Undo / redo widgets
+        self.undo_button = pn.widgets.Button(
+            name="↶ Undo",
+            button_type="default",
+            disabled=True,
+            width=120,
+            margin=(0, 5, 5, 5),
+            css_classes=["pixelmap-undo"],
+        )
+        self.redo_button = pn.widgets.Button(
+            name="↷ Redo",
+            button_type="default",
+            disabled=True,
+            width=120,
+            margin=(0, 5, 5, 5),
+            css_classes=["pixelmap-redo"],
+        )
+        self.undo_button.on_click(lambda event: self.do_undo())
+        self.redo_button.on_click(lambda event: self.do_redo())
+
+        # Keyboard shortcuts (Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z) trigger the buttons
+        # via a one-time document-level keydown listener. Wrapped in a guard so
+        # repeated session loads do not stack listeners.
+        self.undo_keyboard_pane = pn.pane.HTML(
+            """
+            <script>
+            (function() {
+              if (window._pixelmapUndoBound) return;
+              window._pixelmapUndoBound = true;
+              const clickFirst = (sel) => {
+                const el = document.querySelector(sel + " button");
+                if (el && !el.disabled) el.click();
+              };
+              document.addEventListener("keydown", (e) => {
+                const tag = (e.target && e.target.tagName) || "";
+                if (tag === "INPUT" || tag === "TEXTAREA") return;
+                if (!(e.metaKey || e.ctrlKey)) return;
+                if (!e.key || e.key.toLowerCase() !== "z") return;
+                e.preventDefault();
+                clickFirst(e.shiftKey ? ".pixelmap-redo" : ".pixelmap-undo");
+              });
+            })();
+            </script>
+            """,
+            width=0,
+            height=0,
+            margin=0,
+        )
+
+        # Share-link widgets
+        self.share_link_button = pn.widgets.Button(
+            name="Get shareable link 🔗", button_type="primary", sizing_mode="stretch_width"
+        )
+        self.share_link_output = pn.pane.HTML("", sizing_mode="stretch_width", margin=(0, 0))
+        # Hidden trigger: when Python sets its value the JS callback fires and
+        # copies the URL to the clipboard automatically.
+        self._share_link_counter = 0
+        self.share_link_trigger = pn.widgets.TextInput(value="", visible=False)
+        # Value format: "{counter}:{url}" — counter always increments so the
+        # value always changes, guaranteeing the JS callback fires on re-clicks.
+        self.share_link_trigger.jscallback(value="""
+            if (cb_obj.value) {
+                var idx = cb_obj.value.indexOf(':');
+                var url = idx >= 0 ? cb_obj.value.slice(idx + 1) : cb_obj.value;
+                navigator.clipboard.writeText(url).catch(function(e) {
+                    console.warn('Clipboard copy failed:', e);
+                });
+            }
+        """)
+        self.share_link_button.on_click(lambda event: self.update_share_link())
+
+        # Anatomy widgets
+        atlas_options, atlas_default = self._available_atlases()
+        self.atlas_name_input = pn.widgets.Select(
+            name="Atlas",
+            value=atlas_default,
+            options=atlas_options,
+            sizing_mode="stretch_width",
+            margin=(5, 0),
+        )
+        # Default the tip to the atlas center (mid-brain) when we can read it
+        # cheaply; otherwise fall back to a reasonable fixed coordinate.
+        default_ap, default_ml, default_dv = (
+            self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
+        )
+        self.tip_ap_input = pn.widgets.FloatInput(
+            name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        self.tip_ml_input = pn.widgets.FloatInput(
+            name="Tip ML (µm)", value=round(default_ml, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        self.tip_dv_input = pn.widgets.FloatInput(
+            name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        self.pitch_input = pn.widgets.FloatInput(
+            name="Pitch (deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
+        )
+        self.yaw_input = pn.widgets.FloatInput(
+            name="Yaw (deg)", value=0.0, step=1.0,
+            start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
+        )
+        self.shank_orientation_input = pn.widgets.FloatInput(
+            name="Shank ori (deg)", value=0.0, step=1.0,
+            start=-180.0, end=360.0, sizing_mode="stretch_width", margin=(5, 2),
+        )
+        # Optional bregma-relative coordinate mode + per-atlas calibration,
+        # prefilled with published estimates (see anatomy.atlas.reference_params).
+        ref = anatomy_atlas.reference_params(atlas_default) or {
+            "bregma_um": (0.0, 0.0, 0.0), "ap_squish": 1.0, "ml_squish": 1.0,
+            "dv_squish": 1.0, "tilt_deg": 0.0,
+        }
+        b_ap, b_ml, b_dv = ref["bregma_um"]
+        self.bregma_relative_toggle = pn.widgets.Checkbox(
+            name="Tip relative to bregma", value=False, sizing_mode="stretch_width", margin=(6, 0, 0, 0),
+        )
+        self.bregma_ap_input = pn.widgets.FloatInput(
+            name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        self.bregma_ml_input = pn.widgets.FloatInput(
+            name="Bregma ML (µm)", value=round(b_ml, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        self.bregma_dv_input = pn.widgets.FloatInput(
+            name="Bregma DV (µm)", value=round(b_dv, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
+        )
+        # Per-axis squish + AP tilt warp the atlas image in the locator; they
+        # only do anything in bregma mode — disabled until the toggle is on.
+        self.dv_squish_input = pn.widgets.FloatInput(
+            name="DV squish", value=ref["dv_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
+        )
+        self.ap_squish_input = pn.widgets.FloatInput(
+            name="AP squish", value=ref["ap_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
+        )
+        self.ml_squish_input = pn.widgets.FloatInput(
+            name="ML squish", value=ref["ml_squish"], step=0.005, sizing_mode="stretch_width", margin=(5, 2), disabled=True
+        )
+        self.tilt_input = pn.widgets.FloatInput(
+            name="AP tilt°", value=ref["tilt_deg"], step=0.5, sizing_mode="stretch_width", margin=(5, 2), disabled=True
+        )
+        self.bregma_estimate_header = pn.pane.HTML(
+            self._bregma_header_html(), sizing_mode="stretch_width", margin=(0, 0)
+        )
+        self.anatomy_coord_note = pn.pane.HTML(
+            self._anatomy_coord_note_html(), sizing_mode="stretch_width", margin=(0, 0)
+        )
+        self.atlas_name_input.param.watch(self._on_atlas_change, "value")
+        self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
+
+        # Once an overlay exists, live-update it (bands + slices) whenever any
+        # pose / bregma / squish / tilt input changes, so edits are visible
+        # immediately instead of only on the next Compute click.
+        self._anatomy_overlay_active = False
+        # atlas_name + bregma toggle do their own batched recompute (via
+        # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
+        for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,
+                   self.pitch_input, self.yaw_input, self.shank_orientation_input,
+                   self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input,
+                   self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                   self.tilt_input):
+            _w.param.watch(self._recompute_anatomy_if_active, "value")
+        self._update_landmark_labels()  # name the toggle/fields for the default atlas
+        self.anatomy_help = pn.pane.HTML(
+            (
+                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
+                "<b>Pitch</b> = AP tilt (probe leaning forward / backward). "
+                "<b>Yaw</b> = ML tilt (probe leaning left / right). "
+                "<b>Shank orientation</b> = direction of shanks 0→3 in the "
+                "horizontal plane; 0° = lateral (+ML), 90° = anterior (+AP)."
+                "</div>"
+            ),
+            sizing_mode="stretch_width",
+            margin=(0, 0),
+        )
+        self.compute_anatomy_button = pn.widgets.Button(
+            name="Compute anatomical overlay 🧠", button_type="primary",
+            sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+        )
+        self.clear_anatomy_button = pn.widgets.Button(
+            name="Clear overlay", button_type="danger", width=110, margin=(0, 0, 0, 0),
+        )
+        self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
+        self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
+        self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
+        self.anatomy_locator = pn.pane.HTML("", sizing_mode="stretch_width")
+        # Hidden until the first overlay is computed; cleared by "Clear overlay".
+        self.anatomy_locator_section = pn.Column(
+            self.anatomy_locator,
+            visible=False,
+        )
+
+        # Set initial button label based on whether the default atlas is already cached.
+        if not anatomy_atlas.is_downloaded(atlas_default):
+            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
+
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
         self.apply_uploaded_imro_button = pn.widgets.Button(
             name="Apply uploaded IMRO file to selection ⬆", button_type="primary", width=250
         )
         self.apply_uploaded_imro_button.on_click(lambda event: self.apply_uploaded_imro())
+
+        # Survey (.txt) overlay widgets
+        self.survey_file_loader = pn.widgets.FileInput(accept=".txt,.tsv", width=300)
+        self.apply_survey_button = pn.widgets.Button(
+            name="Load survey overlay ⬆", button_type="primary", width=160
+        )
+        self.apply_survey_button.on_click(lambda event: self.load_survey_file())
+        self.clear_survey_button = pn.widgets.Button(
+            name="Clear overlay", button_type="default", width=120
+        )
+        self.clear_survey_button.on_click(lambda event: self.clear_survey_overlay())
+        self.survey_vmin_input = pn.widgets.FloatInput(
+            name="vmin", value=0.0, step=0.1, width=140, disabled=True
+        )
+        self.survey_vmax_input = pn.widgets.FloatInput(
+            name="vmax", value=1.0, step=0.1, width=140, disabled=True
+        )
+        self.survey_vmin_input.param.watch(self._on_survey_range_change, "value")
+        self.survey_vmax_input.param.watch(self._on_survey_range_change, "value")
 
 
     def create_download_buttons(self):
@@ -1094,9 +2558,11 @@ class ChannelmapGUI(param.Parameterized):
         """Create the main Panel layout"""
 
         # Counter and Downloader (fixed on the right)
-        counter_downloader = pn.Column(
+        right_column = pn.Column(
+            self.undo_keyboard_pane,
             pn.Column(
                 self.electrode_counter,
+                pn.Row(self.undo_button, self.redo_button, align="center", margin=(0, 0, 0, 0)),
                 self.clear_button,
                 margin=(0, 0, -10, 20),
             ),
@@ -1104,20 +2570,33 @@ class ChannelmapGUI(param.Parameterized):
             self.filename_input,
             self.get_download_buttons,
 
-            pn.pane.Markdown("## PixelMap instructions", margin=(10, 0, -5, 10)),
+            pn.pane.Markdown("## Share this layout", margin=(15, 0, -5, 30)),
+            pn.Column(
+                self.share_link_trigger,  # hidden; JS watches its value to copy to clipboard
+                self.share_link_button,
+                self.share_link_output,
+                margin=(0, 0, 0, 10),
+                sizing_mode="stretch_width",
+            ),
+
+            pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 30)),
+            self.anatomy_locator_section,
+            self.anatomy_legend,
+
+            pn.pane.Markdown("## PixelMap [documentation](https://pixelmap-neuropixels.readthedocs.io/en/latest/)", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
             <div style="font-size: 13px; line-height: 1.4; text-align: justify;">
             <b>Neuropixels hardware Constraints:</b><br>
-            Neuropixels electrodes are <a href='https://www.neuropixels.org/support' target='_blank'>hardwired</a> to specific ADCs in the probe's head. When you select an electrode, others become unavailable because they share the same recording lines.
-            This GUI allows you to build a channelmap around those constraints: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines turn <b>black</b>.<br><br>
+            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines (<a href = https://www.neuropixels.org/support>hardwired</a>) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
+            PixelMap visualizes these constraints in real time: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines or ADCs turn <b>black</b>.<br><br>
 
             <b>You can mix and match four selection methods:</b><br>
             • <b>Presets:</b> Pre-configured channelmaps that respect wiring constraints<br>
             • <b>Textual selection:</b> Type electrode ranges (e.g., "1-10,20-25") to add to the current selection<br>
-            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, or "zigzag selection") to maually select multiple sites<br>
+            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, zigzag/interleaved selection, or "deselect dependents") to manually select multiple sites<br>
             • <b>Selection from pre-existing IMRO file</b>: you can pre-load an IMRO file as a starting point before doing any of the above.<br><br>
 
-            Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like.
+            Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like. Use this IMRO file in SpikeGLX to record from the selected channels, and then use the Kilosort .json file to spikesort your data accordingly.<br><br>
             </div>
             """),
 
@@ -1134,7 +2613,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         # Controls panel (fixed on left)
-        controls = pn.Column(
+        left_column = pn.Column(
             pn.pane.Markdown(
                 (
                     f"<div style='text-align: center; padding: 12px;'><strong>See project (v{__version__}) at:"
@@ -1146,20 +2625,22 @@ class ChannelmapGUI(param.Parameterized):
                     "target='_blank'>link</a></b><br> (and adding a star ⭐ to the <a href='https://github.com/m-beau/pixelmap' "
                     "target='_blank'>repo</a> 😊)</span></div>"
                 ),
-                margin=(0, 0, 0, 40),
+                margin=(0, 0, 0, 0),
             ),
             pn.Column(
                 pn.pane.Markdown("## Probe and recording metadata", margin=(-5, 0, 0, 10)),
                 pn.pane.Markdown(
-                    "(see <a href='https://billkarsh.github.io/SpikeGLX/help/imroTables' target='_blank'>IMRO table anatomy</a>)",
+                    "(see <a href='https://billkarsh.github.io/SpikeGLX/help/imroTables' target='_blank'>SpikeGLX IMRO table anatomy</a>)",
                     margin=(-15, 0, -5, 10),
                 ),
                 self.probe_type_selector,
                 pn.Row(
                     self.probe_subtype_selector,
                     self.reference_selector_widget,
+                    self._subtype_js_pane,
                     sizing_mode="stretch_width",
                 ),
+                self.legacy_imro_mode_checkbox,
                 pn.pane.Markdown("<b>For 1.0 only (2.0 gains not in channelmap):</b>", margin=(0, 0, -15, 10)),
                 self.hardware_hp_filter_on_selector_widget,
                 pn.Row(
@@ -1181,6 +2662,32 @@ class ChannelmapGUI(param.Parameterized):
             self.imro_file_loader,
             # pn.Spacer(height=30),
             self.apply_uploaded_imro_button,
+            pn.Column(
+                pn.pane.Markdown("## Survey overlay ⚡", margin=(-5, 0, 0, 0)),
+                self.survey_file_loader,
+                pn.Row(self.apply_survey_button, self.clear_survey_button),
+                pn.Row(self.survey_vmin_input, self.survey_vmax_input),
+                styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
+                margin=(10, 5, 0, 5),
+                sizing_mode="stretch_width",
+            ),
+            pn.Column(
+                pn.pane.Markdown("## Anatomical overlay 🧠", margin=(-5, 0, 0, 0)),
+                self.atlas_name_input,
+                self.anatomy_coord_note,
+                pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
+                self.anatomy_help,
+                self.bregma_estimate_header,
+                self.bregma_relative_toggle,
+                pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
+                pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                       self.tilt_input, sizing_mode="stretch_width"),
+                pn.Row(self.compute_anatomy_button, self.clear_anatomy_button,
+                       sizing_mode="stretch_width", styles={"gap": "6px"}),
+                styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
+                margin=(10, 5, 0, 5),
+            ),
             styles={
                 "position": "fixed",
                 "top": "0px",
@@ -1195,20 +2702,56 @@ class ChannelmapGUI(param.Parameterized):
             scroll=False,
         )
 
-        # Main layout with properly scrollable plot container
-        plot_container = pn.Column(
+        # JS that auto-scrolls the probe container to the bottom on load
+        # so the probe tips are visible first, with the base above (scroll up to see).
+        scroll_to_bottom_pane = pn.pane.HTML(
+            """
+            <script>
+            (function() {
+              function scrollProbeToBottom() {
+                var container = document.querySelector('.probe-plot-container');
+                if (container) {
+                  container.scrollTop = container.scrollHeight;
+                } else {
+                  setTimeout(scrollProbeToBottom, 100);
+                }
+              }
+              if (document.readyState === 'complete') {
+                scrollProbeToBottom();
+              } else {
+                window.addEventListener('load', scrollProbeToBottom);
+              }
+            })();
+            </script>
+            """,
+            width=0,
+            height=0,
+            margin=0,
+        )
+
+        # Central plot container: fills remaining width between the two side columns,
+        # height locked to the browser viewport. The probe figure is taller than 100vh
+        # so it is cropped vertically (scrollable) with the tip visible at the bottom.
+        central_plot_container = pn.Column(
+            scroll_to_bottom_pane,
             self.plot_pane,
-            width=self.probe_plot_width,
-            height=self.probe_plot_height,  # Match the plot pane height
-            scroll=True,  # Enable scrolling for the plot container
+            sizing_mode="stretch_width",
+            min_width=300,
+            css_classes=["probe-plot-container"],
+            styles={
+                "height": "100vh",
+                "overflow-y": "auto",
+                "overflow-x": "auto",
+            },
+            scroll=False,
         )
 
         layout = pn.Row(
-            controls,
+            left_column,
             pn.Spacer(width=370),  # Spacer for fixed controls panel on left
-            plot_container,
-            counter_downloader,
-            sizing_mode="fixed",
+            central_plot_container,
+            right_column,
+            sizing_mode="stretch_width",
         )
 
         return layout
@@ -1239,6 +2782,13 @@ class ChannelmapGUI(param.Parameterized):
         Handle probe type changes, which require to reset the whole plot.
         Param module monitors value changes of probe_type.
         """
+        # Drop any loaded survey overlay — electrode IDs don't transfer
+        # across probe types and positions_df is about to be reloaded.
+        self.survey_values = None
+        if hasattr(self, "survey_vmin_input"):
+            self._set_survey_range_inputs(None, None, enabled=False)
+
+        self.clear_anatomy_overlay()
         self.clear_bokeh_data()
         self.load_probe_data()
         self.setup_bokeh_plot()
@@ -1256,8 +2806,9 @@ class ChannelmapGUI(param.Parameterized):
         Handle probe subtype changes - update reference_id objects based on REF_ELECTRODES mapping.
         Param module monitors value changes of probe_subtype.
         """
-        # Update reference_id parameter objects based on the new probe_subtype
-        self.param.reference_id.objects = list(REF_ELECTRODES[self.probe_subtype].keys())
+        # Update reference_id parameter objects based on the new probe_subtype's IMRO format
+        imro_fmt = PROBE_FEATURES[self.probe_subtype]["IMRO_format"]
+        self.param.reference_id.objects = list(REF_ELECTRODES[imro_fmt].keys())
 
         # Set reference_id to the first available option if current selection is not available
         if self.reference_id not in self.param.reference_id.objects:
@@ -1297,9 +2848,35 @@ class ChannelmapGUI(param.Parameterized):
 
 
 ## App creation utilities
+def _extract_cfg_from_session_args() -> str | None:
+    """Pull the ``cfg`` query param out of pn.state.session_args, if any."""
+    try:
+        args = pn.state.session_args or {}
+    except Exception:
+        return None
+    raw = args.get(url_share.QUERY_PARAM)
+    if not raw:
+        return None
+    # session_args values come back as lists of bytes; take the first entry.
+    value = raw[0] if isinstance(raw, list) else raw
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value or None
+
+
 def create_app():
     """Create and configure the Panel app"""
     gui = ChannelmapGUI()
+
+    cfg = _extract_cfg_from_session_args()
+    if cfg:
+        try:
+            applied = gui.apply_url_state(cfg)
+            if not applied:
+                print("Ignored invalid or unsupported ?cfg= share link.")
+        except Exception as e:
+            print(f"Failed to apply shared layout from URL: {e}")
+
     analytics_tracker = AnalyticsSessionTracker()
     layout = gui.create_layout()
 

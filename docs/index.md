@@ -40,6 +40,13 @@ Use PixelMap programmatically from Python or Jupyter notebooks.
 Common issues and how to resolve them.
 :::
 
+:::{grid-item-card} Development
+:link: development
+:link-type: doc
+
+Contributing, architecture, and adding new probes.
+:::
+
 ::::
 
 ## Supported Probes
@@ -63,4 +70,5 @@ gui-guide
 api
 troubleshooting
 presets
+development
 ```

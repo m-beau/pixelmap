@@ -25,7 +25,18 @@ COPY . /app
 
 # Install the Python packages using uv
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
+
+# Pre-download the most common mouse and rat atlases so users don't wait for
+# multi-hundred-MB downloads on first use.  Stored in ~/.brainglobe/ inside
+# the image layer; mount a Docker volume there in production to persist any
+# additional atlases users request across container restarts.
+# check_latest=False avoids hanging the build if the GIN server is down.
 ENV PATH="/app/.venv/bin:$PATH"
+RUN python -c "\
+from brainglobe_atlasapi import BrainGlobeAtlas; \
+BrainGlobeAtlas('allen_mouse_25um', check_latest=False); \
+BrainGlobeAtlas('whs_sd_rat_39um', check_latest=False); \
+"
 
 # Expose the port
 ENV INTERNAL_PORT=5008

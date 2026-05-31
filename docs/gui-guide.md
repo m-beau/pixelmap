@@ -2,7 +2,7 @@
 
 The PixelMap GUI is a browser-based interface for designing Neuropixels channelmaps.
 
-## Launching the GUI
+## 1️⃣ Launching the GUI
 
 ```bash
 uv run pixelmap   # or: pixelmap (if installed with pip)
@@ -10,49 +10,9 @@ uv run pixelmap   # or: pixelmap (if installed with pip)
 
 Or use the [online version](https://pixelmap.pni.princeton.edu/app) — no installation required.
 
-## How It Works
+## 2️⃣ Set your probe metadata
 
-Neuropixels electrodes are [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's headstage. Each ADC is shared by multiple electrodes, meaning that selecting one electrode makes others unavailable. PixelMap visualizes these constraints in real time:
-
-- **Red** electrodes are currently selected.
-- **Black** electrodes are unavailable because they share an ADC with a selected electrode.
-- **Available** electrodes can still be selected.
-
-## Selection Methods
-
-You can combine any of these four methods to build your channelmap:
-
-### Presets
-
-Pre-configured channelmaps that automatically respect wiring constraints. Select a preset from the dropdown menu. See the full [preset reference](presets.md) for available options.
-
-### Textual Selection
-
-Type electrode ranges directly, e.g. `1-10,20-25`, to add them to the current selection. This is useful when you know the exact electrode IDs you need.
-
-### Interactive Selection
-
-Click individual electrodes on the probe visualization, or use drag tools:
-
-- **Selection box** — drag to select all electrodes in a rectangular region
-- **Deselection box** — drag to deselect electrodes in a region
-- **Zigzag selection** — drag to select electrodes in an alternating (checkerboard) pattern
-
-### Load from IMRO File
-
-Upload an existing `.imro` file to use as a starting point. This is useful for:
-
-- Modifying an existing channelmap
-- Visualizing what electrodes a given `.imro` file selects
-
-## Downloading Your Channelmap
-
-Once you've selected the **target number of electrodes** for your probe type (384 for NP 1.0 and NP 2.0 probes), you can download:
-
-- An **`.imro` file** — load this in SpikeGLX
-- A **PDF rendering** — a visual record of your electrode configuration
-
-## Probe Subtype
+### Probe type and subtype
 
 :::{important}
 Make sure the **probe subtype** is set correctly. SpikeGLX will silently ignore `.imro` files with the wrong subtype.
@@ -64,7 +24,153 @@ To find your probe's subtype:
 The subtype is the **first number in the first tuple** of the IMRO table.
 :::
 
-## Loading in SpikeGLX
+### Reference id
+
+The **Reference** dropdown sets which electrode is used as the common reference signal subtracted from all recorded channels. The available options depend on the probe subtype and update automatically when the subtype changes:
+
+| Option | Description |
+|---|---|
+| **External** | Reference signal comes from an external wire (e.g. a silver wire in saline, or a skull screw). The most common choice for acute recordings. Available for all probe subtypes. |
+| **Tip** | The electrode at the probe tip is used as the reference. Available for all probe subtypes. |
+| **Ground** | The probe's internal circuit ground is used as the reference. Available only on NP 2.0 subtypes 2003, 2004, 2013, and 2014. |
+| **Tip shank N** | For multi-shank probes: uses the tip of a specific shank (0–3) as the reference. |
+| **Join Tips** | For multi-shank probes: all four shank tips are used together as references, with channels assigned round-robin across shanks. |
+
+:::{note}
+On-shank reference electrodes (at positions 192, 576, and 960 for NP 1.0) are defined in the IMRO specification but are not currently exposed in the GUI. Use `External` or `Tip` for standard recordings.
+:::
+
+### Neuropixels 1.0 only: filtering and gain settings
+
+These three settings are encoded directly in the IMRO table and apply **only to Neuropixels 1.0 probes**. NP 2.0 probes have hardwired gains and no software-selectable on-board filter, so these fields are ignored for 2.0+ probes.
+
+| Setting | Default | Description |
+|---|---|---|
+| **High-pass 'ap' gain** | 500 | Amplification factor for the AP (action potential) band — the high-frequency component of the signal (>~300 Hz). Higher gain increases sensitivity to spikes but reduces headroom before ADC saturation. Common value: 500. |
+| **Low-pass 'lf' gain** | 250 | Amplification factor for the LF (local field potential) band — the low-frequency component (<~1000 Hz). Common value: 250. |
+| **Hardware HP filter** | On (1) | Whether to enable the probe's on-board analog high-pass filter, equivalent to a 1st-order 300 Hz Butterworth high-pass filter. Set to `1` (on) to remove slow drifts from the AP band; set to `0` (off) to preserve the full-bandwidth signal. `None` leaves the field unspecified. |
+
+## 3️⃣ Build your channelmap
+
+### The core of PixelMap: color-coded electrode selection status
+
+Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. This is due to real-estate constraints: readout lines in each shank, [hardwired](https://www.neuropixels.org/support) to specific analogue-to-digital converters (ADCs) in the probe's head, are shared by multiple sites. Therefore selecting one site for recording makes others unavailable (if they share the same readout line in the shank, or ADC in the head). While it was possible to rather easily predict incompatibilities with Neuropixels 1.0 probes, it became very difficult with 2.0 single-shank scrambled wiring (see Neuropixels 2.0 paper to understand the motivation behind this scrambled wiring) and 4-shanks probes. PixelMap visualizes these constraints in real time, allowing you to craft your channelmap much more easily:
+
+::::{grid} 2
+:gutter: 3
+
+:::{grid-item}
+:columns: 3
+
+```{image} _static/selection_schema.png
+:width: 100%
+:alt: Selection schema showing red (selected), black (unavailable), and grey (available) electrodes
+```
+:::
+
+:::{grid-item}
+:columns: 8
+
+- **Red** sites are selected for recording (connected to readout line).
+- **Black** electrodes are unavailable because they share a readout line or ADC with a selected site.
+- **Grey** sites remain available and can still be selected.
+:::
+::::
+
+### Electrode selection methods:
+
+You can combine any of these four methods to build your channelmap:
+
+#### 1 - Full electrode presets
+
+Pre-configured channelmaps that automatically respect wiring constraints. Select a preset from the dropdown menu. See the full [preset reference](presets.md) for available options.
+
+#### 2 - Textual selection of electrode ranges
+
+Type electrode ranges directly, e.g. `1-10,20-25`, to add them to the current selection. This is useful when you know the exact electrode IDs you need, or for reproducibility.
+
+#### 3 - Interactive selection with single clicks and dragged boxes
+
+You can hover over any electrode to see its ID, shank, depth (Z position), and current status in a tooltip. Clicking a single electrode (de)selects it.
+
+You can also drag boxes to (de)select ranges of electrodes with one of five box tools (select the active tool from the toolbar on the right of the probe plot):
+
+```{list-table}
+:widths: 12 88
+
+* - :::{image} _static/selector.png
+    :height: 40px
+    :::
+  - **Selection box** — drag to select all electrodes in a rectangular region.
+* - :::{image} _static/deselector.png
+    :height: 40px
+    :::
+  - **Deselection box** — drag to deselect electrodes in a region.
+* - :::{image} _static/zigzag_selector.png
+    :height: 40px
+    :::
+  - **Zigzag selection** — drag to select electrodes in an alternating (checkerboard) pattern; useful for dense, interleaved coverage.
+* - :::{image} _static/interleaved_selector.png
+    :height: 40px
+    :::
+  - **Interleaved selection** — drag to select every other *pair* of rows: rows 0–1, then 4–5, then 8–9, and so on (the pattern 0, 1, 4, 5, 8, 9, …). This matches the wiring layout of certain recording configurations where adjacent row pairs share a bank.
+* - :::{image} _static/dependent_deselector.png
+    :height: 40px
+    :::
+  - **Deselect dependents** — drag over unavailable (black) electrodes to find the selected (red) electrodes that blocked them due to shared lines or ADCs, and deselect those selected electrodes, freeing the blocked electrodes and all their other dependents.
+```
+
+:::{tip}
+The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere elese on the probe then use the regular selection box to select the remaining available electrodes (your target).
+:::
+
+
+#### 4 - Load from a pre-existing IMRO File
+
+Upload an existing `.imro` file to use as a starting point. This is useful for:
+
+- Modifying an existing channelmap
+- Visualizing what electrodes a given `.imro` file selects
+
+:::{tip}
+This is really useful if you want to slightly edit a pre-existing channelmap! Upload your current `.imro` file, then use the deselection boxes to make specific electrodes available again, and then use the selection boxes to select your new target electrodes. This is much faster than trying to recreate the same channelmap from scratch using the presets or textual selection.
+:::
+
+### Use PixelMap's power features: activity survey ⚡ and anatomical 🧠 overlays
+
+You can optionally overlay the probe plot with additional information critical to guide your channelmap design.
+
+First, you can overlay a heatmap encoding a **SpikeGLX activity survey** across all sites after implantation to identify the sites with most activity. Because recording in white matter is common and yields fewer units than recording from neuron somata, tailoring your channelmap to areas with high spiking activity (which is likely to be grey matter) can dramatically increase the unit yield of your recordings. For more details on how to run a survey and export the data, see the [SpikeGLX survey overlay section below](#power-feature-1-spikeglx-activity-survey-overlay).
+
+
+Second, you can overlay **anatomical region boundaries** from any brain atlas available in [brainglobe](https://brainglobe.info/index.html) to plan your channelmap around specific brain regions of interest. For more details on how to compute and interpret the anatomical overlay, see the [anatomical overlay section below](#power-feature-2-anatomical-overlay).
+
+The most powerful workflow is to use both together:
+1. Before implantation, use the anatomical overlay to plan a channelmap that covers your target brain regions.
+2. After implantation, either chronic or, if you're quick about it, acute, run a quick survey recording in SpikeGLX. Export the activity survey, and load it as an overlay in PixelMap to visually identify the most active sites.
+3. Adjust your predicted anatomy overlay by moving your probe around to match the ephys activity map (which is the only thing you can actually trust!).
+4. Build your channelmap to select sites in your brain regions of interest.
+
+Voilà!
+
+## 4️⃣ Download and share your channelmap (IMRO file)
+
+### As files
+
+Once you've selected the **target number of electrodes** for your probe type (e.g. 384 for NP 1.0 and NP 2.0 probes), the electrode counter will turn green, at which point you can download:
+
+- An **`.imro` file** — load this in SpikeGLX
+- A **PDF rendering** — a visual record of your electrode configuration
+- A **Kilosort channelmap file** — a text file that formats the channelmap to feed it to Kilosort
+
+### Shareable link
+
+Click **Get shareable link** in the right panel to encode your entire current configuration — probe type, subtype, reference, gain settings, and the full electrode selection — into a URL. The link is immediately copied to your clipboard, and the button label updates to confirm the copy. The generated URL is also shown as a selectable text box so you can copy it manually.
+
+Clicking the button again always re-copies the latest link, even if the configuration hasn't changed.
+
+
+## 5️⃣ Load and use your IMRO file in SpikeGLX
 
 Load your `.imro` file in [SpikeGLX](https://billkarsh.github.io/SpikeGLX/help/imroTables/) using either:
 
@@ -74,3 +180,128 @@ Load your `.imro` file in [SpikeGLX](https://billkarsh.github.io/SpikeGLX/help/i
 :::{note}
 SpikeGLX will grey out its built-in IMRO editing controls after importing a non-canonical table. This is expected — SpikeGLX uses external tables "as is". To make further edits, use PixelMap again: upload the `.imro` file as a starting point, modify it, and re-download.
 :::
+
+Hit record, and off you go!
+
+To spikesort your data, make sure to feed the imro table to your favorite spike-sorter. E.g. for Kilosort, simply use the Kilosort txt file that you can download from PixelMap alongside the `.imro` and pdf files.
+___
+
+## ⚡ Power Feature 1: SpikeGLX Activity Survey Overlay 
+
+SpikeGLX can export a per-contact activity survey as a `.txt` file (tab-separated columns `Shank`, `Xum`, `Zum`, `Val`). `Val` is a metric of your choice — spike rate, spike amplitude, LFP power, etc. — recorded across all contacts during a survey recording. PixelMap overlays these values *alongside* the probe so you can visually identify the most active contacts before committing to a channelmap.
+
+PixelMap draws a thin colored **sidebar bar** just outside the shank outline for each contact — a "mirror image" of the contact column. Each bar is colored by that contact's `Val` using a Viridis colormap. Left-column contacts get a bar on the left of the outline; right-column contacts get a bar on the right.
+
+### Exporting and loading a survey
+
+1. In SpikeGLX, run a survey recording. Offline, load the recording and open up the graphical shank viewer. Under the **View** tab, select *Sample whole survey* and click the update button to have SpikeGLX compute activity across all contacts. Use the **Export Map** button to save a survey `.txt` file.
+2. In PixelMap, expand the **Survey overlay** section in the left panel.
+3. Click the file picker and choose your survey `.txt` file.
+4. Press **Load survey overlay**. A Viridis-colored bar appears just outside the shank outline next to each contact, and a colorbar labeled *Survey Val* appears above the plot.
+
+### Reading the overlay
+
+- **The contacts keep their normal coloring** — red (selected), black (unavailable), light gray (available) — so your selection and the ADC constraints stay fully visible.
+- The **sidebar bars** flanking the shank are colored by `Val`. The colorbar above the plot shows the current min/max range.
+- Bars for **unavailable contacts** (ADC conflicts) are dimmed (reduced opacity) so they're distinguishable from available ones.
+- Contacts with no matching survey value get a neutral gray bar.
+- Hover over a contact to see its exact `Survey value` in the tooltip.
+
+### Adjusting the colormap range
+
+The **vmin** and **vmax** inputs are auto-populated from the file's minimum and maximum values. Edit either input to rescale the colormap live — useful for bringing out contrast in a narrow activity band.
+
+### Clearing the overlay
+
+Click **Clear overlay** to remove the survey overlay. The overlay is also cleared automatically when you switch probe types, since contact positions differ across probe types.
+
+:::{note}
+The survey file must have been exported from the **same probe type** currently selected in PixelMap. If the file comes from a different probe, PixelMap will show an error notification rather than silently displaying a mismatched overlay.
+:::
+
+___
+
+## 🧠 Power Feature 2: Anatomical Overlay
+
+The anatomical overlay maps every electrode on your probe to a brain region from a standard atlas, and displays the result directly on the probe visualization. It is designed to help you approximately plan where your probe will be recording before the animal is implanted, or to review the anatomy of an existing insertion.
+
+### What it shows
+
+Once computed, the overlay draws **colored depth bands** behind each shank in the probe plot. Each band spans a contiguous stretch of electrodes that all fall within the same brain region, filled with that region's atlas color. Thin white boundaries mark the transitions between regions. Region acronyms (e.g. `CA1`, `DG-mo`, `VISp`) appear as labels beside their band. A **region legend** in the right panel lists every traversed region alphabetically by its Allen acronym, with the full region name alongside. Hovering over any electrode still shows its individual depth tooltip; the color bands are a background layer and do not interfere with selection.
+
+A **locator figure** above the legend shows three orthogonal brain-atlas slices — sagittal, coronal, and horizontal — taken through the probe tip, with the probe trajectory drawn in red. A red dot marks the tip; a black dot marks bregma (when bregma mode is active). Click the locator figure to open a full-screen lightbox with a high-resolution version, useful for reading fine region boundaries.
+
+### Example workflow
+
+1. Design your channelmap as usual (presets, drag tools, etc.).
+2. Open the **Anatomical overlay** panel on the right side of the GUI.
+3. Choose your **atlas** (e.g. `allen_mouse_25um`; first use will download ~200 MB).
+4. Enter the **tip coordinates** in atlas µm (AP, ML, DV) — the position of the lowest electrode of shank 0.
+5. If your stereotaxic measurements are relative to bregma, tick **Tip relative to bregma** and enter your stereotaxic coordinates instead (see [Bregma-relative mode](#bregma-relative-coordinate-mode) below).
+6. Adjust **Pitch** and **Yaw** to match the tilt of your stereotaxic arm if the probe is not inserted vertically.
+7. For multi-shank probes, set **Shank orientation** to indicate which direction the shanks run (0° = shanks along the ML axis, 90° = along AP).
+8. Click **Compute anatomical overlay 🧠**. The colored bands, labels, and locator figure appear immediately.
+9. Adjust any coordinate or angle — the overlay updates live without needing to click Compute again.
+10. Click **Clear overlay** to remove all anatomy layers and reset the legend.
+
+### Input fields
+
+| Field | Units | Description |
+|---|---|---|
+| **Atlas** | — | [BrainGlobe](https://brainglobe.info) atlas identifier. Defaults to `allen_mouse_25um`. Any atlas in the BrainGlobe registry can be selected; undownloaded atlases are downloaded on first compute. |
+| **Tip AP / ML / DV** | µm (atlas) | Position of the probe's lowest electrode (shank 0 tip) in the atlas's canonical (AP, ML, DV) frame. AP increases anteriorly; ML increases to the right of midline; DV increases ventrally. In bregma mode these fields become stereotaxic offsets from the landmark (see below). |
+| **Pitch** | degrees | AP tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe forward (toward +AP). Corresponds to the rotation of the stereotaxic arm around the ML axis. |
+| **Yaw** | degrees | ML tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe to the right (toward +ML). Corresponds to rotation around the AP axis. |
+| **Shank orientation** | degrees | For multi-shank probes only: rotation of the shank line around the probe's own long axis. `0°` = shanks arrayed along +ML (probe inserted side-on); `90°` = shanks arrayed along +AP (probe inserted front-to-back). Has no effect on single-shank probes. |
+
+### Bregma-relative coordinate mode
+
+Tick **Tip relative to bregma** to switch from absolute atlas coordinates to stereotaxic coordinates measured from a skull landmark. When active, the Tip AP/ML/DV fields accept offsets from bregma (or the anterior commissure, for non-rodent atlases) in µm, following the standard neuroscience convention: AP positive = anterior, ML positive = right of midline, DV positive = ventral (deeper).
+
+Three additional fields become editable in this mode:
+
+| Field | Description |
+|---|---|
+| **Bregma AP / ML / DV** | The position of bregma in atlas µm. Pre-filled with published estimates where available (see below). You can override these if you have a more accurate value for your preparation. |
+| **DV squish** | A scale factor applied to the DV axis before looking up regions. The Allen CCF is known to be dorsoventrally compressed relative to real tissue: the default value of **0.885** (from the Toronto MRI scaling used by the [Neuropixels Trajectory Explorer](https://neuropixels-trajectory-explorer.vercel.app)) corrects this so that atlas DV distances match stereotaxic DV distances. Effectively, `atlas_DV = real_DV / dv_squish`. Leave at 1.0 if your atlas is already stereotaxically calibrated. |
+| **AP tilt°** | Nose-up tilt of the stereotaxic frame about the ML axis, in degrees. The Allen CCF was constructed with the skull tilted slightly relative to flat-skull stereotaxic convention; a tilt of **13°** (the default for Allen atlases) warps the atlas image in the locator figure so it aligns with a flat-skull stereotax. This is a display correction for the locator only — it does not shift the region lookup along the probe. |
+
+#### Pre-filled bregma estimates
+
+Bregma estimates are pre-loaded from published references for the following atlas families:
+
+- **Allen mouse atlases** (`allen_mouse_*`, `kim_mouse`, `ccfv2_mouse`, `ccfv2_fiber`, `allen_mouse_bluebrain_barrels`): bregma voxel from the cortex-lab / IBL estimate (the same value encoded in the Neuropixels Trajectory Explorer), DV squish 0.885 from the Toronto MRI scaling, AP tilt 13°. The Allen CCF has no anatomically defined bregma — this is an empirical estimate and is inherently approximate.
+
+- **Waxholm rat** (`whs_sd_rat`): bregma is explicitly defined by the Waxholm Space atlas (Papp et al. 2014). The pre-filled value was recovered from the atlas's published bregma voxel coordinates, mapped into BrainGlobe's reoriented frame, and validated against the anterior-commissure decussation (AP/DV agreement within ~0.1 mm). No DV squish or AP tilt is applied — the WHS atlas is already stereotaxically aligned.
+
+- **Other atlases**: if no pre-filled estimate is available (developmental atlases, LSFM templates, non-standard spaces), the bregma fields default to 0 and must be filled in manually.
+
+:::{note}
+The bregma estimates are editable defaults, not ground truth. Individual animals, skull preparation techniques, and the inherent ambiguity of bregma as a skull landmark all introduce variability of 0.1–0.5 mm. If your implant anatomy allows it, verifying against a histological reference section is always preferable to relying on atlas-level estimates alone.
+:::
+
+### The locator figure
+
+The locator shows three orthogonal slices of the atlas, each taken through the probe tip:
+
+- **Sagittal** — a slice at the tip's ML coordinate, with AP on the horizontal axis and DV on the vertical axis.
+- **Coronal** — a slice at the tip's AP coordinate, with ML on the horizontal axis and DV on the vertical axis.
+- **Horizontal** — a slice at the tip's DV coordinate (a top-down view), with ML on the horizontal axis and AP on the vertical axis.
+
+Each panel is colored using the atlas's own region color palette at 60% opacity, with region boundaries overlaid. The probe trajectory is drawn in red (one line per shank), with a red dot at the tip. When bregma mode is active, a black dot marks bregma on each panel.
+
+If the tip falls outside the atlas volume on a given view, that panel falls back to a whole-brain silhouette so it is never blank.
+
+**Click the locator figure** to open a full-screen lightbox with a high-resolution (300 dpi) rendering. This is especially useful for reading fine boundaries in dense regions like hippocampus or thalamus. Click anywhere outside the image to dismiss the lightbox.
+
+### Region legend
+
+The region legend in the right panel lists every brain region traversed by the probe, with:
+
+- A color swatch matching the atlas region color.
+- The **Allen acronym** (e.g. `CA1`, `DG-sg`, `VISp`).
+- The **full region name** (e.g. `field CA1`, `dentate gyrus, molecular layer`).
+
+Regions are listed **alphabetically by acronym** so they are easy to scan regardless of probe depth order. The legend updates live whenever a coordinate or angle is changed after the first compute.
+
+

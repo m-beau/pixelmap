@@ -23,7 +23,6 @@ from pixelmap.utils.imro import (
     generate_imro_channelmap,
 )
 from pixelmap.constants import (
-    PROBE_N,
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
@@ -45,7 +44,7 @@ class TestHardwareConstraints:
 
     def test_too_many_electrodes_rejected(self, wiring_df_1_0):
         """Test that exceeding electrode limit per shank is rejected."""
-        max_n = PROBE_N["1.0"]["n_per_shank"]
+        max_n = 384  # NP 1.0 readout cap per shank
         too_many = np.array([[0, i] for i in range(max_n + 10)])
 
         with pytest.raises(AssertionError, match="too many electrodes"):
@@ -69,7 +68,7 @@ class TestPresetConfigurations:
 
         assert isinstance(electrodes, np.ndarray)
         assert len(electrodes) > 0
-        assert len(electrodes) <= PROBE_N["1.0"]["n_per_shank"]
+        assert len(electrodes) <= 384  # NP 1.0 readout cap per shank
         assert electrodes.shape[1] == 2  # [shank_id, electrode_id] pairs
 
     @pytest.mark.parametrize("preset", SUPPORTED_4shanks_PRESETS)
@@ -111,7 +110,7 @@ class TestIMROFileGeneration:
         assert isinstance(imro_list, list)
         assert len(imro_list) > 1  # Header + electrodes
         header = imro_list[0]
-        assert isinstance(header[0], int)  # Probe subtype
+        assert isinstance(header[0], (int, str))  # Probe subtype (int legacy or str part number)
         assert isinstance(header[1], int)  # Number of channels
 
     def test_generate_imro_2_0_1shank(self, wiring_maps_dir):
