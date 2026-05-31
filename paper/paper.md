@@ -5,6 +5,7 @@ tags:
   - Neuroscience
   - Electrophysiology
   - Neuropixels
+  - Panel
 authors:"fixe paper
   - name: Maxime Beau
     orcid: 0000-0002-8907-6612
