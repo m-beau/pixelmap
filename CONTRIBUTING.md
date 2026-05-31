@@ -6,7 +6,7 @@ Thank you for your interest in contributing to PixelMap!
 
 ### Bug Reports
 
-Found a bug? Please [open an issue](https://github.com/m-beau/channelmap_generator/issues) with:
+Found a bug? Please [open an issue](https://github.com/m-beau/pixelmap/issues) with:
 
 - A clear, descriptive title
 - Steps to reproduce the issue
@@ -15,7 +15,7 @@ Found a bug? Please [open an issue](https://github.com/m-beau/channelmap_generat
 
 ### Feature Requests
 
-Have an idea? [Open an issue](https://github.com/m-beau/channelmap_generator/issues) describing the problem and your proposed solution.
+Have an idea? [Open an issue](https://github.com/m-beau/pixelmap/issues) describing the problem and your proposed solution.
 
 ### Pull Requests
 
