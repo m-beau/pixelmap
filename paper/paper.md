@@ -1,22 +1,24 @@
 ---
-title: 'PixelMap: An Application for Flexible Electrode Selection on Neuropixels Probes'
+title: "PixelMap: A Browser-Based Tool for Wiring-Aware, Anatomy- and Activity-Guided Design of Neuropixels Channelmaps"
 tags:
   - Python
-  - neuroscience
-  - electrophysiology
-  - neuropixels
-authors:
+  - Neuroscience
+  - Electrophysiology
+  - Neuropixels
+authors:"fixe paper
   - name: Maxime Beau
     orcid: 0000-0002-8907-6612
     corresponding: true
     affiliation: "1, 2"
-  - name: Julie Fabre
-    affiliation: 1
+  - name: Julie M. J. Fabre
+    orcid: 0000-0003-0550-0410
+    affiliation: "1"
   - name: Christian Tabedzki
     orcid: 0000-0001-8409-6094
-    affiliation: 1
-  - name: Jorge Janar
-    affiliation: 1
+    affiliation: "1"
+  - name: Jorge Yanar
+    orcid: 0000-0003-1416-3567
+    affiliation: "1"
   - name: Carlos D. Brody
     orcid: 0000-0002-4201-561X
     affiliation: "1, 2"
@@ -114,6 +116,6 @@ AI assistance was used for (1) optimization suggestions and documentation improv
 
 # Acknowledgements
 
-We thank Jesse C. Kaminsky and members of the Brody laboratory for testing and feedback during development, and PNI IT members Garrett McGrath and Gary Lyons for their advice concerning hosting. We also thank Bill Karsh for making SpikeGLX's probe type database publicly available. Finally, we thank the Princeton Neuroscience Institute for hosting the web application. This work was supported by Howard Hughes Medical Institute and the National Institutes of Health.
+We thank Jesse C. Kaminsky and members of the Brody laboratory for testing and feedback during development, and PNI IT members Garrett McGrath and Gary Lyons for their advice concerning hosting. We also thank Bill Karsh for help with development and navigation of SpikeGLX resources. Finally, we thank the Princeton Neuroscience Institute for hosting the web application. J.M.J.F was supported by the Schmidt Science Fellows, in partnership with the Rhodes Trust. This work was supported by Howard Hughes Medical Institute and the National Institutes of Health.
 
 # References

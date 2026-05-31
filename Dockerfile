@@ -30,8 +30,8 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
 # ~58 MB download.  The atlas is stored in ~/.brainglobe/ inside the image
 # layer; mount a Docker volume there in production to persist any additional
 # atlases users request across container restarts.
-RUN python -c "from brainglobe_atlasapi import BrainGlobeAtlas; BrainGlobeAtlas('allen_mouse_25um')"
 ENV PATH="/app/.venv/bin:$PATH"
+RUN python -c "from brainglobe_atlasapi import BrainGlobeAtlas; BrainGlobeAtlas('allen_mouse_25um')"
 
 # Expose the port
 ENV INTERNAL_PORT=5008
