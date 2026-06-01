@@ -94,7 +94,4 @@ SUPPORTED_QuadBase_PRESETS = [
     "tips_all",         # electrodes 0-383 (bank 0) on all 4 shanks — 1536 total
     "bank1_all",        # electrodes 384-767 (bank 1) on all 4 shanks — 1536 total
     "bank2_all",        # electrodes 768-1151 (bank 2) on all 4 shanks — 1536 total
-    "tip_s0", "tip_s1", "tip_s2", "tip_s3",  # bank 0 on one shank (384 ch)
-    "tip_b0_top_b1_s0", "tip_b0_top_b1_s1",
-    "tip_b0_top_b1_s2", "tip_b0_top_b1_s3",
 ]
