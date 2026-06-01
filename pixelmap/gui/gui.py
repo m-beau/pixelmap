@@ -2587,7 +2587,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.HTML("""
             <div style="font-size: 13px; line-height: 1.4; text-align: justify;">
             <b>Neuropixels hardware Constraints:</b><br>
-            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines (<a href = https://www.neuropixels.org/support>hardwired</a>) to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
+            Neuropixels probes feature more physical sites (electrodes) than can be recorded from simultaneously. Due to real-estate constraints, several sites share single readout lines <a href = https://www.neuropixels.org/support>hardwired</a> to specific analogue-to-digital converters (ADCs) in the probe's head. Therefore selecting one site for recording makes others unavailable.
             PixelMap visualizes these constraints in real time: when you select channels, they turn <font color="#c00000"><b>red</b></font>, and those that become unavailable because they share the same lines or ADCs turn <b>black</b>.<br><br>
 
             <b>You can mix and match four selection methods:</b><br>
