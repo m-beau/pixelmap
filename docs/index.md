@@ -56,7 +56,7 @@ Contributing, architecture, and adding new probes.
 | 1.0           | Supported |
 | 2.0, 1-shank  | Supported |
 | 2.0, 4-shanks | Supported |
-| Quadbase      | Planned |
+| Quadbase      | Supported |
 | NXT           | Planned |
 
 UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/pixelmap/issues) if you need support for these.
