@@ -1,6 +1,8 @@
 name: Draft PDF
 on:
   push:
+    branches:
+      - '**'
     paths:
       - paper/**
       - .github/workflows/draft-pdf.yml
