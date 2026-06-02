@@ -191,11 +191,13 @@ class ChannelmapGUI(param.Parameterized):
 
     probe_type = param.Selector(default=default_type,
                                 objects=list(WIRING_FILE_MAP.keys()),
-                                doc="Neuropixels hardware type (same sites, readout channels, layout, wiring)")
+                                label="Probe group",
+                                doc="Neuropixels hardware group (same sites, readout channels, layout, wiring)")
 
     probe_subtype = param.Selector(
         default=PROBE_TYPE_MAP[default_type][0],
         objects=PROBE_TYPE_MAP[default_type],
+        label="Probe part number",
         doc="IMEC probe part number - affects imro file format. Look at your IMEC order, or plug your probe in SpikeGLX release >= 20260115 and save an imro file to find out its part number.",
     )
 
@@ -899,7 +901,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # In legacy mode, replace the part-number header with the legacy integer
         if self.legacy_imro_mode and self.probe_subtype in PROBE_FEATURES:
-            legacy_id = PROBE_FEATURES[self.probe_subtype]["SpikeGLX_probe_number"]
+            legacy_id = PROBE_FEATURES[self.probe_subtype]["SpikeGLX_probe_type"]
             self.imro_list[0] = (legacy_id, self.imro_list[0][1])
 
     def generate_imro_content(self):
@@ -2098,11 +2100,11 @@ class ChannelmapGUI(param.Parameterized):
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
 
     def _build_subtype_options(self):
-        """Dict of {'NP2013 – Description (SpikeGLX number: 2013, IMRO format: imro_np2013)': 'NP2013'} for the current probe_type."""
+        """Dict of {'NP2013 – Description (SpikeGLX probe type: 2013, IMRO format: imro_np2013)': 'NP2013'} for the current probe_type."""
         return {
             (
                 f"{pn_} \u2013 {PROBE_FEATURES[pn_]['probe_name']}"
-                f" (SpikeGLX number: {PROBE_FEATURES[pn_]['SpikeGLX_probe_number']},"
+                f" (SpikeGLX probe type: {PROBE_FEATURES[pn_]['SpikeGLX_probe_type']},"
                 f" IMRO format: {PROBE_FEATURES[pn_]['IMRO_format']})"
             ): pn_
             for pn_ in PROBE_TYPE_MAP[self.probe_type]
@@ -2156,7 +2158,7 @@ class ChannelmapGUI(param.Parameterized):
 
     def create_widgets(self):
         """Create Panel widgets"""
-        # Probe type selector
+        # Probe group selector
         self.probe_type_selector = pn.Param(
             self,
             parameters=["probe_type"],

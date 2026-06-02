@@ -61,7 +61,7 @@ pixelmap/
 : Functions for reading, writing, and parsing IMRO files. The `generate_imro_channelmap()` function is the main entry point for programmatic use.
 
 **`constants.py`**
-: Probe type definitions, electrode counts, and preset configurations. Edit this when adding new probe types or presets.
+: Probe group definitions, electrode counts, and preset configurations. Edit this when adding new probe types or presets.
 
 **`types.py`**
 : Data classes used throughout the codebase, including the `Electrode` class.
@@ -109,7 +109,7 @@ To add support for a new probe (e.g., Quadbase, NXT):
 1. **Add wiring map**: Create `wiring_maps/<probe_type>_wiring.csv` defining electrode-to-ADC mappings
 
 2. **Update constants**: In `constants.py`, add entries to:
-   - `PROBE_TYPE_MAP` - SpikeGLX subtype numbers
+   - `PROBE_TYPE_MAP` - SpikeGLX probe types
    - `PROBE_N` - Electrode and channel counts
    - `SUPPORTED_*_PRESETS` - Available presets (if applicable)
 

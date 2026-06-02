@@ -10,7 +10,7 @@ Exposed module-level names
 --------------------------
 PROBE_FEATURES : dict[str, dict]
     Keyed by IMEC part number (e.g. "NP2003").  Each value has:
-      SpikeGLX_probe_number  – legacy integer type used in old IMRO headers
+      SpikeGLX_probe_type  – legacy integer type used in old IMRO headers
       IMRO_format            – e.g. "imro_np2003"
       n_readouts_total       – total simultaneous readout channels (num_readout_channels)
       n_readouts_per_shank   – per-shank readout limit (channels_per_bank)
@@ -50,7 +50,7 @@ _SOURCE_JSON = _WIRING_MAPS_DIR / "Neuropixels_probe_features_Bill_Karsh.json"
 _CACHE_JSON  = _WIRING_MAPS_DIR / "pixelmap_probe_features.json"
 
 # ---------------------------------------------------------------------------
-# Probe type taxonomy
+# Probe group taxonomy
 # ---------------------------------------------------------------------------
 # Each type is hardware-homogeneous: same geometry, site count, and readout
 # count.  Types marked NOT YET SUPPORTED have no wiring map yet; they appear
@@ -201,11 +201,11 @@ IMRO_FORMAT_TO_PROBE_TYPE: dict[str, str | None] = {
 LEGACY_PROBE_TYPE_MAP: dict[str, list[int]] = {
     "1.0":                   [0],
     "NHP-short-linear":      [0],            # SpikeGLX type 0 — indistinguishable from 1.0
-    "NHP-medium-staggered":  [1020, 1021],
-    "NHP-medium-linear":     [1022],
-    "NHP-long-staggered":    [1030, 1031],
-    "NHP-long-linear":       [1032, 1033, 1040, 1041, 1042, 1050, 1051],
-    "NHP-passive":           [1200, 1210],
+    "NHP-medium-staggered":  [1020],         # NP1020-1021 → type 1020
+    "NHP-medium-linear":     [1020],         # NP1022 → type 1020 (ambiguous with staggered)
+    "NHP-long-staggered":    [1030],         # NP1030-1031 → type 1030
+    "NHP-long-linear":       [1030],         # NP1032-1051 → type 1030 (ambiguous with staggered)
+    "NHP-passive":           [1200],         # NP1200, NP1210, NP1221 → type 1200
     "UHD1":                  [1100],
     "UHD2":                  [1110],
     "UHD3-2x192":            [1120],
@@ -213,12 +213,12 @@ LEGACY_PROBE_TYPE_MAP: dict[str, list[int]] = {
     "UHD3-16x24":            [1122],
     "UHD3-12x32":            [1123],
     "Opto":                  [1300],
-    "2.0-1shank":            [21, 2003, 2004, 2005, 2006],
-    "2.0-4shanks":           [24, 2013, 2014],
-    "QuadBase":              [2020, 2021],
+    "2.0-1shank":            [21, 2003],
+    "2.0-4shanks":           [24, 2013],
+    "QuadBase":              [2020],
     "NXT-passive":           [3000],
-    "NXT-1shank":            [3010, 3011],
-    "NXT-4shank":            [3020, 3021, 3022, 3023, 3024],
+    "NXT-1shank":            [3010],
+    "NXT-4shank":            [3020, 3022, 3023],
 }
 
 # Legacy integer → IMRO format string (for parsing old IMRO file headers).
@@ -227,25 +227,14 @@ LEGACY_PROBE_TYPE_MAP: dict[str, list[int]] = {
 LEGACY_INT_TO_IMRO_FORMAT: dict[int, str] = {
     # imro_np1000 family
     0:    "imro_np1000",  # 1.0, NHP short (staggered and linear)
-    1020: "imro_np1000",
-    1021: "imro_np1000",  # NHP medium staggered
-    1022: "imro_np1000",                        # NHP medium linear
-    1030: "imro_np1000",
-    1031: "imro_np1000",  # NHP long staggered
-    1032: "imro_np1000",
-    1033: "imro_np1000",  # NHP long linear
-    1040: "imro_np1000",
-    1041: "imro_np1000",
-    1042: "imro_np1000",
-    1050: "imro_np1000",
-    1051: "imro_np1000",
+    1020: "imro_np1000",  # NHP medium (staggered and linear)
+    1030: "imro_np1000",  # NHP long (staggered and linear)
     1100: "imro_np1000",  # UHD1
     1120: "imro_np1000",
     1121: "imro_np1000",  # UHD3
     1122: "imro_np1000",
     1123: "imro_np1000",
-    1200: "imro_np1000",
-    1210: "imro_np1000",  # NHP passive
+    1200: "imro_np1000",  # NHP passive
     1300: "imro_np1000",  # Opto
     3000: "imro_np1000",  # NXT passive
     # imro_np1110 (UHD2 active)
@@ -254,67 +243,104 @@ LEGACY_INT_TO_IMRO_FORMAT: dict[int, str] = {
     21:   "imro_np2000",
     # imro_np2003 (2.0 single-shank Phase 2)
     2003: "imro_np2003",
-    2004: "imro_np2003",
-    2005: "imro_np2003",
-    2006: "imro_np2003",
     # imro_np2010 (2.0 four-shank Phase 1 pilot)
     24:   "imro_np2010",
     # imro_np2013 (2.0 four-shank Phase 2)
     2013: "imro_np2013",
-    2014: "imro_np2013",
     # imro_np2020 (QuadBase)
     2020: "imro_np2020",
-    2021: "imro_np2020",
     # imro_np3010 (NXT single-shank)
     3010: "imro_np3010",
-    3011: "imro_np3010",
     # imro_np3020 (NXT four-shank)
     3020: "imro_np3020",
-    3021: "imro_np3020",
     3022: "imro_np3020",
     3023: "imro_np3020",
-    3024: "imro_np3020",
 }
 
 # ---------------------------------------------------------------------------
-# SpikeGLX integer exceptions
-# Part numbers for which int(part_number[2:]) does NOT equal the legacy
-# SpikeGLX integer type written in IMRO headers.
+# Part number → SpikeGLX legacy integer probe type
+# Source: SpikeGLX ProbeTable (https://github.com/billkarsh/SpikeGLX)
+# Each group of part numbers shares a single SpikeGLX probe type integer.
 # ---------------------------------------------------------------------------
-_SPIKEGLIX_NUMBER_EXCEPTIONS: dict[str, int] = {
-    # Standard NP 1.0: all report as type 0.
+_PART_NUMBER_TO_SPIKEGLIX_TYPE: dict[str, int] = {
+    # PRB-prefix pilot probes (pre-NP naming)
+    "PRB_1_2_0480_2":   0,
+    "PRB_1_4_0480_1":   0,
+    "PRB_1_4_0480_1_C": 0,
+    "PRB2_1_2_0640_0":  21,
+    "PRB2_4_2_0640_0":  24,
+    # imro_np1000, type 0: NP1000-1001, NP1010-1017
     "NP1000": 0,
     "NP1001": 0,
-    # NHP short staggered: same ASIC as 1.0 → type 0.
     "NP1010": 0,
     "NP1011": 0,
     "NP1012": 0,
     "NP1013": 0,
     "NP1014": 0,
-    # NHP short linear: also report as type 0 in legacy SpikeGLX.
     "NP1015": 0,
     "NP1016": 0,
     "NP1017": 0,
-    # Phase-1 pilot probes (NP-prefix)
-    "NP2000": 21,   # 2.0 single-shank Phase 1 → type 21
-    "NP2010": 24,   # 2.0 four-shank  Phase 1 → type 24
-    # Old PRB-prefix pilot part numbers
-    "PRB_1_2_0480_2":  0,
-    "PRB_1_4_0480_1":  0,
-    "PRB_1_4_0480_1_C": 0,
-    "PRB2_1_2_0640_0": 21,
-    "PRB2_4_2_0640_0": 24,
+    # imro_np1000, type 1020: NP1020-1022
+    "NP1020": 1020,
+    "NP1021": 1020,
+    "NP1022": 1020,
+    # imro_np1000, type 1030: NP1030-1033, NP1040-1042, NP1050-1051
+    "NP1030": 1030,
+    "NP1031": 1030,
+    "NP1032": 1030,
+    "NP1033": 1030,
+    "NP1040": 1030,
+    "NP1041": 1030,
+    "NP1042": 1030,
+    "NP1050": 1030,
+    "NP1051": 1030,
+    # imro_np1000, type 1100: NP1100
+    "NP1100": 1100,
+    # imro_np1000, type 1120: NP1120
+    "NP1120": 1120,
+    # imro_np1000, type 1121: NP1121
+    "NP1121": 1121,
+    # imro_np1000, type 1122: NP1122
+    "NP1122": 1122,
+    # imro_np1000, type 1123: NP1123
+    "NP1123": 1123,
+    # imro_np1000, type 1200: NP1200, NP1210, NP1221
+    "NP1200": 1200,
+    "NP1210": 1200,
+    "NP1221": 1200,
+    # imro_np1000, type 1300: NP1300
+    "NP1300": 1300,
+    # imro_np1110, type 1110: NP1110
+    "NP1110": 1110,
+    # imro_np2000, type 21: NP2000
+    "NP2000": 21,
+    # imro_np2003, type 2003: NP2003-2006
+    "NP2003": 2003,
+    "NP2004": 2003,
+    "NP2005": 2003,
+    "NP2006": 2003,
+    # imro_np2010, type 24: NP2010
+    "NP2010": 24,
+    # imro_np2013, type 2013: NP2013-2014
+    "NP2013": 2013,
+    "NP2014": 2013,
+    # imro_np2020, type 2020: NP2020-2021
+    "NP2020": 2020,
+    "NP2021": 2020,
+    # imro_np3010, type 3010: NP3010-3011
+    "NP3010": 3010,
+    "NP3011": 3010,
+    # imro_np3020, type 3020: NP3020-3021
+    "NP3020": 3020,
+    "NP3021": 3020,
+    # imro_np3020, type 3022: NP3022
+    "NP3022": 3022,
+    # imro_np3020, type 3023: NP3023-3024
+    "NP3023": 3023,
+    "NP3024": 3023,
+    # NXT passive (not yet in SpikeGLX ProbeTable)
+    "NP3000": 3000,
 }
-
-
-def _spikeglix_probe_number(part_number: str) -> int:
-    """Return the legacy SpikeGLX integer type for a given part number."""
-    if part_number in _SPIKEGLIX_NUMBER_EXCEPTIONS:
-        return _SPIKEGLIX_NUMBER_EXCEPTIONS[part_number]
-    try:
-        return int(part_number[2:])
-    except ValueError:
-        return 0  # Unknown format; treat as generic NP 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +362,7 @@ def _build(source_json_path: Path) -> dict:
         ptype = _PART_NUMBER_TO_PROBE_TYPE.get(pn)
 
         result[pn] = {
-            "SpikeGLX_probe_number": _spikeglix_probe_number(pn),
+            "SpikeGLX_probe_type": _PART_NUMBER_TO_SPIKEGLIX_TYPE.get(pn, 0),
             "IMRO_format":           imro_fmt,
             "n_readouts_total":      int(data["num_readout_channels"]),
             "n_readouts_per_shank":  int(data["channels_per_bank"]),
