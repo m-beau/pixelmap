@@ -1,6 +1,6 @@
 {
   "NP1000": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -14,7 +14,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1001": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -28,7 +28,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1010": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -42,7 +42,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1011": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -56,7 +56,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1012": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -70,7 +70,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1013": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -84,7 +84,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1014": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -98,7 +98,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "NP1015": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -112,7 +112,7 @@
     "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1016": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -126,7 +126,7 @@
     "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1017": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -140,7 +140,7 @@
     "pixelmap_probe_type": "NHP-short-linear"
   },
   "NP1020": {
-    "SpikeGLX_probe_number": 1020,
+    "SpikeGLX_probe_type": 1020,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -154,7 +154,7 @@
     "pixelmap_probe_type": "NHP-medium-staggered"
   },
   "NP1021": {
-    "SpikeGLX_probe_number": 1021,
+    "SpikeGLX_probe_type": 1020,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -168,7 +168,7 @@
     "pixelmap_probe_type": "NHP-medium-staggered"
   },
   "NP1022": {
-    "SpikeGLX_probe_number": 1022,
+    "SpikeGLX_probe_type": 1020,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -182,7 +182,7 @@
     "pixelmap_probe_type": "NHP-medium-linear"
   },
   "NP1030": {
-    "SpikeGLX_probe_number": 1030,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -196,7 +196,7 @@
     "pixelmap_probe_type": "NHP-long-staggered"
   },
   "NP1031": {
-    "SpikeGLX_probe_number": 1031,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -210,7 +210,7 @@
     "pixelmap_probe_type": "NHP-long-staggered"
   },
   "NP1032": {
-    "SpikeGLX_probe_number": 1032,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -224,7 +224,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1033": {
-    "SpikeGLX_probe_number": 1033,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -238,7 +238,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1040": {
-    "SpikeGLX_probe_number": 1040,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -252,7 +252,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1041": {
-    "SpikeGLX_probe_number": 1041,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -266,7 +266,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1042": {
-    "SpikeGLX_probe_number": 1042,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -280,7 +280,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1050": {
-    "SpikeGLX_probe_number": 1050,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -294,7 +294,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1051": {
-    "SpikeGLX_probe_number": 1051,
+    "SpikeGLX_probe_type": 1030,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -308,7 +308,7 @@
     "pixelmap_probe_type": "NHP-long-linear"
   },
   "NP1100": {
-    "SpikeGLX_probe_number": 1100,
+    "SpikeGLX_probe_type": 1100,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -322,7 +322,7 @@
     "pixelmap_probe_type": "UHD1"
   },
   "NP1110": {
-    "SpikeGLX_probe_number": 1110,
+    "SpikeGLX_probe_type": 1110,
     "IMRO_format": "imro_np1110",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -336,7 +336,7 @@
     "pixelmap_probe_type": "UHD2"
   },
   "NP1120": {
-    "SpikeGLX_probe_number": 1120,
+    "SpikeGLX_probe_type": 1120,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -350,7 +350,7 @@
     "pixelmap_probe_type": "UHD3-2x192"
   },
   "NP1121": {
-    "SpikeGLX_probe_number": 1121,
+    "SpikeGLX_probe_type": 1121,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -364,7 +364,7 @@
     "pixelmap_probe_type": "UHD3-1x384"
   },
   "NP1122": {
-    "SpikeGLX_probe_number": 1122,
+    "SpikeGLX_probe_type": 1122,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -378,7 +378,7 @@
     "pixelmap_probe_type": "UHD3-16x24"
   },
   "NP1123": {
-    "SpikeGLX_probe_number": 1123,
+    "SpikeGLX_probe_type": 1123,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -392,7 +392,7 @@
     "pixelmap_probe_type": "UHD3-12x32"
   },
   "NP1200": {
-    "SpikeGLX_probe_number": 1200,
+    "SpikeGLX_probe_type": 1200,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 128,
     "n_readouts_per_shank": 128,
@@ -406,7 +406,7 @@
     "pixelmap_probe_type": "NHP-passive"
   },
   "NP1210": {
-    "SpikeGLX_probe_number": 1210,
+    "SpikeGLX_probe_type": 1200,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 128,
     "n_readouts_per_shank": 128,
@@ -420,7 +420,7 @@
     "pixelmap_probe_type": "NHP-passive"
   },
   "NP1300": {
-    "SpikeGLX_probe_number": 1300,
+    "SpikeGLX_probe_type": 1300,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -434,7 +434,7 @@
     "pixelmap_probe_type": "Opto"
   },
   "NP2000": {
-    "SpikeGLX_probe_number": 21,
+    "SpikeGLX_probe_type": 21,
     "IMRO_format": "imro_np2000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -448,7 +448,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "NP2003": {
-    "SpikeGLX_probe_number": 2003,
+    "SpikeGLX_probe_type": 2003,
     "IMRO_format": "imro_np2003",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -462,7 +462,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "NP2004": {
-    "SpikeGLX_probe_number": 2004,
+    "SpikeGLX_probe_type": 2003,
     "IMRO_format": "imro_np2003",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -476,7 +476,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "NP2005": {
-    "SpikeGLX_probe_number": 2005,
+    "SpikeGLX_probe_type": 2003,
     "IMRO_format": "imro_np2003",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -490,7 +490,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "NP2006": {
-    "SpikeGLX_probe_number": 2006,
+    "SpikeGLX_probe_type": 2003,
     "IMRO_format": "imro_np2003",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -504,7 +504,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "NP2010": {
-    "SpikeGLX_probe_number": 24,
+    "SpikeGLX_probe_type": 24,
     "IMRO_format": "imro_np2010",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -518,7 +518,7 @@
     "pixelmap_probe_type": "2.0-4shanks"
   },
   "NP2013": {
-    "SpikeGLX_probe_number": 2013,
+    "SpikeGLX_probe_type": 2013,
     "IMRO_format": "imro_np2013",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -532,7 +532,7 @@
     "pixelmap_probe_type": "2.0-4shanks"
   },
   "NP2014": {
-    "SpikeGLX_probe_number": 2014,
+    "SpikeGLX_probe_type": 2013,
     "IMRO_format": "imro_np2013",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -546,7 +546,7 @@
     "pixelmap_probe_type": "2.0-4shanks"
   },
   "NP2020": {
-    "SpikeGLX_probe_number": 2020,
+    "SpikeGLX_probe_type": 2020,
     "IMRO_format": "imro_np2020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 384,
@@ -560,7 +560,7 @@
     "pixelmap_probe_type": "QuadBase"
   },
   "NP2021": {
-    "SpikeGLX_probe_number": 2021,
+    "SpikeGLX_probe_type": 2020,
     "IMRO_format": "imro_np2020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 384,
@@ -574,7 +574,7 @@
     "pixelmap_probe_type": "QuadBase"
   },
   "NP3000": {
-    "SpikeGLX_probe_number": 3000,
+    "SpikeGLX_probe_type": 3000,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 128,
     "n_readouts_per_shank": 128,
@@ -588,7 +588,7 @@
     "pixelmap_probe_type": "NXT-passive"
   },
   "NP3010": {
-    "SpikeGLX_probe_number": 3010,
+    "SpikeGLX_probe_type": 3010,
     "IMRO_format": "imro_np3010",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -602,7 +602,7 @@
     "pixelmap_probe_type": "NXT-1shank"
   },
   "NP3011": {
-    "SpikeGLX_probe_number": 3011,
+    "SpikeGLX_probe_type": 3010,
     "IMRO_format": "imro_np3010",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -616,7 +616,7 @@
     "pixelmap_probe_type": "NXT-1shank"
   },
   "NP3020": {
-    "SpikeGLX_probe_number": 3020,
+    "SpikeGLX_probe_type": 3020,
     "IMRO_format": "imro_np3020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -630,7 +630,7 @@
     "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3021": {
-    "SpikeGLX_probe_number": 3021,
+    "SpikeGLX_probe_type": 3020,
     "IMRO_format": "imro_np3020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -644,7 +644,7 @@
     "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3022": {
-    "SpikeGLX_probe_number": 3022,
+    "SpikeGLX_probe_type": 3022,
     "IMRO_format": "imro_np3020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -658,7 +658,7 @@
     "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3023": {
-    "SpikeGLX_probe_number": 3023,
+    "SpikeGLX_probe_type": 3023,
     "IMRO_format": "imro_np3020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -672,7 +672,7 @@
     "pixelmap_probe_type": "NXT-4shank"
   },
   "NP3024": {
-    "SpikeGLX_probe_number": 3024,
+    "SpikeGLX_probe_type": 3023,
     "IMRO_format": "imro_np3020",
     "n_readouts_total": 1536,
     "n_readouts_per_shank": 912,
@@ -686,7 +686,7 @@
     "pixelmap_probe_type": "NXT-4shank"
   },
   "PRB2_1_2_0640_0": {
-    "SpikeGLX_probe_number": 21,
+    "SpikeGLX_probe_type": 21,
     "IMRO_format": "imro_np2000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -700,7 +700,7 @@
     "pixelmap_probe_type": "2.0-1shank"
   },
   "PRB2_4_2_0640_0": {
-    "SpikeGLX_probe_number": 24,
+    "SpikeGLX_probe_type": 24,
     "IMRO_format": "imro_np2010",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -714,7 +714,7 @@
     "pixelmap_probe_type": "2.0-4shanks"
   },
   "PRB_1_2_0480_2": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -728,7 +728,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "PRB_1_4_0480_1": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,
@@ -742,7 +742,7 @@
     "pixelmap_probe_type": "1.0"
   },
   "PRB_1_4_0480_1_C": {
-    "SpikeGLX_probe_number": 0,
+    "SpikeGLX_probe_type": 0,
     "IMRO_format": "imro_np1000",
     "n_readouts_total": 384,
     "n_readouts_per_shank": 384,

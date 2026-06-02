@@ -46,7 +46,7 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 The following constants are defined in `pixelmap.constants`:
 
 `PROBE_TYPE_MAP`
-: Mapping from probe type names (`"1.0"`, `"2.0-1shank"`, `"2.0-4shanks"`) to lists of SpikeGLX subtype numbers.
+: Mapping from probe type names (`"1.0"`, `"2.0-1shank"`, `"2.0-4shanks"`) to lists of SpikeGLX probe types.
 
 `PROBE_N`
 : Number of physical electrodes (`N`), ADC channels (`n`), and channels per shank (`n_per_shank`) for each probe type.
@@ -107,7 +107,7 @@ imro_list = cmg.read_imro_file("my_channelmap.imro")
     hp_filter,
 ) = cmg.parse_imro_list(imro_list)
 
-print(f"Probe type: {probe_type} (subtype {probe_subtype})")
+print(f"Probe group: {probe_type} (part number {probe_subtype})")
 print(f"Reference: {reference_string}")
 print(f"Selected {len(selected_electrodes)} electrodes")
 ```

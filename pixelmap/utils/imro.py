@@ -126,7 +126,7 @@ def parse_imro_list(imro_list):
                 probe_type = pt
                 break
     else:
-        raise ValueError(f"Unknown probe subtype in IMRO header: {probe_subtype!r}")
+        raise ValueError(f"Unknown probe part number / SpikeGLX probe type in IMRO header: {probe_subtype!r}")
 
     selected_electrodes = []
 
