@@ -130,7 +130,7 @@ AI assistance was used for (1) optimization suggestions and documentation improv
 | Backend                            |      X      |             |                    |             |                 |
 | GUI - general                      |      X      |      X      |                    |             |                 |
 | GUI - Anatomical overlay           |             |      X      |                    |             |                 |
-| GUI - Activity survey overlay      |             |             |                    |      X      |                 |
+| GUI - Activity overlay      |             |             |                    |      X      |                 |
 | App hosting                        |             |             |         X          |             |                 |
 | Supervision and funding            |             |             |                    |             |        X        |
 
