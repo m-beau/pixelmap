@@ -113,7 +113,7 @@ The software includes an automated test suite covering hardware constraint valid
 
 PixelMap addresses a practical bottleneck in Neuropixels experimental workflows. Neuropixels have become the dominant technology for large-scale electrophysiology, with exponential growth in publications using the technology ([PubMed](https://esperr.github.io/pubmed-by-year/?q1=Neuropixels)). Yet no existing tool provided installation-free channelmap design with support for arbitrary electrode geometries and simultaneous anatomy- and activity-guided planning (see **Statement of Need**).
 
-PixelMap demonstrates community-readiness through comprehensive documentation—including a dedicated contributor guide (CONTRIBUTING.md) with contribution workflows and a permissive open-source license (GPL3). The tool is immediately accessible via web application, Python package, Docker container, or programmatic API. The tool builds on the authors' established track record using Neuropixels probes in their research [@steinmetz2021; @bondy2024; @beau2025] and developing Neuropixels software [@beau2021].
+PixelMap demonstrates community-readiness through comprehensive documentation—including a dedicated contributor guide (CONTRIBUTING.md) with contribution workflows and a permissive open-source license (GPL3). The tool is immediately accessible via web application, Python package, Docker container, or programmatic API. The tool builds on the authors' established track record using Neuropixels probes in their research [@steinmetz2021; @bondy2024; @beau2025; @fabre2026basal] and developing Neuropixels software [@beau2021].
 
 Evidence of adoption includes deployment at Princeton Neuroscience Institute's public server, community engagement on the project repository (56 GitHub stars), and measured web traffic: cookie analytics recorded approximately 400 unique visitors between March and May 2026, averaging roughly 45 unique visitors per week (see `https://github.com/m-beau/pixelmap/tree/main/analytics`). The package has been under active development for over ten months, with external contributors implementing new features (anatomical overlay, activity survey overlay).
 
@@ -130,7 +130,7 @@ AI assistance was used for (1) optimization suggestions and documentation improv
 | Backend                            |      X      |             |                    |             |                 |
 | GUI - general                      |      X      |      X      |                    |             |                 |
 | GUI - Anatomical overlay           |             |      X      |                    |             |                 |
-| GUI - Activity survey overlay      |             |             |                    |      X      |                 |
+| GUI - Activity overlay      |             |             |                    |      X      |                 |
 | App hosting                        |             |             |         X          |             |                 |
 | Supervision and funding            |             |             |                    |             |        X        |
 
