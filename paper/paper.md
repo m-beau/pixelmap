@@ -71,7 +71,7 @@ PixelMap, by contrast, is built with the primary purpose of being a no-install g
 
 # Software Design
 
-PixelMap is implemented in Python using [Holoviz Panel](https://panel.holoviz.org/) for the web interface, providing an interactive and responsive user experience. The software architecture consists of four main components.
+PixelMap is implemented in Python using [Holoviz Panel](https://panel.holoviz.org/) for the web interface, providing an interactive and responsive user experience. The software architecture consists of three main components.
 
 First, the **probe type database and wiring maps** (distributed in `./constants.py`. `./utils/probe_features.py`, `./wiring_maps/*`) derives the mapping between probe part numbers, SpikeGLX probe type identifiers, and IMRO format numbers directly from the authoritative source maintained by SpikeGLX developer Bill Karsh. This provides both accuracy and forward compatibility with new probe versions as they are added to SpikeGLX. The **wiring maps** at `./wiring_maps/*.csv` are CSV files describing the electrode-to-ADC mappings for each supported probe type. They were adapted from files provided by IMEC (Neuropixels manufacturer - downloadable [here](https://www.neuropixels.org/support)) and SpikeGLX (https://github.com/billkarsh/SpikeGLX/tree/a9024ba79f4481883766f5468563accb74fd58fd/Src-imro). PixelMap currently supports Neuropixels 1.0, 2.0 single-shank, 2.0 four-shank, and 2.0 Quad Base probes.
 
