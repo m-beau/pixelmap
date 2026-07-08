@@ -106,7 +106,7 @@ Tests run automatically via GitHub Actions on:
 - Every pull request to `main`
 - Manual workflow dispatch
 
-The workflow tests across multiple Python versions (3.10, 3.11, 3.12) to ensure compatibility.
+The workflow tests across multiple Python versions (3.11, 3.12) to ensure compatibility.
 
 ## Adding New Tests
 
