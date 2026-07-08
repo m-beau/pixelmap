@@ -1,4 +1,4 @@
-FROM ubuntu:latest
+FROM python:3.14
 
 RUN apt-get update && apt-get install -y \
    git \
@@ -30,13 +30,16 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
 # multi-hundred-MB downloads on first use.  Stored in ~/.brainglobe/ inside
 # the image layer; mount a Docker volume there in production to persist any
 # additional atlases users request across container restarts.
-# check_latest=False avoids hanging the build if the GIN server is down.
+#
+# The GIN server that hosts the atlases is frequently slow or unresponsive.  We
+# require the atlases to be baked in: `timeout` bounds the download so a stalled
+# GIN server fails the build instead of hanging it forever, and any failure
+# propagates (the build fails) rather than shipping an image without atlases.
+# Bump ATLAS_FETCH_TIMEOUT if downloads legitimately need longer.
 ENV PATH="/app/.venv/bin:$PATH"
-RUN python -c "\
-from brainglobe_atlasapi import BrainGlobeAtlas; \
-BrainGlobeAtlas('allen_mouse_25um', check_latest=False); \
-BrainGlobeAtlas('whs_sd_rat_39um', check_latest=False); \
-"
+ENV ATLAS_FETCH_TIMEOUT=1200
+COPY fetch_atlases.py /fetch_atlases.py
+RUN timeout "${ATLAS_FETCH_TIMEOUT}" python /fetch_atlases.py
 
 # Expose the port
 ENV INTERNAL_PORT=5008
