@@ -5,7 +5,7 @@
 [![Tests](https://github.com/m-beau/pixelmap/actions/workflows/tests.yml/badge.svg)](https://github.com/m-beau/pixelmap/actions/workflows/tests.yml)
 [![Documentation](https://readthedocs.org/projects/pixelmap-neuropixels/badge/?version=latest)](https://pixelmap-neuropixels.readthedocs.io/en/latest/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
 <div align="center">
 
