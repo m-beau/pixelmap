@@ -20,6 +20,8 @@ from brainglobe_atlasapi.list_atlases import (
     get_downloaded_atlases,
 )
 
+from pixelmap.anatomy.transform import probe_axis
+
 _DEFAULT_ATLAS = "allen_mouse_25um"
 
 
@@ -311,6 +313,19 @@ def volume_center_um(name: str = _DEFAULT_ATLAS) -> tuple[float, float, float]:
     return (n_ap * res[0] / 2.0, n_ml * res[2] / 2.0, n_dv * res[1] / 2.0)
 
 
+def _voxel_indices(coords_um: np.ndarray, voxel_size: np.ndarray) -> np.ndarray:
+    """``(N, 3)`` atlas ``(AP, ML, DV)`` µm → integer ``(ap, dv, ml)`` indices.
+
+    The canonical annotation is indexed ``(AP, DV, ML)`` while coordinates are
+    passed around as ``(AP, ML, DV)``, so the last two swap. ``voxel_size`` is
+    already in annotation order ``(AP, DV, ML)`` — see
+    :func:`canonical_annotation`. Kept in one place because getting this
+    transposition wrong is silent for isotropic atlases.
+    """
+    c = np.asarray(coords_um, dtype=float)
+    return np.round(c[:, [0, 2, 1]] / np.asarray(voxel_size, dtype=float)).astype(int)
+
+
 def lookup_regions(
     atlas_name: str,
     atlas_coords_um: np.ndarray,
@@ -335,14 +350,12 @@ def lookup_regions(
         raise ValueError(f"atlas_coords_um must be (N, 3); got {coords.shape}")
 
     # canonical annotation is indexed (AP, DV, ML); convert µm → voxel.
-    ap_idx = np.round(coords[:, 0] / voxel_size[0]).astype(int)
-    dv_idx = np.round(coords[:, 2] / voxel_size[1]).astype(int)
-    ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
+    idx = _voxel_indices(coords, voxel_size)
 
     shape = annotation.shape
 
     results: list[RegionInfo | None] = []
-    for ap, dv, ml in zip(ap_idx, dv_idx, ml_idx):
+    for ap, dv, ml in idx:
         if not (0 <= ap < shape[0] and 0 <= dv < shape[1] and 0 <= ml < shape[2]):
             results.append(None)
             continue
@@ -352,6 +365,84 @@ def lookup_regions(
             continue
         results.append(_region_info_from_id(atlas, region_id))
     return results
+
+
+def surface_point_um(
+    atlas_name: str,
+    point_atlas: np.ndarray | tuple[float, float, float],
+    *,
+    pitch_deg: float = 0.0,
+    yaw_deg: float = 0.0,
+    step_um: float | None = None,
+) -> tuple[float, float, float] | None:
+    """Where a probe trajectory enters the brain, as ``(AP, ML, DV)`` µm.
+
+    Walks *down* the trajectory that passes through ``point_atlas`` at the
+    given pose and returns the first sample sitting on a labelled voxel —
+    i.e. the point at which the shank crosses the brain surface.
+
+    The result depends only on the *line*, not on which of its points is
+    passed in: calling this with the tip or with the insertion point gives
+    the same answer. That is what lets the GUI's snap button behave
+    identically in tip-entry and insertion-entry mode.
+
+    Args:
+        atlas_name: brainglobe atlas identifier.
+        point_atlas: any ``(AP, ML, DV)`` µm point on the trajectory.
+        pitch_deg: AP tilt — see :mod:`pixelmap.anatomy.transform`.
+        yaw_deg: ML tilt — see :mod:`pixelmap.anatomy.transform`.
+        step_um: march step. Defaults to the finest voxel dimension, so a
+            thin dorsal layer is never stepped over.
+
+    Returns:
+        The entry point, or ``None`` if the trajectory misses the brain
+        entirely (it never crosses a labelled voxel).
+    """
+    annotation, voxel_size = canonical_annotation(atlas_name)
+    axis = probe_axis(pitch_deg, yaw_deg)          # up the shank, (AP, ML, DV)
+    p = np.asarray(point_atlas, dtype=float).reshape(3)
+
+    n_ap, n_dv, n_ml = annotation.shape
+    # Volume extent in coordinate order (AP, ML, DV); note voxel_size is in
+    # annotation order (AP, DV, ML), hence the crossed indices.
+    extent = np.array([n_ap * voxel_size[0],
+                       n_ml * voxel_size[2],
+                       n_dv * voxel_size[1]])
+
+    # Clip the infinite trajectory to the volume's bounding box, rather than
+    # marching a fixed window around `point_atlas`. The insertion point is by
+    # construction at or above the dorsal surface and is routinely *outside*
+    # the volume, so a fixed window is not guaranteed to reach the brain —
+    # and would make the answer depend on which anchor was passed in.
+    t_lo, t_hi = -np.inf, np.inf
+    for i in range(3):
+        if abs(axis[i]) < 1e-12:                   # trajectory parallel to this face
+            if not (0.0 <= p[i] <= extent[i]):
+                return None
+            continue
+        t0, t1 = (0.0 - p[i]) / axis[i], (extent[i] - p[i]) / axis[i]
+        t_lo, t_hi = max(t_lo, min(t0, t1)), min(t_hi, max(t0, t1))
+    if t_hi < t_lo:
+        return None
+
+    step = float(np.min(voxel_size)) if step_um is None else float(step_um)
+    if step <= 0:
+        raise ValueError(f"step_um must be positive; got {step_um!r}")
+
+    # March from the top of the clipped segment downward, so the first hit is
+    # the entry point rather than the exit wound.
+    ts = np.arange(t_hi, t_lo - step, -step)
+    pts = p[None, :] + ts[:, None] * axis[None, :]
+
+    idx = _voxel_indices(pts, voxel_size)
+    in_bounds = ((idx >= 0) & (idx < np.array([n_ap, n_dv, n_ml]))).all(axis=1)
+    labels = np.zeros(len(ts), dtype=annotation.dtype)
+    labels[in_bounds] = annotation[idx[in_bounds, 0], idx[in_bounds, 1], idx[in_bounds, 2]]
+
+    hit = np.flatnonzero(labels > 0)
+    if hit.size == 0:
+        return None
+    return tuple(float(v) for v in pts[hit[0]])
 
 
 @functools.lru_cache(maxsize=4096)
