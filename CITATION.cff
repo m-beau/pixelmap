@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: 'PixelMap: A Browser-Based Tool for Wiring-Aware, Anatomy- and Activity-Guided Design of Neuropixels
+  Channelmaps'
+type: software
+authors:
+- given-names: Maxime
+  family-names: Beau
+  orcid: https://orcid.org/0000-0002-8907-6612
+- given-names: Julie M. J.
+  family-names: Fabre
+  orcid: https://orcid.org/0000-0003-0550-0410
+- given-names: Christian
+  family-names: Tabedzki
+  orcid: https://orcid.org/0000-0001-8409-6094
+- given-names: Jorge
+  family-names: Yanar
+  orcid: https://orcid.org/0000-0003-1416-3567
+- given-names: Carlos D.
+  family-names: Brody
+  orcid: https://orcid.org/0000-0002-4201-561X
+repository-code: https://github.com/m-beau/pixelmap
+license: GPL-3.0-only
