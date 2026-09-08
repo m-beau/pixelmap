@@ -122,6 +122,14 @@ You can also drag boxes to (de)select ranges of electrodes with one of five box 
   - **Deselect dependents** — drag over unavailable (black) electrodes to find the selected (red) electrodes that blocked them due to shared lines or ADCs, and deselect those selected electrodes, freeing the blocked electrodes and all their other dependents.
 ```
 
+##### In which order are electrodes selected inside a box?
+
+Within a single drag, electrodes are processed in **ascending order of shank ID, then of electrode ID** — that is, starting from the **bottom of the leftmost shank** and working upwards (and left-to-right within a row). This is simply the order in which electrodes are stored in the probe's position table, which the plot preserves.
+
+The order is invisible most of the time, because every electrode in the box ends up in the same state either way. It becomes visible when the box contains **more available electrodes than you have readout channels left**. PixelMap stops selecting as soon as the channel budget for the probe (384, or 1536 for Quad Base) is full, so electrodes higher up the shank — or on later shanks — are silently left unselected. If you wanted the top of the shank instead, clear part of the selection and drag a box covering only the stretch you want.
+
+The same first-come-first-served rule applies to textual selection (electrode IDs are consumed in the order you write them).
+
 :::{tip}
 The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere elese on the probe then use the regular selection box to select the remaining available electrodes (your target).
 :::
@@ -211,7 +219,7 @@ PixelMap draws a thin colored **sidebar bar** just outside the shank outline for
 
 ### Adjusting the colormap range
 
-The **vmin** and **vmax** inputs are auto-populated from the file's minimum and maximum values. Edit either input to rescale the colormap live — useful for bringing out contrast in a narrow activity band.
+The **vmin** and **vmax** inputs are auto-populated with the file's 2nd and 98th percentiles, so the heatmap has visible structure as soon as it loads. Values outside the range are simply clamped to the end colors. Edit either input to rescale the colormap live.
 
 ### Clearing the overlay
 
@@ -255,6 +263,22 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 | **Pitch** | degrees | AP tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe forward (toward +AP). Corresponds to the rotation of the stereotaxic arm around the ML axis. |
 | **Yaw** | degrees | ML tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe to the right (toward +ML). Corresponds to rotation around the AP axis. |
 | **Shank orientation** | degrees | For multi-shank probes only: rotation of the shank line around the probe's own long axis. `0°` = shanks arrayed along +ML (probe inserted side-on); `90°` = shanks arrayed along +AP (probe inserted front-to-back). Has no effect on single-shank probes. |
+
+### Tip depth below the brain surface
+
+Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe tip to the brain (not skull) surface, measured **along the probe axis**. This maps onto the number you read off the micromanipulator during an insertion (how far the tip has travelled since the shank broke the surface), so it is the most direct way to check that a set of atlas coordinates matches what you actually did (or plan to do) at the rig.
+
+On multi-shank probes the tip is the **lowest electrode of shank 0** — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
+
+It is computed by walking up the shank axis from the tip until the axis leaves the annotated atlas volume, and taking the *outermost* crossing. An insertion that passes through a ventricle or between two structures therefore still reports the depth below the true brain surface, not the depth below the first gap.
+
+The box is **empty until you compute an overlay**, and goes back to empty when you click **Clear overlay**: it describes the anatomy currently on screen, so it never shows a number for a pose that hasn't been computed. Once an overlay exists it updates live along with the bands — change any tip coordinate, pitch or yaw and it follows immediately.
+
+::::{note}
+This is a **readout, not an input** — you cannot type a surface-relative depth in because it is an underconstrained instruction (infinitely many (AP, ML, DV) positions sit the same distance below the surface). Use the tip coordinates plus the tilts to move the probe in the atlas.
+
+With an overlay computed, the readout still shows a dash when the depth is undefined — most commonly when the tip sits outside the brain.
+::::
 
 ### Bregma-relative coordinate mode
 
