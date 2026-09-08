@@ -4,7 +4,7 @@ This directory contains the automated test suite for PixelMap (Neuropixels Chann
 
 ## Overview
 
-The test suite validates the core functionality of PixelMap to ensure reliable generation of IMRO files for Neuropixels probes. Tests are designed to be comprehensive yet fast, providing confidence that the software works correctly.
+The test suite validates PixelMap end to end: reliable generation of IMRO files for Neuropixels probes, and both power features — the activity survey ⚡ and anatomical 🧠 overlays — at the computation layer *and* through the GUI handlers users actually trigger. Tests are designed to be comprehensive yet fast (the whole suite runs in a few seconds and needs no network access), providing confidence that the software works correctly.
 
 ## Test Structure
 
@@ -45,6 +45,64 @@ Complete workflow tests simulating real usage:
 - Preset selection → IMRO generation → file saving → file loading
 - Custom electrode selection workflow
 - Multiple presets for the same probe
+
+### Activity survey overlay ⚡
+
+#### `test_survey.py` (17 tests)
+The survey computation layer (`utils/survey.py`):
+- Parsing SpikeGLX-exported survey `.txt` files (header validation, dtypes, malformed input)
+- Matching survey rows to probe electrodes, including the shank-local vs global x-offset convention
+- Rejecting surveys exported from a different probe type
+- `default_survey_range()` — the percentile-based initial colormap bounds (heavy-tailed
+  surveys, constant surveys, non-finite values, empty input)
+
+### Anatomical overlay 🧠
+
+Every anatomy test runs against a **small fake atlas** patched over
+`BrainGlobeAtlas`, so the suite never downloads atlas data and stays offline-safe.
+
+#### `test_anatomy_atlas.py` (10 tests)
+The BrainGlobe wrapper (`anatomy/atlas.py`): voxel indexing, out-of-bounds and
+unannotated lookups, region metadata resolution, and reorientation of atlases whose
+native voxel orientation is not Allen's `asr`.
+
+#### `test_anatomy_transform.py` (18 tests)
+The probe-local → atlas transform (`anatomy/transform.py`): pitch, yaw, shank
+orientation, composition order, and bregma-relative coordinate conversion.
+
+#### `test_anatomy_visualization.py` (5 tests)
+Sampling regions along a shank and collapsing them into contiguous depth bands
+(`anatomy/visualization.py`).
+
+#### `test_anatomy_schematic.py` (5 tests)
+The three-slice locator figure (`anatomy/schematic.py`).
+
+#### `test_anatomy_reference.py` (6 tests)
+Per-atlas bregma / squish / tilt reference parameters and landmark policy.
+
+#### `test_anatomy_surface_depth.py` (20 tests)
+The tip-depth-below-brain-surface readout (`anatomy/regions.py`,
+`anatomy/transform.probe_axis_up`): depth against a known surface, tilted
+trajectories, the outermost-crossing rule (an internal gap such as a ventricle is
+not mistaken for the surface), and the cases where depth is undefined.
+
+### GUI overlays (both)
+
+#### `test_gui_overlays.py` (33 tests)
+Drives the `ChannelmapGUI` handlers themselves — the code path a user triggers by
+clicking *Load survey overlay* or *Compute anatomical overlay* — and asserts on the
+resulting Bokeh data sources and widget state:
+- Survey loading: values mapped to the right electrodes, sidebar bars drawn and
+  colored, electrode selection colors left untouched
+- Survey colormap defaults: a heavy-tailed survey renders with visible contrast
+  *before* any vmin/vmax edit (regression test), live rescaling, inverted ranges refused
+- Survey rejection paths (wrong extension, unparseable, wrong probe, no file) and clearing,
+  including the automatic clear on probe-type switch
+- Anatomy overlay: bands / labels / boundaries / legend / locator populated for the
+  traversed regions, per-shank coverage, live update when the pose changes, clearing
+- Tip depth readout: value, tilt behaviour, out-of-brain and not-yet-downloaded states
+  (asserting a readout refresh never triggers an atlas download)
+- Both overlays active at once, with region labels shifting outward to clear the survey bars
 
 ### `fixtures/`
 Sample IMRO files for testing file I/O:
@@ -94,10 +152,28 @@ The test suite covers:
   - `read_imro_file()` - File reading
   - `parse_imro_file()` - Content parsing
 
+- **Activity survey overlay** (`utils/survey.py`, `gui/gui.py`):
+  - `parse_survey_file()` - SpikeGLX `.txt` parsing
+  - `match_survey_to_electrodes()` / `validate_probe_match()` - contact matching
+  - `default_survey_range()` - initial colormap bounds
+  - `ChannelmapGUI.load_survey_file()` / `clear_survey_overlay()` / `_on_survey_range_change()`
+
+- **Anatomical overlay** (`anatomy/*`, `gui/gui.py`):
+  - `lookup_regions()` / `canonical_annotation()` - atlas indexing and reorientation
+  - `probe_to_atlas()` / `probe_axis_up()` / `bregma_to_atlas_um()` - pose geometry
+  - `compute_region_bands()` - depth bands along each shank
+  - `render_locator()` - three-slice locator figure
+  - `tip_depth_below_surface_um()` - depth-below-surface readout
+  - `ChannelmapGUI.compute_anatomy_overlay()` / `clear_anatomy_overlay()` /
+    `_update_tip_depth_readout()`
+
 - **All probe types**:
   - Neuropixels 1.0 (10 subtypes)
   - Neuropixels 2.0 single-shank (3 subtypes)
   - Neuropixels 2.0 four-shank (3 subtypes)
+
+**No network access is required.** The anatomy tests patch `BrainGlobeAtlas` with a
+small in-memory fake volume, so no atlas is ever downloaded during a test run.
 
 ## Continuous Integration
 

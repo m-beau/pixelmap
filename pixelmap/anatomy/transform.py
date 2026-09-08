@@ -98,6 +98,18 @@ def _R_yaw(yaw_rad: float) -> np.ndarray:
     ])
 
 
+def probe_axis_up(pitch_deg: float = 0.0, yaw_deg: float = 0.0) -> np.ndarray:
+    """Unit vector pointing from the tip *up the shank*, in atlas ``(AP, ML, DV)``.
+
+    This is the probe's own long axis — the direction the shank retreats along
+    when it is pulled out of the brain. For an untilted probe it is
+    ``(0, 0, -1)`` (straight up = decreasing DV); pitch and yaw rotate it
+    exactly as they rotate the shank in :func:`probe_to_atlas`.
+    """
+    R = _R_yaw(np.deg2rad(yaw_deg)) @ _R_pitch(np.deg2rad(pitch_deg))
+    return R @ np.array([0.0, 0.0, -1.0])
+
+
 def probe_to_atlas(
     electrode_xy: np.ndarray,
     tip_atlas: np.ndarray | tuple[float, float, float],

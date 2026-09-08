@@ -5,6 +5,7 @@ Using Bokeh for better interactivity with hover, click, and rectangular selectio
 """
 
 import base64
+import functools
 import gc
 import json
 import logging
@@ -51,8 +52,10 @@ from pixelmap.constants import (
 )
 from pixelmap.types import Electrode
 from pixelmap.utils import imro, survey
+from pixelmap.utils.survey import default_survey_range
 from pixelmap.utils import url_share
 from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.regions import tip_depth_below_surface_um
 from pixelmap.anatomy.schematic import render_locator
 from pixelmap.anatomy.transform import bregma_to_atlas_um
 from pixelmap.anatomy.visualization import compute_region_bands
@@ -69,6 +72,23 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions
 pn.extension("tabulator", notifications=True)
+
+
+@functools.lru_cache(maxsize=16)
+def _asset_data_uri(filename: str) -> str:
+    """Inline a GUI asset as a ``data:`` URI so HTML panes can show it.
+
+    Panel doesn't serve ``assets/`` over HTTP, and these icons are a few KB
+    each, so embedding them keeps the in-GUI documentation self-contained.
+    Returns ``""`` for a missing file, so a stray asset costs an empty image
+    rather than a failed page render.
+    """
+    path = GUI_ASSETS_DIR / filename
+    try:
+        b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
+    except OSError:
+        return ""
+    return f"data:image/png;base64,{b64}"
 
 
 def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
@@ -1305,6 +1325,10 @@ class ChannelmapGUI(param.Parameterized):
         # Overlay now exists → later input edits live-update it.
         self._anatomy_overlay_active = True
         self.anatomy_locator_section.visible = True
+        # Only now can the depth readout show a value: the overlay is up, and
+        # computing it downloaded the atlas if it wasn't already cached (the
+        # readout refuses to trigger a download itself).
+        self._update_tip_depth_readout()
         self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
         self.compute_anatomy_button.disabled = False
 
@@ -1319,6 +1343,7 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_legend.object = self._empty_legend_html()
         self.anatomy_locator.object = ""
         self.anatomy_locator_section.visible = False
+        self._update_tip_depth_readout()  # back to a blank readout
 
     def _fig_to_locator_html(self, fig) -> str:
         """Convert a matplotlib figure to an HTML img with click-to-lightbox."""
@@ -1480,6 +1505,86 @@ class ChannelmapGUI(param.Parameterized):
         """Refresh the coordinate note when the atlas selection changes."""
         self.anatomy_coord_note.object = self._anatomy_coord_note_html()
 
+    def _atlas_is_downloaded(self) -> bool:
+        """True if the selected atlas is on disk, so reading it won't download."""
+        try:
+            return anatomy_atlas.is_downloaded(str(self.atlas_name_input.value).strip())
+        except Exception:
+            return False
+
+    def _tip_depth_below_surface(self) -> float | None:
+        """Tip-to-brain-surface distance along the probe axis, in µm.
+
+        ``None`` when it can't be computed: the atlas isn't downloaded (we
+        never trigger a download just to refresh a readout), the tip is outside
+        the brain, or the atlas lookup failed.
+        """
+        if not self._atlas_is_downloaded():
+            return None
+        try:
+            return tip_depth_below_surface_um(
+                self._tip_atlas_um(),
+                pitch_deg=float(self.pitch_input.value),
+                yaw_deg=float(self.yaw_input.value),
+                atlas_name=str(self.atlas_name_input.value).strip(),
+            )
+        except Exception as exc:  # a readout must never sink the GUI
+            print(f"Tip depth lookup failed: {exc}")
+            return None
+
+    def _tip_depth_readout_html(self) -> str:
+        """Banner text for the depth-below-surface readout above the tip fields.
+
+        Blank until an overlay exists: before Compute (or after Clear) there is
+        no anatomy on screen for a depth to refer to, and a number sitting there
+        would look like a live measurement of a pose nothing has been checked
+        against.
+        """
+        if not getattr(self, "_anatomy_overlay_active", False):
+            value_html = (
+                '<span style="color:#777;">—</span>'
+                '<span style="color:#777; font-weight:normal;"> '
+                "(compute the overlay below)</span>"
+            )
+        elif not self._atlas_is_downloaded():
+            value_html = (
+                '<span style="color:#777;">—</span>'
+                '<span style="color:#777; font-weight:normal;"> '
+                "(available once the atlas is downloaded)</span>"
+            )
+        else:
+            depth = self._tip_depth_below_surface()
+            if depth is None:
+                value_html = (
+                    '<span style="color:#b00;">—</span>'
+                    '<span style="color:#b00; font-weight:normal;"> '
+                    "(tip outside the brain)</span>"
+                )
+            else:
+                value_html = (
+                    f'<span style="color:#0b5394;">{depth:,.0f} µm</span>'
+                    f'<span style="color:#555; font-weight:normal;"> '
+                    f"({depth / 1000:.2f} mm)</span>"
+                )
+        return (
+            '<div style="font-size: 12px; background: #eef4fb; border: 1px solid #b6cde8; '
+            'border-radius: 4px; padding: 5px 8px; margin: 2px 0 0 0;">'
+            '<b>Tip depth below brain surface:</b> '
+            f'<b>{value_html}</b>'
+            '<div style="font-size: 10px; color: #666; margin-top: 2px;">'
+            "Read-only — the straight-line distance from the tip to where the "
+            "shank axis exits the atlas volume. On multi-shank probes the tip "
+            "is the lowest electrode of <b>shank 0</b>, i.e. the bottom of the "
+            "leftmost shank."
+            "</div></div>"
+        )
+
+    def _update_tip_depth_readout(self, *events):
+        """Refresh the depth readout (cheap; skipped if the widget isn't built)."""
+        if not hasattr(self, "tip_depth_readout"):
+            return
+        self.tip_depth_readout.object = self._tip_depth_readout_html()
+
     def _atlas_tip_center(self, name: str):
         """Atlas center as ``(AP, ML, DV)`` µm, or ``None`` if not readable cheaply.
 
@@ -1609,6 +1714,7 @@ class ChannelmapGUI(param.Parameterized):
         if getattr(self, "_suppress_anatomy_recompute", False):
             return
         if getattr(self, "_anatomy_overlay_active", False):
+            # compute_anatomy_overlay refreshes the depth readout on its way out.
             self.compute_anatomy_overlay()
 
     def _update_anatomy_legend(self, bands: list):
@@ -1798,15 +1904,17 @@ class ChannelmapGUI(param.Parameterized):
 
         self.survey_values = values
 
-        vals = np.array(list(values.values()), dtype=float)
-        vmin = float(np.nanmin(vals))
-        vmax = float(np.nanmax(vals))
-        if vmax <= vmin:
-            vmax = vmin + 1.0  # avoid degenerate colormap range
+        # Robust percentile bounds, not the raw min/max: a few very active
+        # contacts would otherwise flatten the whole heatmap to the dark end of
+        # the colormap, making the overlay look like it hadn't loaded at all.
+        vmin, vmax = default_survey_range(list(values.values()))
 
+        # Widgets first, colormap second: the range widgets' watchers are
+        # suspended while they're updated, so setting the colormap last leaves
+        # it as the source of truth for this first render.
+        self._set_survey_range_inputs(vmin, vmax, enabled=True)
         self.survey_cmap.low = vmin
         self.survey_cmap.high = vmax
-        self._set_survey_range_inputs(vmin, vmax, enabled=True)
         if self.survey_color_bar is not None:
             self.survey_color_bar.visible = True
             self.survey_color_bar_title.visible = True
@@ -2437,6 +2545,11 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_coord_note = pn.pane.HTML(
             self._anatomy_coord_note_html(), sizing_mode="stretch_width", margin=(0, 0)
         )
+        # Passive depth readout: how far the tip sits below the brain surface,
+        # measured along the probe axis. Derived from the pose, never an input.
+        self.tip_depth_readout = pn.pane.HTML(
+            "", sizing_mode="stretch_width", margin=(0, 0, 4, 0)
+        )
         self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
 
@@ -2453,6 +2566,7 @@ class ChannelmapGUI(param.Parameterized):
                    self.tilt_input):
             _w.param.watch(self._recompute_anatomy_if_active, "value")
         self._update_landmark_labels()  # name the toggle/fields for the default atlas
+        self._update_tip_depth_readout()
         self.anatomy_help = pn.pane.HTML(
             (
                 '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
@@ -2556,6 +2670,82 @@ class ChannelmapGUI(param.Parameterized):
         """Reactive method that recreates buttons when color changes"""
         return self.create_download_buttons()
 
+    _SELECTION_TOOL_DOCS = (
+        (
+            "selector.png",
+            "Select",
+            "Selects every available (grey) electrode inside the box. "
+            "Electrodes already blocked (black) are skipped.",
+        ),
+        (
+            "deselector.png",
+            "Deselect",
+            "Deselects every selected (red) electrode inside the box, freeing "
+            "the electrodes they were blocking.",
+        ),
+        (
+            "zigzag_selector.png",
+            "Zigzag-select",
+            "Selects only the electrodes of a fixed checkerboard pattern inside "
+            "the box (every other site on 1.0; the 0, 3, 4, 7… pattern on 2.0), "
+            "for sparse coverage over a longer stretch of shank.",
+        ),
+        (
+            "interleaved_selector.png",
+            "Interleaved-select",
+            "Selects only every other <i>pair</i> of rows inside the box "
+            "(sites 0, 1, 4, 5, 8, 9…), for two-column coverage at half density.",
+        ),
+        (
+            "dependent_deselector.png",
+            "Deselect dependents",
+            "Frees up blocked electrodes. Drag over <b>black (unavailable)</b> "
+            "electrodes you wish you could select: PixelMap looks up which "
+            "<font color='#c00000'><b>red</b></font> electrodes are blocking "
+            "them through shared readout lines / ADCs, and deselects "
+            "<i>those</i>: the red ones, wherever they sit on the probe. "
+            "The black electrodes inside your box turn grey and become "
+            "selectable.",
+        ),
+    )
+
+    def _selection_tools_help_html(self) -> str:
+        """In-GUI reference for the five drag-box tools in the plot toolbar.
+
+        Most users never open the online docs, so the tools — "deselect
+        dependents" above all, whose target is *outside* the box you drag —
+        are explained here, right next to the plot.
+        """
+        rows = []
+        for icon, name, description in self._SELECTION_TOOL_DOCS:
+            src = _asset_data_uri(icon)
+            rows.append(
+                '<tr>'
+                '<td style="width: 34px; vertical-align: top; padding: 4px 6px 4px 0;">'
+                f'<img src="{src}" style="width: 28px; height: 28px; display: block;">'
+                "</td>"
+                '<td style="vertical-align: top; padding: 4px 0;">'
+                f"<b>{name}</b><br>{description}"
+                "</td></tr>"
+            )
+        return (
+            '<div style="font-size: 13px; line-height: 1.4; text-align: justify;">'
+            "Click any electrode to toggle it on or off. To edit many at once, "
+            "pick one of the five drag-box tools in the toolbar to the right of "
+            "the probe plot (only one is active at a time) and drag a rectangle "
+            "over the probe:<br>"
+            '<table style="border-collapse: collapse; margin: 6px 0;">'
+            + "".join(rows) +
+            "</table>"
+            "<b>Electrodes selection order.</b> Within one box, electrodes are "
+            "processed in ascending order of shank, then of electrode ID "
+            "(i.e. starting from the <b>bottom of the leftmost shank</b> and "
+            "working up).<br><br>"
+            "<b>Ctrl/⌘+Z</b> undoes a whole drag as one step; "
+            "<b>Ctrl/⌘+Shift+Z</b> redoes it."
+            "</div>"
+        )
+
     def create_layout(self):
         """Create the main Panel layout"""
 
@@ -2601,6 +2791,9 @@ class ChannelmapGUI(param.Parameterized):
             Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like. Use this IMRO file in SpikeGLX to record from the selected channels, and then use the Kilosort .json file to spikesort your data accordingly.<br><br>
             </div>
             """),
+
+            pn.pane.Markdown("## Selection tools", margin=(10, 0, -5, 10)),
+            pn.pane.HTML(self._selection_tools_help_html()),
 
             styles={
                 "position": "sticky",
@@ -2677,6 +2870,7 @@ class ChannelmapGUI(param.Parameterized):
                 pn.pane.Markdown("## Anatomical overlay 🧠", margin=(-5, 0, 0, 0)),
                 self.atlas_name_input,
                 self.anatomy_coord_note,
+                self.tip_depth_readout,
                 pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
                 pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
                 self.anatomy_help,

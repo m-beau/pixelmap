@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -113,3 +114,47 @@ def test_match_handles_constant_offset(positions_df_2_0_4shanks):
     values, n_unmatched = survey.validate_probe_match(df, positions_df_2_0_4shanks)
     assert n_unmatched == 0
     assert len(values) == len(positions_df_2_0_4shanks)
+
+
+class TestDefaultSurveyRange:
+    """Initial colormap bounds: robust enough that the overlay reads on sight."""
+
+    def test_tails_are_clipped_off_a_heavy_tailed_survey(self):
+        rng = np.random.default_rng(0)
+        vals = list(rng.gamma(2.0, 1.0, size=500)) + [500.0, 900.0]
+        vmin, vmax = survey.default_survey_range(vals)
+        assert vmin > min(vals)
+        assert vmax < max(vals) / 10  # the two outliers no longer set the scale
+
+    def test_bulk_of_the_data_stays_inside_the_range(self):
+        rng = np.random.default_rng(1)
+        vals = rng.gamma(2.0, 1.0, size=1000)
+        vmin, vmax = survey.default_survey_range(vals)
+        inside = ((vals >= vmin) & (vals <= vmax)).mean()
+        assert inside > 0.9
+
+    def test_percentiles_are_configurable(self):
+        vals = list(range(101))
+        assert survey.default_survey_range(vals, percentiles=(0.0, 100.0)) == (0.0, 100.0)
+        assert survey.default_survey_range(vals, percentiles=(10.0, 90.0)) == (10.0, 90.0)
+
+    def test_constant_survey_gets_a_non_degenerate_range(self):
+        vmin, vmax = survey.default_survey_range([4.2] * 50)
+        assert vmax > vmin
+
+    def test_nearly_constant_survey_falls_back_to_the_full_range(self):
+        # Percentiles collapse (99% of values identical) but min/max still differ.
+        vals = [1.0] * 500 + [9.0]
+        vmin, vmax = survey.default_survey_range(vals)
+        assert (vmin, vmax) == (1.0, 9.0)
+
+    def test_non_finite_values_are_ignored(self):
+        vmin, vmax = survey.default_survey_range(
+            [float("nan"), float("inf"), -float("inf")] + list(range(101))
+        )
+        assert np.isfinite(vmin) and np.isfinite(vmax)
+        assert 0.0 <= vmin < vmax <= 100.0
+
+    def test_empty_survey_gets_a_safe_default(self):
+        assert survey.default_survey_range([]) == (0.0, 1.0)
+        assert survey.default_survey_range([float("nan")]) == (0.0, 1.0)

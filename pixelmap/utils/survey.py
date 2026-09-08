@@ -18,6 +18,45 @@ SURVEY_COLUMNS = ("shank", "xum", "zum", "val")
 # that while still rejecting surveys from a genuinely different probe.
 DEFAULT_MATCH_TOLERANCE_UM = 35.0
 
+# Percentiles used to seed the colormap when a survey is loaded. Survey
+# metrics (spike rate, amplitude) are heavy-tailed: a handful of very active
+# contacts stretch a raw min→max range so far that every other contact lands
+# in the bottom of the colormap and the overlay reads as uniformly dark.
+# Clipping the tails gives a heatmap with visible structure on first render.
+DEFAULT_RANGE_PERCENTILES = (2.0, 98.0)
+
+
+def default_survey_range(
+    values,
+    percentiles: tuple[float, float] = DEFAULT_RANGE_PERCENTILES,
+) -> tuple[float, float]:
+    """Pick sensible initial ``(vmin, vmax)`` colormap bounds for a survey.
+
+    Uses robust percentiles rather than the raw min/max (see
+    :data:`DEFAULT_RANGE_PERCENTILES`), falling back to the full range, and
+    finally to a unit-wide range, whenever the percentiles collapse to a
+    single value. The result is always a non-degenerate ``vmin < vmax``.
+
+    Args:
+        values: iterable of survey values (NaNs and infinities are ignored).
+        percentiles: ``(low, high)`` percentiles to clip the tails at.
+
+    Returns:
+        ``(vmin, vmax)`` with ``vmax > vmin``.
+    """
+    vals = np.asarray(list(values), dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return 0.0, 1.0
+
+    low_pct, high_pct = percentiles
+    vmin, vmax = (float(v) for v in np.percentile(vals, [low_pct, high_pct]))
+    if vmax <= vmin:  # tails clipped away all the contrast — use the full range
+        vmin, vmax = float(vals.min()), float(vals.max())
+    if vmax <= vmin:  # genuinely constant survey — avoid a degenerate colormap
+        vmax = vmin + 1.0
+    return vmin, vmax
+
 
 def parse_survey_file(content: str) -> pd.DataFrame:
     """
