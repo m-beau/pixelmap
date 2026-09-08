@@ -82,10 +82,13 @@ def parse_survey_file(content: str) -> pd.DataFrame:
             f"Expected header: Shank\\tXum\\tZum\\tVal."
         )
 
-    df = df[list(SURVEY_COLUMNS)].copy()
-    for col in ("shank", "xum", "zum"):
-        df[col] = pd.to_numeric(df[col], errors="raise").astype(int)
-    df["val"] = pd.to_numeric(df["val"], errors="raise").astype(float)
+    df = df[list(SURVEY_COLUMNS)]
+    df = df.assign(
+        shank=pd.to_numeric(df["shank"], errors="raise"),
+        xum=pd.to_numeric(df["xum"], errors="raise"),
+        zum=pd.to_numeric(df["zum"], errors="raise"),
+        val=pd.to_numeric(df["val"], errors="raise"),
+    ).astype({"shank": int, "xum": int, "zum": int, "val": float})
     return df
 
 
