@@ -268,16 +268,12 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 
 Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe tip to the brain (not skull) surface, measured **along the probe axis**. This maps onto the number you read off the micromanipulator during an insertion (how far the tip has travelled since the shank broke the surface), so it is the most direct way to check that a set of atlas coordinates matches what you actually did (or plan to do) at the rig.
 
-On multi-shank probes the tip is the **lowest electrode of shank 0** — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
+On multi-shank probes **the tip is the lowest electrode of shank 0** — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
 
 It is computed by walking up the shank axis from the tip until the axis leaves the annotated atlas volume, and taking the *outermost* crossing. An insertion that passes through a ventricle or between two structures therefore still reports the depth below the true brain surface, not the depth below the first gap.
 
-The box is **empty until you compute an overlay**, and goes back to empty when you click **Clear overlay**: it describes the anatomy currently on screen, so it never shows a number for a pose that hasn't been computed. Once an overlay exists it updates live along with the bands — change any tip coordinate, pitch or yaw and it follows immediately.
-
 ::::{note}
 This is a **readout, not an input** — you cannot type a surface-relative depth in because it is an underconstrained instruction (infinitely many (AP, ML, DV) positions sit the same distance below the surface). Use the tip coordinates plus the tilts to move the probe in the atlas.
-
-With an overlay computed, the readout still shows a dash when the depth is undefined — most commonly when the tip sits outside the brain.
 ::::
 
 ### Bregma-relative coordinate mode
