@@ -30,13 +30,14 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
 # multi-hundred-MB downloads on first use.  Stored in ~/.brainglobe/ inside
 # the image layer; mount a Docker volume there in production to persist any
 # additional atlases users request across container restarts.
-# check_latest=False avoids hanging the build if the GIN server is down.
+#
+# Best-effort by design: GIN (the atlas host) intermittently 403s CI runners,
+# and a warm cache is an optimisation, not a requirement -- the app downloads
+# whatever is missing on demand.  The script retries, then exits 0 regardless,
+# so an outage at GIN cannot block a release build.  See the script for why
+# check_latest=False does not make this safe on its own.
 ENV PATH="/app/.venv/bin:$PATH"
-RUN python -c "\
-from brainglobe_atlasapi import BrainGlobeAtlas; \
-BrainGlobeAtlas('allen_mouse_25um', check_latest=False); \
-BrainGlobeAtlas('whs_sd_rat_39um', check_latest=False); \
-"
+RUN python /app/scripts/prefetch_atlases.py
 
 # Expose the port
 ENV INTERNAL_PORT=5008
