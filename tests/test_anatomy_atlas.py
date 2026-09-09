@@ -7,6 +7,9 @@ that exercises the indexing logic without touching the network.
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import numpy as np
 import pytest
 
@@ -308,3 +311,71 @@ class TestRegistryCachePaths:
 
         monkeypatch.setattr(atlas_module, "IS_V3", False)
         assert atlas_module._registry_cache_paths(tmp_path) == [v2, v3]
+
+
+class TestAtlasesAreReleased:
+    """Atlas objects must not outlive ``get_atlas``'s cache.
+
+    Regression test for a production OOM: ``_region_info_from_id`` used to take
+    the atlas *object* as its cache key. ``lru_cache`` holds keys alive, so
+    every atlas ever looked up stayed resident with its annotation volume —
+    hundreds of MB each — and eviction from ``get_atlas`` leaked a fresh copy
+    per lookup instead of reusing one.
+    """
+
+    @staticmethod
+    def _tracked_atlas_cls(built):
+        """A fake atlas class that weakly records every instance it builds."""
+
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.annotation = np.ones((2, 2, 2), dtype=np.int32)
+                self.structures = {
+                    1: {"id": 1, "acronym": "R", "name": "Region",
+                        "rgb_triplet": [1, 2, 3]}
+                }
+                built.append(weakref.ref(self))
+
+        return _A
+
+    @staticmethod
+    def _live(built):
+        gc.collect()
+        return sum(ref() is not None for ref in built)
+
+    def test_atlases_beyond_the_cache_bound_are_freed(self, monkeypatch):
+        built: list = []
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._tracked_atlas_cls(built)
+        )
+        coords = np.array([[0.0, 0.0, 0.0]])
+
+        bound = atlas_module.get_atlas.cache_info().maxsize
+        for i in range(bound * 3):
+            atlas_module.lookup_regions(f"atlas_{i}", coords)
+            atlas_module.canonical_annotation.cache_clear()  # this cache holds views
+
+        assert len(built) == bound * 3, "expected one atlas per distinct name"
+        assert self._live(built) <= bound
+
+    def test_rotating_past_the_bound_does_not_accumulate(self, monkeypatch):
+        """The case that took the server down: one more atlas in rotation than
+        ``get_atlas`` can hold, so every lookup rebuilds an evicted atlas."""
+        built: list = []
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._tracked_atlas_cls(built)
+        )
+        coords = np.array([[0.0, 0.0, 0.0]])
+
+        bound = atlas_module.get_atlas.cache_info().maxsize
+        names = [f"atlas_{i}" for i in range(bound + 1)]
+        for i in range(bound * 8):
+            atlas_module.lookup_regions(names[i % len(names)], coords)
+            atlas_module.canonical_annotation.cache_clear()
+
+        # Rebuilding on eviction is expected; *retaining* the rebuilds is not.
+        assert len(built) > bound, "expected evictions to force rebuilds"
+        assert self._live(built) <= bound
