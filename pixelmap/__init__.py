@@ -7,6 +7,6 @@ Includes both a programmatic API and an interactive browser-based GUI.
 
 from .backend import *
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 __author__ = "Maxime Beau"
 __email__ = "maxime@princeton.edu"
