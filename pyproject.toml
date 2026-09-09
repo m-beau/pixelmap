@@ -32,7 +32,7 @@ dependencies = [
     "bokeh>=3.0.0",
     "dotenv>=0.9.9",
     "psutil>=7.1.0",
-    "brainglobe-atlasapi>=2.0",
+    "brainglobe-atlasapi>=2.0",  # v2 and v3 both supported; see pixelmap/anatomy/atlas.py
 ]
 
 [project.gui-scripts]
