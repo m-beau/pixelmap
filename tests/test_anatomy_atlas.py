@@ -185,3 +185,126 @@ class TestOrientation:
         posterior = atlas_module.lookup_regions("x", np.array([[75.0, 0.0, 0.0]]))
         assert anterior[0].acronym == "ONE"
         assert posterior[0].acronym == "TWO"
+
+
+class TestMetadataOnlyQueries:
+    """Shape/extent queries must not touch ``annotation``.
+
+    brainglobe v3 fetches the annotation array lazily from S3, so reading it
+    just to learn the volume's size would trigger the very download these
+    queries let the GUI avoid.
+    """
+
+    @staticmethod
+    def _metadata_atlas_cls(shape, orientation="asr"):
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = orientation
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = shape
+                self.structures = {}
+
+            @property
+            def annotation(self):
+                raise AssertionError("annotation must not be loaded here")
+
+        return _A
+
+    def test_volume_center_reads_shape_not_the_array(self, monkeypatch):
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._metadata_atlas_cls((4, 8, 16))
+        )
+        # asr: shape is (AP, DV, ML); result is (AP, ML, DV) µm half-extents.
+        assert atlas_module.volume_center_um("x") == (50.0, 200.0, 100.0)
+
+    def test_anatomical_axes_reads_shape_not_the_array(self, monkeypatch):
+        atlas = self._metadata_atlas_cls((4, 8, 16), "sla")("x")
+        axes = atlas_module.anatomical_axes(atlas)
+        assert (axes["DV"].n, axes["ML"].n, axes["AP"].n) == (4, 8, 16)
+
+    def test_falls_back_to_the_array_when_shape_is_absent(self, monkeypatch):
+        # Older brainglobe objects and our other test doubles carry no `shape`.
+        atlas = _atlas_cls("asr", np.zeros((3, 5, 7), np.int32))("x")
+        axes = atlas_module.anatomical_axes(atlas)
+        assert (axes["AP"].n, axes["DV"].n, axes["ML"].n) == (3, 5, 7)
+
+
+class TestIsDownloaded:
+    """``is_downloaded`` answers "is reading the annotation free?".
+
+    On v2 that is the same as "is the atlas present". On v3 the atlas
+    directory appears as soon as the tiny manifest lands, while the annotation
+    is still remote, so the two questions come apart.
+    """
+
+    @pytest.fixture
+    def listed(self, monkeypatch):
+        monkeypatch.setattr(atlas_module, "get_downloaded_atlases", lambda: ["x"])
+
+    def test_v2_trusts_the_registry(self, monkeypatch, listed):
+        monkeypatch.setattr(atlas_module, "IS_V3", False)
+        assert atlas_module.is_downloaded("x") is True
+
+    def test_absent_atlas_is_never_downloaded(self, monkeypatch):
+        monkeypatch.setattr(atlas_module, "get_downloaded_atlases", list)
+        for is_v3 in (False, True):
+            monkeypatch.setattr(atlas_module, "IS_V3", is_v3)
+            assert atlas_module.is_downloaded("x") is False
+
+    def test_v3_manifest_without_chunks_is_not_downloaded(
+        self, monkeypatch, listed, tmp_path
+    ):
+        monkeypatch.setattr(atlas_module, "IS_V3", True)
+        monkeypatch.setattr(
+            atlas_module, "get_atlas", lambda name: _v3_atlas(tmp_path, chunks=False)
+        )
+        assert atlas_module.is_downloaded("x") is False
+
+    def test_v3_with_cached_chunks_is_downloaded(self, monkeypatch, listed, tmp_path):
+        monkeypatch.setattr(atlas_module, "IS_V3", True)
+        monkeypatch.setattr(
+            atlas_module, "get_atlas", lambda name: _v3_atlas(tmp_path, chunks=True)
+        )
+        assert atlas_module.is_downloaded("x") is True
+
+    def test_unreadable_metadata_reports_not_downloaded(self, monkeypatch, listed):
+        """A half-written manifest must send callers down the "this will cost
+        you" path rather than crashing the GUI."""
+        monkeypatch.setattr(atlas_module, "IS_V3", True)
+
+        def _boom(name):
+            raise RuntimeError("corrupt manifest")
+
+        monkeypatch.setattr(atlas_module, "get_atlas", _boom)
+        assert atlas_module.is_downloaded("x") is False
+
+
+def _v3_atlas(root, *, chunks: bool):
+    """A stand-in for a v3 atlas whose OME-Zarr chunks may or may not be local."""
+    annotation_dir = root / "annotation-sets" / "some-annotation" / "1_0"
+    scale = annotation_dir / atlas_module.V3_ANNOTATION_NAME / "scale0"
+    (scale / "c" if chunks else scale).mkdir(parents=True)
+
+    class _A:
+        root_dir = root
+        metadata = {
+            # brainglobe stores locations with a leading "/" that it strips.
+            "annotation_set": {"location": "/annotation-sets/some-annotation/1_0"}
+        }
+
+    return _A()
+
+
+class TestRegistryCachePaths:
+    """v3 moved ``last_versions.conf`` down a level; both are searched."""
+
+    def test_prefers_the_running_versions_layout(self, monkeypatch, tmp_path):
+        v2 = tmp_path / "last_versions.conf"
+        v3 = tmp_path / "brainglobe-atlasapi" / "atlases" / "last_versions.conf"
+
+        monkeypatch.setattr(atlas_module, "IS_V3", True)
+        assert atlas_module._registry_cache_paths(tmp_path) == [v3, v2]
+
+        monkeypatch.setattr(atlas_module, "IS_V3", False)
+        assert atlas_module._registry_cache_paths(tmp_path) == [v2, v3]

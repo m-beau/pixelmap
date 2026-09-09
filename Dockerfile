@@ -31,11 +31,12 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
 # the image layer; mount a Docker volume there in production to persist any
 # additional atlases users request across container restarts.
 #
-# Best-effort by design: GIN (the atlas host) intermittently 403s CI runners,
-# and a warm cache is an optimisation, not a requirement -- the app downloads
-# whatever is missing on demand.  The script retries, then exits 0 regardless,
-# so an outage at GIN cannot block a release build.  See the script for why
-# check_latest=False does not make this safe on its own.
+# Best-effort by design: the atlas host (GIN on brainglobe-atlasapi v2, S3 on
+# v3) can be flaky -- GIN intermittently 403s CI runners -- and a warm cache is
+# an optimisation, not a requirement: the app downloads whatever is missing on
+# demand.  The script retries, then exits 0 regardless, so a host outage cannot
+# block a release build.  See the script for why check_latest=False does not
+# make this safe on its own, and why it has to read .annotation to warm v3.
 ENV PATH="/app/.venv/bin:$PATH"
 RUN python /app/scripts/prefetch_atlases.py
 

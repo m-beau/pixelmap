@@ -245,7 +245,7 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 
 1. Design your channelmap as usual (presets, drag tools, etc.).
 2. Open the **Anatomical overlay** panel on the right side of the GUI.
-3. Choose your **atlas** (e.g. `allen_mouse_25um`; first use will download ~200 MB).
+3. Choose your **atlas** (e.g. `allen_mouse_25um`; first use downloads it — a few MB on brainglobe-atlasapi v3, ~200 MB on v2).
 4. Enter the **tip coordinates** in atlas µm (AP, ML, DV) — the position of the lowest electrode of shank 0.
 5. If your stereotaxic measurements are relative to bregma, tick **Tip relative to bregma** and enter your stereotaxic coordinates instead (see [Bregma-relative mode](#bregma-relative-coordinate-mode) below).
 6. Adjust **Pitch** and **Yaw** to match the tilt of your stereotaxic arm if the probe is not inserted vertically.

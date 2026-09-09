@@ -5,19 +5,31 @@ Pre-downloading the common atlases means users don't sit through a
 multi-hundred-MB download the first time they open the anatomy overlay. It is
 purely an optimisation, so a failure here must never fail the build: the app
 downloads any missing atlas on demand at runtime, and production mounts a
-volume at ~/.brainglobe so those downloads persist.
+volume at ~/.brainglobe so those downloads persist (v3 stores its atlases in
+the brainglobe-atlasapi/ subdirectory of that same volume).
 
 This exits 0 even when nothing could be fetched. It reports what it managed to
 get so a half-warmed image is visible in the build log rather than silent.
+
+Why constructing the atlas is not enough
+----------------------------------------
+On brainglobe-atlasapi v3 ``BrainGlobeAtlas(...)`` only fetches the manifest
+and metadata — a few hundred KB — and pulls the annotation array from S3 lazily,
+the first time something reads ``atlas.annotation``.  Constructing the atlas
+would therefore "succeed" while leaving the expensive part for the first user
+to hit at runtime, which is exactly what this script exists to prevent.  So we
+read ``.annotation`` explicitly.  On v2 that just decodes an already-downloaded
+tiff, so the same line is correct there too.
 
 Why this needs to be defensive
 ------------------------------
 ``BrainGlobeAtlas(..., check_latest=False)`` is *not* enough on its own.
 ``__init__`` reads ``self.remote_version`` before it ever consults
 ``check_latest``, and ``remote_version`` only swallows ``ConnectionError``.
-When GIN answers but refuses (it intermittently 403s CI runners),
-``conf_from_url`` falls back to a cached ``last_versions.conf`` that a fresh
-image does not have yet, and the resulting ``FileNotFoundError`` escapes.
+When the atlas host answers but refuses (GIN, on v2, intermittently 403s CI
+runners), ``conf_from_url`` falls back to a cached ``last_versions.conf`` that
+a fresh image does not have yet, and the resulting ``FileNotFoundError``
+escapes.
 """
 
 import sys
@@ -36,7 +48,10 @@ def fetch(atlas_name: str) -> bool:
 
     for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
         try:
-            BrainGlobeAtlas(atlas_name, check_latest=False)
+            atlas = BrainGlobeAtlas(atlas_name, check_latest=False)
+            # Force the annotation onto disk; on v3 this is what actually
+            # downloads it (see the module docstring).
+            _ = atlas.annotation
             print(f"[prefetch] {atlas_name}: ok", flush=True)
             return True
         except Exception as exc:  # noqa: BLE001 - any failure is non-fatal here

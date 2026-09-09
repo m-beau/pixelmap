@@ -6,12 +6,37 @@ Why a wrapper:
   annotation volume (it's tens of MB).
 * Expose a tiny ``RegionInfo`` record so the rest of PixelMap doesn't
   depend on brainglobe's object model.
+* Absorb the brainglobe v2 -> v3 storage rewrite in one place, so both
+  versions work (see below).
+
+Supporting brainglobe-atlasapi v2 *and* v3
+------------------------------------------
+v3 kept the parts we use of the Python API (``annotation``, ``resolution``,
+``orientation``, ``structures``, ``shape``) but rewrote how atlases live on
+disk: OME-Zarr on S3 instead of tiff bundles on GIN, components shared between
+atlases, stored under ``~/.brainglobe/brainglobe-atlasapi/`` rather than
+``~/.brainglobe/<atlas>/``.  Two consequences matter here:
+
+* The ``last_versions.conf`` registry cache moved, so :func:`list_atlases`
+  looks in both places.
+* Array data is fetched **lazily**, on first attribute access rather than at
+  construction.  So "the atlas is downloaded" and "reading the annotation is
+  free" stopped being the same question, and :func:`is_downloaded` — which
+  callers use to decide whether an action is cheap — has to answer the second
+  one.  That also means metadata-only queries (shape, resolution) must avoid
+  touching ``annotation``, or they'd trigger the very download they're meant
+  to let the caller avoid.
+
+Everything below feature-detects rather than testing a version number: v3 is
+young (verified against 2.3.1 and 3.0.1), and the layout, not the version
+string, is what the code actually depends on.
 """
 
 from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from brainglobe_atlasapi import BrainGlobeAtlas
@@ -19,6 +44,22 @@ from brainglobe_atlasapi.list_atlases import (
     get_all_atlases_lastversions,
     get_downloaded_atlases,
 )
+
+try:  # brainglobe-atlasapi >= 3
+    from brainglobe_atlasapi.descriptors import (
+        V3_ANNOTATION_NAME,
+        V3_ATLAS_ROOTDIR,
+    )
+
+    #: True where atlas arrays are fetched lazily and live in the v3 layout.
+    IS_V3 = True
+except ImportError:  # brainglobe-atlasapi 2.x
+    # v2 doesn't define these. Spelling out the values it would have keeps the
+    # v3 code paths readable and testable on a v2 install; they are only ever
+    # *used* behind an ``IS_V3`` check.
+    V3_ANNOTATION_NAME = "annotations_compressed.ome.zarr"
+    V3_ATLAS_ROOTDIR = "atlases"
+    IS_V3 = False
 
 _DEFAULT_ATLAS = "allen_mouse_25um"
 
@@ -37,10 +78,15 @@ class RegionInfo:
 def get_atlas(name: str = _DEFAULT_ATLAS):
     """Return a cached :class:`BrainGlobeAtlas` instance.
 
-    First call for a given atlas may download tens of MB. We delegate the
-    download/caching to brainglobe — its on-disk cache is shared across
-    processes.  ``check_latest=False`` skips the remote version check so the
-    app doesn't hang when the GIN server is unreachable.
+    We delegate the download/caching to brainglobe — its on-disk cache is
+    shared across processes.  ``check_latest=False`` skips the remote version
+    check so the app doesn't hang when the atlas host is unreachable.
+
+    How much this costs depends on the brainglobe version.  On v2 the first
+    call downloads the whole atlas bundle (tens to hundreds of MB).  On v3 it
+    only fetches the manifest and metadata (a few hundred KB); the annotation
+    array is pulled from S3 later, when something first reads
+    ``atlas.annotation``.  Either way it is free once the data is local.
     """
     return BrainGlobeAtlas(name, check_latest=False)
 
@@ -49,22 +95,33 @@ def list_atlases() -> list[str]:
     """List every atlas in the brainglobe registry, not just downloaded ones.
 
     Reads the locally cached registry index first so the app starts instantly
-    even when the GIN server is unreachable.  Falls back to
+    even when the atlas host is unreachable.  Falls back to
     ``get_all_atlases_lastversions`` (which may hit the network) only if the
     cache file is missing.
+
+    v3 moved that cache down into the ``brainglobe-atlasapi/atlases/``
+    subtree, so both locations are tried — a machine that has used both
+    versions has both files, and the newest one wins.
     """
     try:
         from brainglobe_atlasapi import config, utils
 
-        cache_path = config.get_brainglobe_dir() / "last_versions.conf"
-        if cache_path.exists():
-            data = utils.conf_from_file(cache_path)
-            return sorted(data["atlases"].keys())
+        for cache_path in _registry_cache_paths(config.get_brainglobe_dir()):
+            if cache_path.exists():
+                data = utils.conf_from_file(cache_path)
+                return sorted(data["atlases"].keys())
     except Exception:
         pass
     # Cache missing or unreadable — fall back to the (potentially slow)
     # network fetch so the full list is still available on first run.
     return sorted(get_all_atlases_lastversions().keys())
+
+
+def _registry_cache_paths(brainglobe_dir: Path) -> list[Path]:
+    """Candidate ``last_versions.conf`` locations, preferred version first."""
+    v3 = brainglobe_dir / "brainglobe-atlasapi" / V3_ATLAS_ROOTDIR / "last_versions.conf"
+    v2 = brainglobe_dir / "last_versions.conf"
+    return [v3, v2] if IS_V3 else [v2, v3]
 
 
 # brainglobe orientation codes (e.g. "asr") spell the (0,0,0) origin corner:
@@ -77,13 +134,44 @@ _ORIGIN_WORDS = {
 
 
 def is_downloaded(name: str = _DEFAULT_ATLAS) -> bool:
-    """True if the atlas is already on disk, so reading it won't download.
+    """True if the atlas's annotation is on disk, so reading it won't download.
 
     Lets the GUI fetch an atlas's origin only when that's free — picking an
     un-downloaded atlas from a dropdown should not kick off a tens-of-MB
     download just to label the coordinate space.
+
+    On v2 an atlas is all-or-nothing, so the presence of its directory settles
+    it.  On v3 the directory appears as soon as the (tiny) manifest lands,
+    while the annotation is still remote — so we additionally check that the
+    OME-Zarr chunks are cached, which is what the callers actually care about.
     """
-    return name in get_downloaded_atlases()
+    if name not in get_downloaded_atlases():
+        return False
+    if not IS_V3:
+        return True
+    try:
+        return _v3_annotation_is_cached(get_atlas(name))
+    except Exception:
+        # Metadata unreadable, or the manifest is there but incomplete: treat
+        # it as not-downloaded so callers take the "this will cost you" path.
+        return False
+
+
+def _v3_annotation_is_cached(atlas) -> bool:
+    """True if v3's lazily-fetched annotation chunks are already local.
+
+    Mirrors the check ``core.Atlas.annotation`` makes before hitting S3: the
+    OME-Zarr pyramid holds one directory per scale level, and a level's voxels
+    live under ``<level>/c``.  We accept *any* cached level rather than
+    reaching into brainglobe's private ``_annotation_pyramid_level`` — the
+    atlas name pins the resolution, so the only level this app ever pulls is
+    the one it would read back.
+    """
+    location = atlas.metadata["annotation_set"]["location"][1:]
+    root = Path(atlas.root_dir) / location / V3_ANNOTATION_NAME
+    if not root.is_dir():
+        return False
+    return any(level.joinpath("c").is_dir() for level in root.iterdir() if level.is_dir())
 
 
 def origin_corner(name: str = _DEFAULT_ATLAS) -> str:
@@ -251,15 +339,32 @@ class _AnatAxis:
     res_um: float      # µm per voxel along the axis
 
 
+def _atlas_shape(atlas) -> tuple[int, ...]:
+    """The atlas's voxel shape, from metadata where the atlas exposes it.
+
+    Both brainglobe versions publish ``shape`` from the atlas manifest, which
+    is the cheap way to ask: on v3, reading ``annotation.shape`` instead would
+    pull the entire array from S3.  Test doubles only carry ``annotation``, so
+    fall back to that.
+    """
+    shape = getattr(atlas, "shape", None)
+    if shape is not None:
+        return tuple(int(s) for s in shape)
+    return tuple(int(s) for s in atlas.annotation.shape)
+
+
 def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
     """Map ``"AP"``/``"DV"``/``"ML"`` to their place in the native array.
 
     Read from ``atlas.orientation`` (e.g. ``"asr"``) so coordinate lookups
     work for any brainglobe orientation, not just Allen's. See
     :func:`canonical_annotation` for how this is applied.
+
+    Metadata only — deliberately never touches ``atlas.annotation``, so
+    callers that just want the volume's extent don't pay for a v3 download.
     """
     orientation = str(atlas.orientation).lower()
-    shape = atlas.annotation.shape
+    shape = _atlas_shape(atlas)
     res = np.asarray(atlas.resolution, dtype=float)
     axes: dict[str, _AnatAxis] = {}
     for axis, letter in enumerate(orientation):
@@ -303,12 +408,16 @@ def volume_center_um(name: str = _DEFAULT_ATLAS) -> tuple[float, float, float]:
     """Geometric center of the atlas volume as ``(AP, ML, DV)`` µm.
 
     Handy as a default insertion target — it lands mid-brain for any atlas.
-    Reads the atlas (downloads if not cached), so gate on
-    :func:`is_downloaded` where staying cheap matters.
+    Computed from shape and resolution alone, so it never materialises the
+    annotation; it still needs the atlas's metadata, which on a cold cache
+    means a download, so gate on :func:`is_downloaded` where that matters.
     """
-    ann, res = canonical_annotation(name)
-    n_ap, n_dv, n_ml = ann.shape
-    return (n_ap * res[0] / 2.0, n_ml * res[2] / 2.0, n_dv * res[1] / 2.0)
+    axes = anatomical_axes(get_atlas(name))
+    return (
+        axes["AP"].n * axes["AP"].res_um / 2.0,
+        axes["ML"].n * axes["ML"].res_um / 2.0,
+        axes["DV"].n * axes["DV"].res_um / 2.0,
+    )
 
 
 def lookup_regions(
