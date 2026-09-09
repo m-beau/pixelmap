@@ -2833,17 +2833,20 @@ class ChannelmapGUI(param.Parameterized):
 
         # Controls panel (fixed on left)
         left_column = pn.Column(
-            pn.pane.Markdown(
+            pn.pane.HTML(
                 (
-                    f"<div style='text-align: center; padding: 12px;'><strong>See project (v{__version__}) at:"
+                    f"<div style='width: 100%; text-align: center; padding: 12px; box-sizing: border-box;'>"
+                    f"<strong>See project (v{__version__}) at:"
                     "<br><a href='https://github.com/m-beau/pixelmap' "
                     "target='_blank'>github.com/m-beau/pixelmap</a></strong>"
-                    "<br><span style='font-size: 1.0em;'>We're working towards publishing PixelMap in JOSS, and need to demonstrate impact. "
-                    "If you find PixelMap helpful and want to see it improved in the future, <br><b style='color: red;'>you can help us by filling this 1-minute form: "
-                    "<a href='https://docs.google.com/forms/d/e/1FAIpQLSeZyha1XEcKHRqY7oW5lNL5ER1YW2XIDagtCfRECCk5PKhBsw/viewform?usp=publish-editor'"
-                    "target='_blank'>link</a></b><br> (and adding a star ⭐ to the <a href='https://github.com/m-beau/pixelmap' "
-                    "target='_blank'>repo</a> 😊)</span></div>"
+                    "<br><span style='font-size: 1.0em;'>If you find PixelMap helpful and want to see it <br>improved in the future, <b style='color: red;'>you can help us by "
+                    "<br>adding a star ⭐ to the <a href='https://github.com/m-beau/pixelmap' "
+                    "target='_blank'>repo</a> 😊</b></span>"
+                    "<br><span style='font-size: 1.0em;'>Other projects you may find useful: "
+                    "<a href='https://github.com/m-beau/cachecache' target='_blank'>cachecache</a>, "
+                    "<a href='https://github.com/m-beau/mplify' target='_blank'>mplify</a></span></div>"
                 ),
+                sizing_mode="stretch_width",
                 margin=(0, 0, 0, 0),
             ),
             pn.Column(
