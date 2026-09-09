@@ -231,3 +231,6 @@ tmp/
 *.bak
 *.backup
 *~
+
+# Claude Code
+.claude/
