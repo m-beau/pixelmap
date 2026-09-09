@@ -70,8 +70,31 @@ GUI_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 # Default port
 DEFAULT_PORT = 5007
 
-# Enable Panel extensions
-pn.extension("tabulator", notifications=True)
+# Enable Panel extensions.
+#
+# This module-level call only covers notebook/library use and the *first*
+# session of a server. `pn.config.notifications` is stored per-session
+# (keyed on `pn.state.curdoc`), and under `panel serve` this module is
+# imported inside the first session's document context, so every later
+# session would inherit the default of False. `create_app` therefore
+# repeats the call per session -- see the note there.
+PANEL_EXTENSIONS = ("tabulator",)
+pn.extension(*PANEL_EXTENSIONS, notifications=True)
+
+
+def _notify(level: str, message: str, **kwargs) -> None:
+    """Emit a Panel notification, or do nothing if the session has no area.
+
+    `pn.state.notifications` is None outside a served session (tests, scripts).
+    Reaching through it unguarded raises inside a Bokeh callback, and Bokeh
+    discards every pending document write when a locked callback raises -- so
+    one missing notification silently loses all the plot updates the callback
+    had already made. Swallowing the notification is always the lesser evil.
+    """
+    notifications = pn.state.notifications
+    if notifications is None:
+        return
+    getattr(notifications, level)(message, **kwargs)
 
 
 @functools.lru_cache(maxsize=16)
@@ -1041,14 +1064,14 @@ class ChannelmapGUI(param.Parameterized):
     def apply_uploaded_imro(self):
 
         if self.imro_file_loader.value is None:
-            pn.state.notifications.warning("No .imro file found - upload one before clicking this button.",
-                                    duration=10_000)
+            _notify("warning", "No .imro file found - upload one before clicking this button.",
+                    duration=10_000)
             return
 
         file_extension = str(self.imro_file_loader.filename).split(".")[-1]
         if file_extension != "imro":
-            pn.state.notifications.error(f"You must upload an .imro file, not .{file_extension}!",
-                                    duration=10_000)
+            _notify("error", f"You must upload an .imro file, not .{file_extension}!",
+                    duration=10_000)
             return
 
         imro_file_content = self.imro_file_loader.value
@@ -1066,7 +1089,7 @@ class ChannelmapGUI(param.Parameterized):
             parsed_hp_filter,
             ) = imro.parse_imro_list(imro_list)
         except:
-            pn.state.notifications.error("Failed to parse uploaded imro file.")
+            _notify("error", "Failed to parse uploaded imro file.")
             return
 
         # Setting probe_type triggers load_probe_data, which updates probe_subtype.objects
@@ -1823,8 +1846,7 @@ class ChannelmapGUI(param.Parameterized):
             f'border:1px solid #ddd;border-radius:4px;padding:4px 6px;'
             f'background:#f5f5f5;box-sizing:border-box;cursor:text;">'
         )
-        if pn.state.notifications is not None:
-            pn.state.notifications.success("Link copied to clipboard!", duration=3_000)
+        _notify("success", "Link copied to clipboard!", duration=3_000)
 
     def do_undo(self):
         """Roll back to the previous selection snapshot."""
@@ -1872,7 +1894,8 @@ class ChannelmapGUI(param.Parameterized):
     def load_survey_file(self):
         """Parse an uploaded SpikeGLX survey .txt file and overlay Val on the probe."""
         if self.survey_file_loader.value is None:
-            pn.state.notifications.warning(
+            _notify(
+                "warning",
                 "No survey file found - upload one before clicking this button.",
                 duration=10_000,
             )
@@ -1880,7 +1903,8 @@ class ChannelmapGUI(param.Parameterized):
 
         file_extension = str(self.survey_file_loader.filename).split(".")[-1].lower()
         if file_extension not in ("txt", "tsv"):
-            pn.state.notifications.error(
+            _notify(
+                "error",
                 f"You must upload a .txt survey file, not .{file_extension}!",
                 duration=10_000,
             )
@@ -1893,13 +1917,13 @@ class ChannelmapGUI(param.Parameterized):
         try:
             survey_df = survey.parse_survey_file(content)
         except ValueError as e:
-            pn.state.notifications.error(f"Failed to parse survey file: {e}", duration=10_000)
+            _notify("error", f"Failed to parse survey file: {e}", duration=10_000)
             return
 
         try:
             values, n_unmatched = survey.validate_probe_match(survey_df, self.positions_df)
         except ValueError as e:
-            pn.state.notifications.error(str(e), duration=10_000)
+            _notify("error", str(e), duration=10_000)
             return
 
         self.survey_values = values
@@ -1925,9 +1949,9 @@ class ChannelmapGUI(param.Parameterized):
         msg = f"Loaded survey: {len(values)} contacts mapped."
         if n_unmatched:
             msg += f" {n_unmatched} row(s) did not match the probe and were ignored."
-            pn.state.notifications.warning(msg, duration=10_000)
+            _notify("warning", msg, duration=10_000)
         else:
-            pn.state.notifications.success(msg, duration=5_000)
+            _notify("success", msg, duration=5_000)
 
     def clear_survey_overlay(self):
         """Remove any loaded survey overlay."""
@@ -1961,8 +1985,8 @@ class ChannelmapGUI(param.Parameterized):
         low = float(self.survey_vmin_input.value)
         high = float(self.survey_vmax_input.value)
         if high <= low:
-            pn.state.notifications.warning(
-                "Survey vmax must be greater than vmin.", duration=5_000
+            _notify(
+                "warning", "Survey vmax must be greater than vmin.", duration=5_000
             )
             return
         self.survey_cmap.low = low
@@ -3062,6 +3086,13 @@ def _extract_cfg_from_session_args() -> str | None:
 
 def create_app():
     """Create and configure the Panel app"""
+    # Re-arm the extensions for *this* session. Panel keys `config` on the
+    # current document, so the module-level `pn.extension` above only ever
+    # configured whichever session happened to trigger the import -- under
+    # `panel serve` that is session #1, and everyone after it got
+    # `pn.state.notifications is None`. Must stay inside the app factory.
+    pn.extension(*PANEL_EXTENSIONS, notifications=True)
+
     gui = ChannelmapGUI()
 
     cfg = _extract_cfg_from_session_args()
