@@ -3,6 +3,7 @@
 import socket
 import threading
 import time
+from pathlib import Path
 
 import panel as pn
 import psutil
@@ -10,6 +11,12 @@ import psutil
 from pixelmap.gui.gui import create_app
 
 pn.extension(notifications=True)
+
+# Browser tab icon, served by Bokeh at /favicon.ico -- assets/npix_map_logo.png
+# centred on a transparent square canvas, at 16-256px. Passed to pn.serve below;
+# the `panel serve` deployment gets it through --ico-path in entrypoint.sh
+# instead, because that server is built before this module is ever imported.
+FAVICON_PATH = Path(__file__).resolve().parent / "assets" / "favicon.ico"
 
 
 def find_free_port(start_port=5007):
@@ -44,6 +51,13 @@ def main(show=True, local=True):
     print("Starting app...")
     if local:
         port = find_free_port(5003)
-        pn.serve(create_app, port=port, show=show, title="Neuropixels Channelmap Generator", verbose=True)
+        pn.serve(
+            create_app,
+            port=port,
+            show=show,
+            title="Neuropixels Channelmap Generator",
+            ico_path=str(FAVICON_PATH),
+            verbose=True,
+        )
     else:
         create_app().servable(title="Neuropixels Channelmap Generator")

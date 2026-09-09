@@ -434,7 +434,6 @@ def lookup_regions(
         List of length ``N``. Entries are ``None`` if the corresponding
         coordinate falls outside the volume.
     """
-    atlas = get_atlas(atlas_name)
     # Reorient to canonical (AP, DV, ML) so the indexing below holds for any
     # atlas orientation, not just Allen's native "asr".
     annotation, voxel_size = canonical_annotation(atlas_name)
@@ -459,15 +458,29 @@ def lookup_regions(
         if region_id == 0:  # outside-brain or undefined
             results.append(None)
             continue
-        results.append(_region_info_from_id(atlas, region_id))
+        results.append(_region_info_from_id(atlas_name, region_id))
     return results
 
 
 @functools.lru_cache(maxsize=4096)
-def _region_info_from_id(atlas, region_id: int) -> RegionInfo | None:
-    """Resolve a region integer label to acronym/name/rgb. Cached per-atlas."""
+def _region_info_from_id(atlas_name: str, region_id: int) -> RegionInfo | None:
+    """Resolve a region integer label to acronym/name/rgb. Cached per-atlas.
+
+    Keyed on the atlas *name*, never the atlas object.  An ``lru_cache`` holds
+    its keys alive, so taking the object here pinned every atlas ever looked up
+    for the life of the process — each one keeping its annotation volume
+    resident (294 MB for allen_mouse_25um, 1.0 GB for whs_sd_rat_39um).  The
+    4096-entry cap was no protection: one probe traverses ~23 regions, so the
+    whole registry fits underneath it and nothing was ever evicted.
+
+    Worse, it turned :func:`get_atlas`'s eviction into a leak.  With a 5th
+    atlas in rotation every lookup rebuilt an evicted atlas, loaded a fresh
+    copy of its annotation, and pinned that too — so memory grew with traffic
+    rather than with the number of atlases.  Going through the name means the
+    only strong references live in ``get_atlas``'s own bounded cache.
+    """
     try:
-        entry = atlas.structures[region_id]
+        entry = get_atlas(atlas_name).structures[region_id]
     except KeyError:
         return None
     rgb = tuple(int(c) for c in entry.get("rgb_triplet", (128, 128, 128)))
