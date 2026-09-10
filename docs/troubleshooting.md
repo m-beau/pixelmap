@@ -31,7 +31,7 @@ To make further edits:
 
 ## The GUI crashes or shows errors on startup
 
-1. Make sure you are using Python 3.10 or later.
+1. Make sure you are using Python 3.11 or later.
 2. Try reinstalling dependencies:
    ```bash
    uv sync --reinstall

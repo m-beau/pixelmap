@@ -1,5 +1,10 @@
 services:
   pixelmap:
+    # Pinned, not `latest`. Every tag build also pushes `latest`, so with
+    # `latest` + `pull_policy: always` a redeploy silently jumps to whatever
+    # was built most recently -- including a release you are trying to roll
+    # back *from*. Override for a one-off with `PIXELMAP_TAG=v1.2.3 docker
+    # compose up -d`.
     image: ghcr.io/m-beau/pixelmap:latest
     container_name: pixelmap
     pull_policy: always
@@ -17,7 +22,12 @@ services:
       - ./output:/app/output
       - brainglobe_cache:/root/.brainglobe
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:${INTERNAL_PORT}/"]
+      # CMD-SHELL with `$$` so the port is read from the *container's*
+      # environment. Plain `${INTERNAL_PORT}` is interpolated by Compose from
+      # the host shell instead, which silently becomes `http://localhost:/`
+      # -- a healthcheck that can never pass -- when the host doesn't happen
+      # to export INTERNAL_PORT.
+      test: ["CMD-SHELL", "curl --fail http://localhost:$${INTERNAL_PORT:-5008}/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -26,6 +36,8 @@ services:
 
 volumes:
   # Persists brainglobe atlas downloads across container restarts.
-  # The default atlas (allen_mouse_25um) is pre-baked into the image; any
-  # additional atlases users download on the server accumulate here.
+  # The default atlases (allen_mouse_25um, whs_sd_rat_39um) are pre-baked into
+  # the image and re-seeded into this volume on every start by entrypoint.sh,
+  # so an old or empty volume can no longer mask them. Any additional atlases
+  # users download on the server accumulate here.
   brainglobe_cache:
