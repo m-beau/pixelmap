@@ -12,6 +12,16 @@ ALLOW_WEBSOCKET_ORIGIN=${ALLOW_WEBSOCKET_ORIGIN:-localhost:$INTERNAL_PORT}
 ICO_PATH=${ICO_PATH:-./pixelmap/gui/assets/favicon.ico}
 BRAINGLOBE_SEED=${BRAINGLOBE_SEED:-/opt/brainglobe-seed}
 BRAINGLOBE_DIR=${BRAINGLOBE_DIR:-/root/.brainglobe}
+# Run the image's own virtualenv directly, NOT `uv run`.
+#
+# `uv run` re-syncs the environment before every launch: it rebuilds and
+# reinstalls the pixelmap package and pulls the `dev` dependency group
+# (sphinx, babel, ...) from PyPI, because uv syncs default dependency-groups
+# even though the image was built with `uv sync --no-dev`. That made PyPI a
+# hard dependency of *starting the container* -- so a restart (after an OOM
+# kill, a reboot, a `compose up`) could fail or hang purely because a package
+# index was unreachable. The venv baked into the image is already complete.
+PYTHON_BIN=${PYTHON_BIN:-/app/.venv/bin/python}
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
@@ -48,7 +58,7 @@ log "ALLOW_WEBSOCKET_ORIGIN $ALLOW_WEBSOCKET_ORIGIN"
 log "NUM_PROCS $NUM_PROCS"
 
 # Start the Panel application
-exec uv run panel serve ./app.py \
+exec "$PYTHON_BIN" -m panel serve ./app.py \
     --address "$ADDRESS" \
     --port "$INTERNAL_PORT" \
     --allow-websocket-origin "$ALLOW_WEBSOCKET_ORIGIN" \
