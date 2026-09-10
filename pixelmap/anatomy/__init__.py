@@ -5,9 +5,9 @@ the GUI can color electrodes by the region they sit in.
 
 Atlas data is downloaded on first use by ``brainglobe-atlasapi`` and cached
 on disk under ``~/.brainglobe/``.  Subsequent calls load from the local cache.
-Both brainglobe v2 and v3 are supported; v3 stores its atlases in the
-``brainglobe-atlasapi/`` subdirectory and fetches the bulky arrays lazily
-(see :mod:`pixelmap.anatomy.atlas`).
+Requires brainglobe-atlasapi >= 3, which stores atlases in the
+``brainglobe-atlasapi/`` subdirectory as compressed OME-Zarr and fetches the
+bulky arrays lazily (see :mod:`pixelmap.anatomy.atlas`).
 """
 
 from pixelmap.anatomy.atlas import RegionInfo, list_atlases

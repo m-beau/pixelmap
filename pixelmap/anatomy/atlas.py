@@ -3,63 +3,56 @@
 Why a wrapper:
 
 * Cache atlas instances per-process so repeated lookups don't re-load the
-  annotation volume (it's tens of MB).
+  annotation volume (hundreds of MB once decompressed).
 * Expose a tiny ``RegionInfo`` record so the rest of PixelMap doesn't
   depend on brainglobe's object model.
-* Absorb the brainglobe v2 -> v3 storage rewrite in one place, so both
-  versions work (see below).
+* Keep every network call off the caller's thread, because on the hosted
+  server that thread is the one serving every other user (see below).
 
-Supporting brainglobe-atlasapi v2 *and* v3
-------------------------------------------
-v3 kept the parts we use of the Python API (``annotation``, ``resolution``,
-``orientation``, ``structures``, ``shape``) but rewrote how atlases live on
-disk: OME-Zarr on S3 instead of tiff bundles on GIN, components shared between
-atlases, stored under ``~/.brainglobe/brainglobe-atlasapi/`` rather than
-``~/.brainglobe/<atlas>/``.  Two consequences matter here:
+Requires brainglobe-atlasapi >= 3
+---------------------------------
+v3 rewrote how atlases live on disk: OME-Zarr on S3 rather than tiff bundles
+on GIN, components shared between atlases, stored under
+``~/.brainglobe/brainglobe-atlasapi/``.  PixelMap requires it, and v2 is not
+supported.  Two properties of that layout shape the code below:
 
-* The ``last_versions.conf`` registry cache moved, so :func:`list_atlases`
-  looks in both places.
 * Array data is fetched **lazily**, on first attribute access rather than at
   construction.  So "the atlas is downloaded" and "reading the annotation is
-  free" stopped being the same question, and :func:`is_downloaded` — which
-  callers use to decide whether an action is cheap — has to answer the second
-  one.  That also means metadata-only queries (shape, resolution) must avoid
-  touching ``annotation``, or they'd trigger the very download they're meant
-  to let the caller avoid.
+  free" are different questions, and :func:`is_downloaded` — which callers use
+  to decide whether an action is cheap — answers the second one.  Metadata-only
+  queries (shape, resolution) must therefore avoid touching ``annotation``, or
+  they would trigger the very download they exist to let the caller skip.
+* Atlases are small on disk: allen_mouse_25um and whs_sd_rat_39um together are
+  ~9 MB of compressed chunks, against ~1.3 GB of tiffs under v2.  That is what
+  makes baking them into the Docker image cheap and reliable.
 
-Everything below feature-detects rather than testing a version number: v3 is
-young (verified against 2.3.1 and 3.0.1), and the layout, not the version
-string, is what the code actually depends on.
+Why the network never runs inline
+---------------------------------
+The deployed app is a single-process Panel/Bokeh server: a blocking call on
+its event loop stalls *every* connected user and the container healthcheck.
+brainglobe's registry fetch uses ``requests.get`` with no timeout, so a
+hosting outage used to hang the server rather than degrade it.  Hence
+:func:`list_atlases` answers from disk or from a bundled snapshot and refreshes
+in a daemon thread, and :func:`ensure_downloaded` exists so the GUI can move
+the one genuinely expensive call onto a worker thread.
 """
 
 from __future__ import annotations
 
 import functools
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from brainglobe_atlasapi import BrainGlobeAtlas
+from brainglobe_atlasapi.descriptors import V3_ANNOTATION_NAME, V3_ATLAS_ROOTDIR
 from brainglobe_atlasapi.list_atlases import (
     get_all_atlases_lastversions,
     get_downloaded_atlases,
 )
 
-try:  # brainglobe-atlasapi >= 3
-    from brainglobe_atlasapi.descriptors import (
-        V3_ANNOTATION_NAME,
-        V3_ATLAS_ROOTDIR,
-    )
-
-    #: True where atlas arrays are fetched lazily and live in the v3 layout.
-    IS_V3 = True
-except ImportError:  # brainglobe-atlasapi 2.x
-    # v2 doesn't define these. Spelling out the values it would have keeps the
-    # v3 code paths readable and testable on a v2 install; they are only ever
-    # *used* behind an ``IS_V3`` check.
-    V3_ANNOTATION_NAME = "annotations_compressed.ome.zarr"
-    V3_ATLAS_ROOTDIR = "atlases"
-    IS_V3 = False
+from pixelmap.anatomy._registry_snapshot import REGISTRY_SNAPSHOT
 
 _DEFAULT_ATLAS = "allen_mouse_25um"
 
@@ -82,46 +75,109 @@ def get_atlas(name: str = _DEFAULT_ATLAS):
     shared across processes.  ``check_latest=False`` skips the remote version
     check so the app doesn't hang when the atlas host is unreachable.
 
-    How much this costs depends on the brainglobe version.  On v2 the first
-    call downloads the whole atlas bundle (tens to hundreds of MB).  On v3 it
-    only fetches the manifest and metadata (a few hundred KB); the annotation
-    array is pulled from S3 later, when something first reads
-    ``atlas.annotation``.  Either way it is free once the data is local.
+    Construction fetches only the manifest and metadata (a few hundred KB);
+    the annotation array is pulled from S3 later, when something first reads
+    ``atlas.annotation``.  Either step is free once the data is local, but
+    neither is free on a cold cache — see :func:`ensure_downloaded` for
+    getting that cost off the event loop.
+
+    The cache is bounded so a server that sees many atlases doesn't hold every
+    annotation volume it has ever decoded.  Nothing else may keep a strong
+    reference to an atlas object, or that bound stops meaning anything (see
+    :func:`_region_info_from_id`).
     """
     return BrainGlobeAtlas(name, check_latest=False)
 
 
-def list_atlases() -> list[str]:
-    """List every atlas in the brainglobe registry, not just downloaded ones.
+def ensure_downloaded(name: str = _DEFAULT_ATLAS) -> None:
+    """Materialise ``name``'s annotation, downloading it if necessary.
 
-    Reads the locally cached registry index first so the app starts instantly
-    even when the atlas host is unreachable.  Falls back to
-    ``get_all_atlases_lastversions`` (which may hit the network) only if the
-    cache file is missing.
-
-    v3 moved that cache down into the ``brainglobe-atlasapi/atlases/``
-    subtree, so both locations are tried — a machine that has used both
-    versions has both files, and the newest one wins.
+    The one call in this module that can block for seconds on a cold cache, in
+    a single place so callers can push it onto a worker thread — which the GUI
+    does, because on the server the calling thread also serves every other
+    session.  A no-op once the atlas is local.
     """
+    _ = get_atlas(name).annotation
+
+
+@functools.lru_cache(maxsize=1)
+def list_atlases() -> list[str]:
+    """Every atlas in the brainglobe registry, not just the downloaded ones.
+
+    Answers without touching the network, in three steps: the on-disk registry
+    cache brainglobe maintains, then a snapshot bundled with PixelMap, and only
+    as a last resort a live fetch — which happens in a daemon thread whose
+    result the *next* caller picks up.
+
+    That ordering is deliberate.  This runs while a GUI session is being built,
+    which on the deployed server is on the Bokeh event loop, and brainglobe's
+    registry fetch is a ``requests.get`` with no timeout: an outage at the host
+    would otherwise hang the process for every connected user rather than cost
+    one stale dropdown.  Cached for the life of the process — the registry
+    changes a few times a year, and the background refresh clears the cache
+    when it actually lands something new.  Callers get the memoised list
+    itself, so treat it as read-only.
+    """
+    cached = _registry_from_disk()
+    if cached:
+        return cached
+    _refresh_registry_in_background()
+    return sorted(REGISTRY_SNAPSHOT)
+
+
+def _registry_from_disk() -> list[str] | None:
+    """Atlas names from brainglobe's on-disk registry cache, if it has one."""
     try:
         from brainglobe_atlasapi import config, utils
 
-        for cache_path in _registry_cache_paths(config.get_brainglobe_dir()):
-            if cache_path.exists():
-                data = utils.conf_from_file(cache_path)
-                return sorted(data["atlases"].keys())
+        cache_path = _registry_cache_path(config.get_brainglobe_dir())
+        if cache_path.exists():
+            data = utils.conf_from_file(cache_path)
+            return sorted(data["atlases"].keys())
     except Exception:
         pass
-    # Cache missing or unreadable — fall back to the (potentially slow)
-    # network fetch so the full list is still available on first run.
-    return sorted(get_all_atlases_lastversions().keys())
+    return None
 
 
-def _registry_cache_paths(brainglobe_dir: Path) -> list[Path]:
-    """Candidate ``last_versions.conf`` locations, preferred version first."""
-    v3 = brainglobe_dir / "brainglobe-atlasapi" / V3_ATLAS_ROOTDIR / "last_versions.conf"
-    v2 = brainglobe_dir / "last_versions.conf"
-    return [v3, v2] if IS_V3 else [v2, v3]
+def _registry_cache_path(brainglobe_dir: Path) -> Path:
+    """Where brainglobe caches ``last_versions.conf``."""
+    return brainglobe_dir / "brainglobe-atlasapi" / V3_ATLAS_ROOTDIR / "last_versions.conf"
+
+
+#: Guards against piling up refresh threads when the host is unreachable and
+#: every new session takes the snapshot path.
+_registry_refresh_lock = threading.Lock()
+_registry_refresh_running = False
+
+
+def _refresh_registry_in_background() -> None:
+    """Fetch the registry off-thread, so a later session gets the live list.
+
+    Fire-and-forget: the fetch writes brainglobe's on-disk cache as a side
+    effect, and we drop :func:`list_atlases`'s memo so the next caller reads
+    it.  Failures are silent by design — the snapshot already answered.
+    """
+    global _registry_refresh_running
+    with _registry_refresh_lock:
+        if _registry_refresh_running:
+            return
+        _registry_refresh_running = True
+
+    def _run():
+        global _registry_refresh_running
+        try:
+            get_all_atlases_lastversions()
+            if _registry_from_disk():
+                list_atlases.cache_clear()
+        except Exception:
+            pass
+        finally:
+            with _registry_refresh_lock:
+                _registry_refresh_running = False
+
+    threading.Thread(
+        target=_run, name="pixelmap-atlas-registry-refresh", daemon=True
+    ).start()
 
 
 # brainglobe orientation codes (e.g. "asr") spell the (0,0,0) origin corner:
@@ -136,29 +192,27 @@ _ORIGIN_WORDS = {
 def is_downloaded(name: str = _DEFAULT_ATLAS) -> bool:
     """True if the atlas's annotation is on disk, so reading it won't download.
 
-    Lets the GUI fetch an atlas's origin only when that's free — picking an
-    un-downloaded atlas from a dropdown should not kick off a tens-of-MB
-    download just to label the coordinate space.
+    Lets the GUI fetch an atlas's origin, extent or region labels only when
+    that's free — picking an un-downloaded atlas from a dropdown should not
+    kick off a download just to label the coordinate space.
 
-    On v2 an atlas is all-or-nothing, so the presence of its directory settles
-    it.  On v3 the directory appears as soon as the (tiny) manifest lands,
-    while the annotation is still remote — so we additionally check that the
-    OME-Zarr chunks are cached, which is what the callers actually care about.
+    The atlas directory appears as soon as the (tiny) manifest lands, while the
+    annotation is still remote, so the directory alone doesn't settle it: we
+    also check that the OME-Zarr chunks are cached, which is what the callers
+    actually care about.  Purely local — no network, safe on the event loop.
     """
     if name not in get_downloaded_atlases():
         return False
-    if not IS_V3:
-        return True
     try:
-        return _v3_annotation_is_cached(get_atlas(name))
+        return _annotation_is_cached(get_atlas(name))
     except Exception:
         # Metadata unreadable, or the manifest is there but incomplete: treat
         # it as not-downloaded so callers take the "this will cost you" path.
         return False
 
 
-def _v3_annotation_is_cached(atlas) -> bool:
-    """True if v3's lazily-fetched annotation chunks are already local.
+def _annotation_is_cached(atlas) -> bool:
+    """True if the lazily-fetched annotation chunks are already local.
 
     Mirrors the check ``core.Atlas.annotation`` makes before hitting S3: the
     OME-Zarr pyramid holds one directory per scale level, and a level's voxels
@@ -342,10 +396,10 @@ class _AnatAxis:
 def _atlas_shape(atlas) -> tuple[int, ...]:
     """The atlas's voxel shape, from metadata where the atlas exposes it.
 
-    Both brainglobe versions publish ``shape`` from the atlas manifest, which
-    is the cheap way to ask: on v3, reading ``annotation.shape`` instead would
-    pull the entire array from S3.  Test doubles only carry ``annotation``, so
-    fall back to that.
+    brainglobe publishes ``shape`` from the atlas manifest, which is the cheap
+    way to ask: reading ``annotation.shape`` instead would pull the entire
+    array from S3.  Test doubles only carry ``annotation``, so fall back to
+    that.
     """
     shape = getattr(atlas, "shape", None)
     if shape is not None:
@@ -361,7 +415,7 @@ def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
     :func:`canonical_annotation` for how this is applied.
 
     Metadata only — deliberately never touches ``atlas.annotation``, so
-    callers that just want the volume's extent don't pay for a v3 download.
+    callers that just want the volume's extent don't pay for a download.
     """
     orientation = str(atlas.orientation).lower()
     shape = _atlas_shape(atlas)

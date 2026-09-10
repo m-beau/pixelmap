@@ -26,19 +26,29 @@ COPY . /app
 # Install the Python packages using uv
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --frozen
 
-# Pre-download the most common mouse and rat atlases so users don't wait for
-# multi-hundred-MB downloads on first use.  Stored in ~/.brainglobe/ inside
-# the image layer; mount a Docker volume there in production to persist any
-# additional atlases users request across container restarts.
+# Pre-download the common mouse and rat atlases, plus the registry index, so
+# the running container never has to reach the atlas host.  Under
+# brainglobe-atlasapi v3 both atlases together are only ~9 MB of compressed
+# OME-Zarr, so this is cheap.
 #
-# Best-effort by design: the atlas host (GIN on brainglobe-atlasapi v2, S3 on
-# v3) can be flaky -- GIN intermittently 403s CI runners -- and a warm cache is
-# an optimisation, not a requirement: the app downloads whatever is missing on
-# demand.  The script retries, then exits 0 regardless, so a host outage cannot
-# block a release build.  See the script for why check_latest=False does not
-# make this safe on its own, and why it has to read .annotation to warm v3.
+# NOT best-effort: prefetch_atlases.py exits non-zero if it cannot warm the
+# cache, failing the build.  A cold image is what took the server down in
+# v1.2.x -- it pushes the download into the single-threaded Bokeh process at
+# runtime.  See the script's docstring for the full story.
 ENV PATH="/app/.venv/bin:$PATH"
 RUN python /app/scripts/prefetch_atlases.py
+
+# Keep a pristine copy of the warmed cache outside ~/.brainglobe.
+#
+# Production mounts a Docker volume at /root/.brainglobe to persist atlases
+# users download at runtime.  A named volume is seeded from the image *only
+# when the volume is empty*, so once it exists it permanently masks whatever
+# the image baked in -- and a single deploy of a cold image leaves a cold
+# volume that shadows every later image, warm or not.  entrypoint.sh copies
+# anything missing out of this seed at startup, which makes that trap
+# impossible regardless of the volume's history.
+ENV BRAINGLOBE_SEED=/opt/brainglobe-seed
+RUN cp -a /root/.brainglobe "$BRAINGLOBE_SEED"
 
 # Expose the port
 ENV INTERNAL_PORT=5008

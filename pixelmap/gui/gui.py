@@ -4,6 +4,7 @@ Interactive GUI for Neuropixels Channelmap Generation
 Using Bokeh for better interactivity with hover, click, and rectangular selection
 """
 
+import asyncio
 import base64
 import functools
 import gc
@@ -1210,6 +1211,52 @@ class ChannelmapGUI(param.Parameterized):
         new = dict(data)
         new["x"] = [c + offset for c in centers]
         self.region_label_source.data = new
+
+    @pn.io.with_lock
+    async def _on_compute_anatomy_click(self, event):
+        """Compute button: download off-thread if needed, then draw.
+
+        The download is the only part of the overlay that can block for
+        seconds, and on the deployed server this callback runs on the Bokeh
+        event loop — the same one serving every other session and the
+        container healthcheck.  So a cold atlas is fetched in a worker thread
+        and only the (fast, in-memory) drawing happens back on the loop.
+
+        ``with_lock`` is not optional.  Panel schedules async callbacks with
+        ``nolock`` set unless the function carries ``lock = True``
+        (``panel.io.server.async_execute``), and this method writes to Bokeh
+        ``ColumnDataSource`` models directly.  Without the document lock every
+        such write raises "_pending_writes should be non-None ...", which
+        Bokeh turns into a *silently* dead overlay: the exception surfaces in
+        the server log, the plot never updates, and the button is left stuck
+        on its "Downloading…" label.  Panel's own widgets survive unlocked
+        callbacks; raw Bokeh models do not.
+
+        Bokeh holds the lock across the ``await`` rather than around each
+        statement (``ServerSession._needs_document_lock``), so this stays a
+        per-session lock: the event loop is free to serve other users while
+        the download runs, and the session cannot be reaped mid-download.
+        """
+        name = str(self.atlas_name_input.value).strip()
+        if anatomy_atlas.is_downloaded(name):
+            self.compute_anatomy_overlay()
+            return
+
+        self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
+        self.compute_anatomy_button.disabled = True
+        try:
+            await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
+        except Exception as exc:
+            print(f"Atlas download failed: {exc}")
+            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
+            _notify(
+                "error",
+                f"Could not download '{name}'. Check your connection and retry.",
+            )
+            return
+        finally:
+            self.compute_anatomy_button.disabled = False
+        self.compute_anatomy_overlay()
 
     def compute_anatomy_overlay(self):
         """Compute region bands for the current pose and render them."""
@@ -2610,7 +2657,7 @@ class ChannelmapGUI(param.Parameterized):
         self.clear_anatomy_button = pn.widgets.Button(
             name="Clear overlay", button_type="danger", width=110, margin=(0, 0, 0, 0),
         )
-        self.compute_anatomy_button.on_click(lambda event: self.compute_anatomy_overlay())
+        self.compute_anatomy_button.on_click(self._on_compute_anatomy_click)
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
         self.anatomy_locator = pn.pane.HTML("", sizing_mode="stretch_width")
