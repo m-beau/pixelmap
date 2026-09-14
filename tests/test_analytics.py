@@ -1,6 +1,10 @@
+import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from pixelmap.analytics import (
+    _connect,
     build_request_context,
     build_visitor_key,
     get_total_visits,
@@ -99,3 +103,27 @@ def test_record_session_end_updates_last_seen(tmp_path):
     visitor_summary = get_visitor_summary("cookie:visitor-1", db_path=db_path)
     assert visitor_summary is not None
     assert visitor_summary["last_seen_at"] == "2026-03-19T18:20:00+00:00"
+
+
+def test_initialize_database_closes_connection(tmp_path, monkeypatch):
+    # F7: `with _connect(...) as connection:` alone commits/rolls back but
+    # never closes the underlying sqlite3 connection. initialize_database
+    # (and every other helper) now wraps it in contextlib.closing, so the
+    # connection it opens internally must be unusable once it returns.
+    db_path = tmp_path / "visitor_analytics.sqlite3"
+
+    opened_connections = []
+    real_connect = _connect
+
+    def _tracking_connect(path):
+        connection = real_connect(path)
+        opened_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr("pixelmap.analytics._connect", _tracking_connect)
+
+    initialize_database(db_path)
+
+    assert len(opened_connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_connections[0].execute("SELECT 1")

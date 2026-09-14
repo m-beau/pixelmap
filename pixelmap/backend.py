@@ -2,6 +2,7 @@
 ## Imports ##
 #############
 
+from functools import lru_cache
 from pathlib import Path
 import pickle
 
@@ -105,7 +106,32 @@ def find_forbidden_electrodes(selected_electrodes, wiring_df):
     return np.array(forbidden_electrodes).astype(int)
 
 def make_wiring_maps(wiring_maps_dir):
-    "Precomputes electrode wiring conflict maps for each probe type."
+    """
+    Precomputes electrode wiring conflict maps for each probe type.
+
+    Returns a single object SHARED across every caller (and every Panel
+    session) for a given wiring_maps_dir - it is memoized in-process via
+    functools.lru_cache, keyed on the resolved directory path (so a Path
+    and an equivalent str both hit the same cache entry). The unpickled
+    dict is ~24.2 MB and identical for every session; before this caching
+    was added, each session re-unpickled its own private copy (measured:
+    30.2 MB retained per session, 10 concurrent sessions = +350 MB RSS).
+
+    IMPORTANT: because the mapping is shared, callers MUST treat it as
+    read-only - copy `.keys()` instead of mutating them, and never mutate
+    the conflicting-electrodes sets in place (e.g. no `|=`/`-=`/`.add()`
+    on the returned sets). The GUI's `Electrodes` class only ever reads
+    this mapping (copies `.keys()`, indexes `wiring_map[electrode]`), so
+    it is safe to share.
+    """
+    wiring_maps_dir = Path(wiring_maps_dir).resolve()
+    assert wiring_maps_dir.exists(), f"{wiring_maps_dir} does not exist!"
+    return _load_wiring_maps(str(wiring_maps_dir))
+
+
+@lru_cache(maxsize=None)
+def _load_wiring_maps(wiring_maps_dir):
+    "Loads (or builds) the pickled electrode wiring conflict maps for each probe type. Process-wide cache, keyed on the resolved directory path; use ._load_wiring_maps.cache_clear() in tests that mutate a directory's wiring files."
     wiring_maps_dir = Path(wiring_maps_dir)
     assert wiring_maps_dir.exists(), f"{wiring_maps_dir} does not exist!"
     cache_file = wiring_maps_dir / "wiring_maps.pkl"
