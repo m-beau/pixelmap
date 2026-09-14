@@ -35,17 +35,57 @@ hosting outage used to hang the server rather than degrade it.  Hence
 :func:`list_atlases` answers from disk or from a bundled snapshot and refreshes
 in a daemon thread, and :func:`ensure_downloaded` exists so the GUI can move
 the one genuinely expensive call onto a worker thread.
+
+Memory strategy
+----------------
+``BrainGlobeAtlas.annotation`` decodes the atlas's OME-Zarr chunks into a
+full ``uint32`` numpy array and caches it on the instance forever
+(``core.Atlas.annotation`` -> ``self._annotation = ...data.compute()``): 308
+MB for ``allen_mouse_25um``, 1,074 MB for ``whs_sd_rat_39um``, and roughly
+4.8 GB for any 10 µm atlas.  Multiple independent ``lru_cache`` instances
+used to each keep their own volume alive, so evicting one cache freed nothing while
+the others still held a reference — the production container (capped at
+3000 MB) died with exit 137 once a few large atlases were viewed in one
+session.
+
+The fix has three parts:
+
+* **Compact on-disk format.**  :func:`ensure_compact` builds, once per
+  atlas+version, a ``uint16`` label-index volume (``labels_u16.npy``) plus a
+  small index -> atlas-id lookup table (``lut_u32.npy``), written under
+  :func:`atlas_cache_dir` (``$PIXELMAP_ATLAS_CACHE_DIR``, else
+  ``<brainglobe dir>/pixelmap_cache``).  Index 0 always maps to atlas id 0,
+  so every existing ``!= 0`` "inside the brain" check keeps working
+  unchanged.  The build reads the source volume in axis-0 slabs — for a real
+  atlas that means driving the underlying dask/zarr array directly, so the
+  full ``uint32`` volume never exists in memory at all; brainglobe's own
+  ``_annotation`` cache is dropped immediately afterwards if anything did
+  populate it.  Once built, every later read is ``np.load(path,
+  mmap_mode="r")``: the OS pages in only the voxels actually touched.
+* **One resident volume.**  :func:`canonical_annotation` holds at most one
+  atlas's memmap open at a time (``lru_cache(maxsize=1)``); switching atlases
+  drops the previous one instead of accumulating.
+* **A size guard.**  Before ever touching the source data,
+  :func:`ensure_compact` estimates the ``uint32`` volume's size from atlas
+  metadata alone and refuses atlases above :func:`atlas_max_bytes`
+  (``$PIXELMAP_ATLAS_MAX_BYTES``, default 1.5 GB — enough for the pre-baked
+  rat atlas, too small for a 10 µm atlas) with :class:`AtlasTooLargeError`.
+  The guard costs nothing once the compact file already exists.
 """
 
 from __future__ import annotations
 
 import functools
+import gc
+import json
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from brainglobe_atlasapi import BrainGlobeAtlas
+from brainglobe_atlasapi.config import get_brainglobe_dir
 from brainglobe_atlasapi.descriptors import V3_ANNOTATION_NAME, V3_ATLAS_ROOTDIR
 from brainglobe_atlasapi.list_atlases import (
     get_all_atlases_lastversions,
@@ -55,6 +95,18 @@ from brainglobe_atlasapi.list_atlases import (
 from pixelmap.anatomy._registry_snapshot import REGISTRY_SNAPSHOT
 
 _DEFAULT_ATLAS = "allen_mouse_25um"
+
+# Slab size (planes along array axis 0) used everywhere we walk a full atlas
+# volume instead of materialising it: big enough to amortise per-slab
+# overhead, small enough that a slab of even a 10 µm atlas is a few MB.
+_CHUNK_PLANES = 24
+
+#: uint16 can only address 65536 distinct labels (indices 0..65535); no real
+#: atlas is anywhere close (the Allen CCF has ~1,300 structures), so this is
+#: purely a sanity bound.
+_MAX_COMPACT_IDS = 65536
+
+_DEFAULT_MAX_ATLAS_BYTES = 1_500_000_000
 
 
 @dataclass(frozen=True)
@@ -98,6 +150,37 @@ def ensure_downloaded(name: str = _DEFAULT_ATLAS) -> None:
     session.  A no-op once the atlas is local.
     """
     _ = get_atlas(name).annotation
+
+
+def ensure_ready(name: str = _DEFAULT_ATLAS) -> None:
+    """Make ``name`` fully ready to render: chunks downloaded, compact cache built.
+
+    This is the call the GUI should push onto a worker thread before its
+    first render of an atlas — it supersedes :func:`ensure_downloaded` for
+    that purpose, because "downloaded" alone no longer implies "cheap to
+    read": the one-time compact-cache build (see :func:`ensure_compact`) also
+    has to happen somewhere, and it must not happen inline on the event loop.
+    A no-op once the compact cache already exists.
+    """
+    ensure_compact(name)
+
+
+def is_ready(name: str = _DEFAULT_ATLAS) -> bool:
+    """True if ``name`` can be read via :func:`canonical_annotation` for free.
+
+    Stronger than :func:`is_downloaded`: the annotation chunks being local is
+    not enough on its own any more, because the first read of an atlas also
+    has to build its compact cache (see :func:`ensure_compact`) — a one-time
+    cost that must run off the event loop. Checks :func:`is_downloaded` first
+    so an atlas that was never downloaded doesn't pay for a ``get_atlas``
+    call just to answer "not ready".
+    """
+    if not is_downloaded(name):
+        return False
+    try:
+        return _compact_paths(name).labels.exists()
+    except Exception:
+        return False
 
 
 @functools.lru_cache(maxsize=1)
@@ -359,16 +442,43 @@ def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     Returns canonical ``(AP, ML, DV)`` µm, or ``None`` if the atlas delineates
     no anterior commissure. Same recipe used (and validated) for the WHS rat:
     the AC's midline-crossing centroid. Requires the atlas (downloads if absent).
+
+    ``ann`` (from :func:`canonical_annotation`) holds compact label *indices*,
+    not atlas ids, so ``ac_ids`` is translated through :func:`label_ids`
+    first.  The volume is then scanned in axis-0 slabs rather than with one
+    ``np.isin`` over the whole array, so this never materialises a
+    full-volume boolean temporary (up to ~1.2 GB for a 10 µm atlas).
     """
     atlas = get_atlas(name)
     ac_ids = [int(s["id"]) for s in atlas.structures.values()
               if "anterior" in s["name"].lower() and "commis" in s["name"].lower()]
     if not ac_ids:
         return None
-    ann, res = canonical_annotation(name)  # (AP, DV, ML)
-    ap, dv, ml = np.where(np.isin(ann, ac_ids))
-    if ap.size == 0:
+    ann, res = canonical_annotation(name)  # (AP, DV, ML), compact indices
+    lut = label_ids(name)
+    ac_idx = np.flatnonzero(np.isin(lut, ac_ids))
+    if ac_idx.size == 0:
         return None
+
+    ap_parts, dv_parts, ml_parts = [], [], []
+    n_ap = ann.shape[0]
+    for start in range(0, n_ap, _CHUNK_PLANES):
+        end = min(start + _CHUNK_PLANES, n_ap)
+        slab = np.asarray(ann[start:end])
+        mask = np.isin(slab, ac_idx)
+        if not mask.any():
+            continue
+        a, d, m = np.nonzero(mask)
+        ap_parts.append(a + start)
+        dv_parts.append(d)
+        ml_parts.append(m)
+
+    if not ap_parts:
+        return None
+    ap = np.concatenate(ap_parts)
+    dv = np.concatenate(dv_parts)
+    ml = np.concatenate(ml_parts)
+
     midline = float(ml.mean())                 # AC ~symmetric → centroid ML = midline
     near = np.abs(ml - midline) < 4             # voxels near midline = decussation
     return (float(ap[near].mean() * res[0]),
@@ -407,6 +517,257 @@ def _atlas_shape(atlas) -> tuple[int, ...]:
     return tuple(int(s) for s in atlas.annotation.shape)
 
 
+class AtlasTooLargeError(RuntimeError):
+    """Raised when an atlas's annotation would exceed :func:`atlas_max_bytes`.
+
+    Raised before anything expensive happens — the estimate comes from
+    metadata alone (see :func:`_atlas_shape`) — so it is cheap to hit
+    repeatedly (e.g. every time the GUI dropdown offers a 10 µm atlas) and
+    safe to surface directly to the user.
+    """
+
+
+def atlas_cache_dir() -> Path:
+    """Where PixelMap writes its compact per-atlas volumes.
+
+    ``$PIXELMAP_ATLAS_CACHE_DIR`` if set (tests point this at a tmp dir so
+    nothing ever lands under a real home directory); otherwise a
+    ``pixelmap_cache`` subdirectory of brainglobe's own data directory, so
+    the compact cache lives alongside the atlases it was built from and
+    survives container restarts the same way they do.
+    """
+    override = os.environ.get("PIXELMAP_ATLAS_CACHE_DIR")
+    if override:
+        return Path(override)
+    try:
+        brainglobe_dir = get_brainglobe_dir()
+    except Exception:
+        brainglobe_dir = Path.home() / ".brainglobe"
+    return Path(brainglobe_dir) / "pixelmap_cache"
+
+
+def atlas_max_bytes() -> int:
+    """Largest ``uint32`` annotation volume :func:`ensure_compact` will build.
+
+    ``$PIXELMAP_ATLAS_MAX_BYTES`` if set (and a valid positive integer),
+    else 1.5 GB — comfortably above the pre-baked ``whs_sd_rat_39um``
+    (~1.07 GB) and well below any 10 µm atlas (~4.8 GB).
+    """
+    raw = os.environ.get("PIXELMAP_ATLAS_MAX_BYTES")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return _DEFAULT_MAX_ATLAS_BYTES
+
+
+@dataclass(frozen=True)
+class _CompactPaths:
+    """Where one atlas+version's compact files live."""
+
+    dir: Path
+    labels: Path
+    lut: Path
+    meta: Path
+
+
+def _atlas_version(atlas) -> str:
+    """The atlas's version string for cache namespacing, or ``"unknown"``."""
+    metadata = getattr(atlas, "metadata", None)
+    if isinstance(metadata, dict):
+        version = metadata.get("version")
+        if version:
+            return str(version)
+    return "unknown"
+
+
+def _compact_paths(atlas_name: str) -> _CompactPaths:
+    atlas = get_atlas(atlas_name)
+    out_dir = atlas_cache_dir() / atlas_name / _atlas_version(atlas)
+    return _CompactPaths(
+        dir=out_dir,
+        labels=out_dir / "labels_u16.npy",
+        lut=out_dir / "lut_u32.npy",
+        meta=out_dir / "meta.json",
+    )
+
+
+def _open_annotation_dask(atlas):
+    """The atlas's annotation as a lazy dask array, chunk-downloaded but
+    never computed as a whole.
+
+    Mirrors ``brainglobe_atlasapi.core.Atlas.annotation``'s own
+    "download the pyramid level's chunks if they aren't local yet" logic
+    (see also :func:`_annotation_is_cached`), but stops short of that
+    property's final ``.data.compute()`` — which is exactly the full
+    ``uint32`` materialisation :func:`ensure_compact` exists to avoid.  The
+    returned array can be sliced along axis 0 and only those slabs are ever
+    computed (:func:`_annotation_source` does that).
+
+    This reaches into brainglobe's private attributes (``_annotation_pyramid
+    _level``, ``fs``, ``root_dir``) because there is no public "give me a
+    lazy handle" API. If a future brainglobe release changes that shape,
+    :func:`_annotation_source` falls back to the safe (but memory-heavy)
+    ``atlas.annotation`` path instead of failing outright.
+    """
+    import ngff_zarr as nz
+    from brainglobe_atlasapi.descriptors import remote_url_s3
+    from fsspec.callbacks import TqdmCallback
+
+    annotation_location = atlas.metadata["annotation_set"]["location"][1:]
+    annotation_path = Path(atlas.root_dir) / annotation_location / V3_ANNOTATION_NAME
+    multiscale = nz.from_ngff_zarr(annotation_path)
+    level = atlas._annotation_pyramid_level
+    dataset_path = multiscale.metadata.datasets[level].path
+    resolution_path = annotation_path / dataset_path
+
+    if not (resolution_path / "c").exists():
+        remote_path = remote_url_s3.format(
+            f"{annotation_location}/{V3_ANNOTATION_NAME}/{dataset_path}/"
+        )
+        atlas.fs.get(remote_path, resolution_path, recursive=True, callback=TqdmCallback())
+
+    return multiscale.images[level].data
+
+
+def _annotation_source(atlas):
+    """An axis-0-sliceable source for ``atlas``'s annotation.
+
+    For a real ``BrainGlobeAtlas`` this is a lazy dask array (via
+    :func:`_open_annotation_dask`): slicing it and converting the slice with
+    ``np.asarray`` computes only that slab, so the full volume is never
+    resident.  Test doubles carry a plain numpy ``annotation`` array with
+    none of brainglobe's private plumbing — detected by the absence of
+    ``fs``/``_annotation_pyramid_level`` — and are returned as-is; slicing a
+    numpy array is already a cheap view.
+    """
+    if hasattr(atlas, "fs") and hasattr(atlas, "_annotation_pyramid_level"):
+        try:
+            return _open_annotation_dask(atlas)
+        except Exception:
+            pass  # brainglobe internals moved; fall back below.
+    return np.asarray(atlas.annotation)
+
+
+def ensure_compact(atlas_name: str) -> Path:
+    """Build (once per atlas+version) the compact ``uint16`` label volume.
+
+    Returns the directory containing ``labels_u16.npy`` (compact indices,
+    same shape/orientation as the atlas's native annotation),
+    ``lut_u32.npy`` (index -> atlas id, with index 0 always mapping to id 0
+    so every ``!= 0`` "inside the brain" check downstream keeps its
+    meaning), and ``meta.json``. A no-op — just a file-existence check — once
+    built, which is what makes it safe to call from
+    :func:`canonical_annotation` on every render.
+
+    The size guard (:func:`atlas_max_bytes`) runs before any source data is
+    touched, from metadata alone.  The build itself reads the source in
+    axis-0 slabs (see :func:`_annotation_source`) so at most one slab's worth
+    of the native ``uint32`` volume is ever resident — for a real atlas nothing
+    beyond the on-disk OME-Zarr chunks is ever fetched into RAM at once.
+    """
+    paths = _compact_paths(atlas_name)
+    if paths.labels.exists() and paths.lut.exists() and paths.meta.exists():
+        return paths.dir
+
+    atlas = get_atlas(atlas_name)
+    shape = _atlas_shape(atlas)
+    estimated_bytes = int(np.prod(shape)) * 4  # native annotation is uint32
+    limit = atlas_max_bytes()
+    if estimated_bytes > limit:
+        raise AtlasTooLargeError(
+            f"Atlas {atlas_name!r} would need ~{estimated_bytes / 1e9:.2f} GB "
+            f"to load as uint32 (limit {limit / 1e9:.2f} GB). Raise the "
+            "limit with the PIXELMAP_ATLAS_MAX_BYTES environment variable "
+            "if you really want to load it."
+        )
+
+    paths.dir.mkdir(parents=True, exist_ok=True)
+    source = _annotation_source(atlas)
+    n = int(source.shape[0])
+
+    try:
+        # Pass 1: the sorted set of ids present, with 0 forced to index 0
+        # (present even if the volume happens to have no background voxels,
+        # so the invariant holds unconditionally).
+        ids = np.array([0], dtype=np.int64)
+        for start in range(0, n, _CHUNK_PLANES):
+            end = min(start + _CHUNK_PLANES, n)
+            slab = np.asarray(source[start:end])
+            ids = np.union1d(ids, np.unique(slab))
+
+        if ids.size > _MAX_COMPACT_IDS:
+            raise AtlasTooLargeError(
+                f"Atlas {atlas_name!r} has {ids.size} distinct region ids, "
+                f"more than uint16 can compactly address ({_MAX_COMPACT_IDS})."
+            )
+
+        # Pass 2: write compact indices, still slab by slab.
+        tmp_labels = paths.labels.with_suffix(".npy.tmp")
+        labels_out = np.lib.format.open_memmap(
+            tmp_labels, mode="w+", dtype=np.uint16, shape=tuple(shape)
+        )
+        try:
+            for start in range(0, n, _CHUNK_PLANES):
+                end = min(start + _CHUNK_PLANES, n)
+                slab = np.asarray(source[start:end])
+                labels_out[start:end] = np.searchsorted(ids, slab).astype(np.uint16)
+            labels_out.flush()
+        finally:
+            del labels_out
+        os.replace(tmp_labels, paths.labels)
+
+        tmp_lut = paths.lut.with_suffix(".npy.tmp")
+        # np.save appends ".npy" to a *string* path that doesn't already end
+        # in it (so "lut_u32.npy.tmp" would silently become
+        # "lut_u32.npy.tmp.npy") — write through an open file object instead,
+        # which np.save uses verbatim.
+        with open(tmp_lut, "wb") as f:
+            np.save(f, ids.astype(np.uint32))
+        os.replace(tmp_lut, paths.lut)
+
+        tmp_meta = paths.meta.with_suffix(".json.tmp")
+        meta = {
+            "shape": [int(s) for s in shape],
+            "orientation": str(getattr(atlas, "orientation", "")),
+            "resolution": [float(r) for r in getattr(atlas, "resolution", ())],
+            "source_dtype": "uint32",
+            "n_ids": int(ids.size),
+        }
+        tmp_meta.write_text(json.dumps(meta))
+        os.replace(tmp_meta, paths.meta)
+    except BaseException:
+        # Never leave a half-built directory that a later call would trust.
+        for stray in (paths.labels.with_suffix(".npy.tmp"), paths.lut.with_suffix(".npy.tmp"),
+                      paths.meta.with_suffix(".json.tmp")):
+            stray.unlink(missing_ok=True)
+        raise
+    finally:
+        # Release brainglobe's own copy, if reading it (directly or via the
+        # dask fallback) populated it — the compact memmap is the resident
+        # copy from here on.
+        if getattr(atlas, "_annotation", None) is not None:
+            atlas._annotation = None
+        del source
+        gc.collect()
+
+    return paths.dir
+
+
+@functools.lru_cache(maxsize=4)
+def label_ids(atlas_name: str) -> np.ndarray:
+    """The compact-index -> atlas-id lookup table for ``atlas_name``.
+
+    Small (one ``uint32`` per distinct region — a few KB even for the Allen
+    CCF), so caching a handful of these costs nothing worth bounding tightly.
+    """
+    out_dir = ensure_compact(atlas_name)
+    return np.load(out_dir / "lut_u32.npy")
+
+
 def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
     """Map ``"AP"``/``"DV"``/``"ML"`` to their place in the native array.
 
@@ -434,9 +795,9 @@ def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
     return axes
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=1)
 def canonical_annotation(atlas_name: str):
-    """Return ``(annotation, resolution)`` reoriented to canonical ``(AP, DV, ML)``.
+    """Return ``(labels, resolution)`` reoriented to canonical ``(AP, DV, ML)``.
 
     The canonical layout is brainglobe ``"asr"``: axis 0 = AP (anterior→posterior),
     axis 1 = DV (dorsal→ventral), axis 2 = ML (right→left), with µm measured from
@@ -444,11 +805,24 @@ def canonical_annotation(atlas_name: str):
     assumes this layout, so funnelling every atlas through here is what lets
     non-Allen orientations work. For an already-``asr`` atlas this is a no-op
     (identity transpose, no flips), so Allen behavior is unchanged.
+
+    ``labels`` holds *compact indices* into :func:`label_ids`, not atlas ids
+    — see :func:`ensure_compact`. Index 0 always means atlas id 0 (outside
+    the brain / undefined), so any existing ``!= 0`` check keeps working
+    unchanged; anything that needs the real atlas id must map through
+    ``label_ids(atlas_name)`` explicitly (e.g. :func:`lookup_regions`).
+
+    ``maxsize=1``: only one atlas's volume is ever resident at a time.
+    Switching atlases drops the previous one (its backing memmap is closed
+    once nothing references it) rather than accumulating — see the module
+    docstring's "Memory strategy" section.
     """
     atlas = get_atlas(atlas_name)
     axes = anatomical_axes(atlas)
+    out_dir = ensure_compact(atlas_name)
+    labels = np.load(out_dir / "labels_u16.npy", mmap_mode="r")
     order = (axes["AP"].array_axis, axes["DV"].array_axis, axes["ML"].array_axis)
-    arr = np.transpose(atlas.annotation, order)
+    arr = np.transpose(labels, order)
     flip_axes = tuple(i for i, kind in enumerate(("AP", "DV", "ML")) if axes[kind].flip)
     if flip_axes:
         arr = np.flip(arr, axis=flip_axes)
@@ -502,16 +876,18 @@ def lookup_regions(
     ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
 
     shape = annotation.shape
+    lut = label_ids(atlas_name)  # compact index -> atlas id
 
     results: list[RegionInfo | None] = []
     for ap, dv, ml in zip(ap_idx, dv_idx, ml_idx):
         if not (0 <= ap < shape[0] and 0 <= dv < shape[1] and 0 <= ml < shape[2]):
             results.append(None)
             continue
-        region_id = int(annotation[ap, dv, ml])
-        if region_id == 0:  # outside-brain or undefined
+        region_idx = int(annotation[ap, dv, ml])
+        if region_idx == 0:  # outside-brain or undefined
             results.append(None)
             continue
+        region_id = int(lut[region_idx])
         results.append(_region_info_from_id(atlas_name, region_id))
     return results
 
@@ -544,3 +920,28 @@ def _region_info_from_id(atlas_name: str, region_id: int) -> RegionInfo | None:
         name=str(entry.get("name", "")),
         rgb=rgb,  # type: ignore[arg-type]
     )
+
+
+def clear_caches() -> None:
+    """Drop every module-level cache this module keeps.
+
+    Atlas objects (:func:`get_atlas`), the one resident volume
+    (:func:`canonical_annotation`), lookup tables (:func:`label_ids`),
+    derived origins (:func:`derive_origin_from_ac`) and resolved region info
+    (:func:`_region_info_from_id`). Tests use this in an autouse fixture so a
+    fake atlas from one test never leaks into the next; production code has
+    no reason to call it — the bounded caches above are what keep memory flat
+    over a long-running server's lifetime.
+
+    Tolerant of any of these names having been monkeypatched to something
+    without ``cache_clear`` (tests do this, e.g. replacing ``get_atlas``
+    outright) — skips it rather than raising, so fixture teardown ordering
+    relative to ``monkeypatch``'s own undo can't turn this into a spurious
+    failure.
+    """
+    for fn in (get_atlas, canonical_annotation, label_ids,
+               derive_origin_from_ac, _region_info_from_id):
+        cache_clear = getattr(fn, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+    gc.collect()

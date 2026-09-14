@@ -1214,13 +1214,16 @@ class ChannelmapGUI(param.Parameterized):
 
     @pn.io.with_lock
     async def _on_compute_anatomy_click(self, event):
-        """Compute button: download off-thread if needed, then draw.
+        """Compute button: prepare off-thread if needed, then draw.
 
-        The download is the only part of the overlay that can block for
-        seconds, and on the deployed server this callback runs on the Bokeh
-        event loop — the same one serving every other session and the
-        container healthcheck.  So a cold atlas is fetched in a worker thread
-        and only the (fast, in-memory) drawing happens back on the loop.
+        "Prepare" is downloading the atlas *and* building its compact
+        on-disk cache (see ``pixelmap.anatomy.atlas.ensure_compact`` /
+        ``is_ready``) — both are one-time costs that can block for seconds
+        (the compact build walks the whole volume once), and on the deployed
+        server this callback runs on the Bokeh event loop — the same one
+        serving every other session and the container healthcheck.  So a
+        cold or not-yet-compacted atlas is prepared in a worker thread and
+        only the (fast, memmapped) drawing happens back on the loop.
 
         ``with_lock`` is not optional.  Panel schedules async callbacks with
         ``nolock`` set unless the function carries ``lock = True``
@@ -1238,20 +1241,20 @@ class ChannelmapGUI(param.Parameterized):
         the download runs, and the session cannot be reaped mid-download.
         """
         name = str(self.atlas_name_input.value).strip()
-        if anatomy_atlas.is_downloaded(name):
+        if anatomy_atlas.is_ready(name):
             self.compute_anatomy_overlay()
             return
 
-        self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
+        self.compute_anatomy_button.name = "Preparing atlas… (first use only)"
         self.compute_anatomy_button.disabled = True
         try:
-            await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
+            await asyncio.to_thread(anatomy_atlas.ensure_ready, name)
         except Exception as exc:
-            print(f"Atlas download failed: {exc}")
+            print(f"Atlas preparation failed: {exc}")
             self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
             _notify(
                 "error",
-                f"Could not download '{name}'. Check your connection and retry.",
+                f"Could not prepare '{name}'. Check your connection and retry.",
             )
             return
         finally:
@@ -1292,6 +1295,7 @@ class ChannelmapGUI(param.Parameterized):
             print(f"Anatomy lookup failed: {exc}")
             self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
             self.compute_anatomy_button.disabled = False
+            _notify("error", str(exc), duration=0)
             return
 
         width = self._shank_plot_width()

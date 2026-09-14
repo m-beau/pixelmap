@@ -28,6 +28,18 @@ hundred KB — and pulls the annotation array from S3 lazily, the first time
 something reads ``atlas.annotation``.  Constructing the atlas would therefore
 "succeed" while leaving the expensive part for the first user to hit at
 runtime, which is exactly what this script exists to prevent.
+
+Why this also builds the compact cache
+---------------------------------------
+Reading the raw annotation isn't the only one-time cost any more:
+``pixelmap.anatomy.atlas.ensure_compact`` converts it into the compact
+``uint16`` memmap format the app actually reads at runtime (see that
+module's "Memory strategy" docstring).  That conversion is itself a full
+pass over the volume, so doing it here — once, at build time, sharing the
+same atlas instance the download already populated — means the image ships
+with the compact files already in place and the first production user never
+pays for either the download or the conversion inline on the Bokeh event
+loop.
 """
 
 import os
@@ -60,14 +72,19 @@ def warm_registry() -> bool:
 
 
 def fetch(atlas_name: str) -> bool:
-    """Download one atlas, retrying transient failures. True if it landed."""
-    from brainglobe_atlasapi import BrainGlobeAtlas
+    """Download one atlas and build its compact cache, retrying transient
+    failures. True if it landed."""
+    from pixelmap.anatomy.atlas import ensure_compact, get_atlas
 
     for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
         try:
-            atlas = BrainGlobeAtlas(atlas_name, check_latest=False)
+            # get_atlas (not a bare BrainGlobeAtlas(...)) so ensure_compact
+            # below reuses this same instance instead of downloading twice.
+            atlas = get_atlas(atlas_name)
             # Force the annotation onto disk (see the module docstring).
             _ = atlas.annotation
+            # Build the compact uint16 memmap the app reads at runtime.
+            ensure_compact(atlas_name)
             print(f"[prefetch] {atlas_name}: ok", flush=True)
             return True
         except Exception as exc:  # noqa: BLE001 - retried, then reported below

@@ -96,6 +96,10 @@ def tip_depth_below_surface_um(
         & (ml_idx >= 0) & (ml_idx < n_ml)
     )
     inside = np.zeros(distances.shape, dtype=bool)
+    # `annotation` holds compact label *indices* (see
+    # pixelmap.anatomy.atlas.ensure_compact), not atlas ids — but index 0 is
+    # guaranteed to mean atlas id 0 (outside the brain), so this `!= 0` check
+    # is exactly as valid as it was against the raw ids.
     inside[in_volume] = (
         annotation[ap_idx[in_volume], dv_idx[in_volume], ml_idx[in_volume]] != 0
     )
