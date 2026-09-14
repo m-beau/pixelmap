@@ -34,14 +34,11 @@ def _make_atlas_cls(annotation, orientation="asr", resolution=RES_UM):
 
 
 @pytest.fixture(autouse=True)
-def _reset_cache():
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+def _reset_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("PIXELMAP_ATLAS_CACHE_DIR", str(tmp_path))
+    atlas_module.clear_caches()
     yield
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+    atlas_module.clear_caches()
 
 
 @pytest.fixture
