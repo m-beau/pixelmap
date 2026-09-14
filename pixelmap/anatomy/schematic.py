@@ -21,7 +21,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.transforms import Affine2D
 
-from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
+from pixelmap.anatomy.atlas import canonical_annotation, get_atlas, label_ids
 from pixelmap.anatomy.transform import probe_to_atlas
 
 _FILL = "#d7d7e0"          # whole-brain silhouette fill (fallback view)
@@ -30,17 +30,65 @@ _PROBE = "#d62728"         # probe trajectory + tip
 _REGION_ALPHA = 0.6        # region fill opacity
 _OUTLINE_RGBA = (0.2, 0.2, 0.25, 0.8)
 
+# Slab size used when walking a full atlas volume for the silhouette fallback
+# (see _brain_projections) — mirrors pixelmap.anatomy.atlas's chunking.
+_CHUNK_PLANES = 24
 
-@functools.lru_cache(maxsize=4)
+
 def _atlas_data(atlas_name: str):
-    """Cached ``(atlas, annotation, resolution)`` in canonical ``(AP, DV, ML)``.
+    """``(atlas, labels, resolution, lut)`` in canonical ``(AP, DV, ML)``.
 
-    Going through :func:`~pixelmap.anatomy.atlas.canonical_annotation` means the
-    slicing/projection below works for any atlas orientation, not just Allen's.
+    Going through :func:`~pixelmap.anatomy.atlas.canonical_annotation` means
+    the slicing/projection below works for any atlas orientation, not just
+    Allen's. Not cached here: ``get_atlas`` and ``canonical_annotation`` are
+    already each bounded caches (the latter holding the one resident
+    volume), so caching their combination again would only pin a second,
+    redundant reference to the same data.
+
+    ``labels`` holds compact indices, not atlas ids — see
+    :func:`pixelmap.anatomy.atlas.ensure_compact`. ``lut`` maps indices to
+    the atlas ids that ``_region_fill_rgba`` and atlas-color lookups need.
     """
     atlas = get_atlas(atlas_name)
-    annotation, resolution = canonical_annotation(atlas_name)
-    return atlas, annotation, resolution
+    labels, resolution = canonical_annotation(atlas_name)
+    lut = label_ids(atlas_name)
+    return atlas, labels, resolution, lut
+
+
+@functools.lru_cache(maxsize=2)
+def _brain_projections(atlas_name: str):
+    """Three 2D "is there any brain here" silhouettes, for the fallback view.
+
+    Only ever needed when a slice through the tip misses the volume
+    entirely (see :func:`render_locator`), which is rare — so this used to
+    be computed unconditionally on every render as ``(ann > 0).any(axis=...)``
+    three times over the *whole* volume (+77 MB for allen_mouse_25um, +268 MB
+    for whs_sd_rat_39um, +~1.2 GB for a 10 µm atlas, as a transient). Instead:
+    computed lazily (only when a fallback is actually needed), walked in
+    axis-0 slabs so no full-volume boolean temporary is ever created, and
+    cached so a pose-field change that keeps reusing the fallback doesn't
+    repeat the walk.
+
+    Returns ``(sag, cor, hor)``: ``sag`` is ``(DV, AP)`` (ML collapsed, then
+    transposed to match the sagittal view's ``(y, x)`` layout), ``cor`` is
+    ``(DV, ML)`` (AP collapsed) and ``hor`` is ``(AP, ML)`` (DV collapsed) —
+    matching the fallback_mask shapes the pre-compaction code passed to
+    ``_draw_view``.
+    """
+    labels, _res = canonical_annotation(atlas_name)
+    n_ap, n_dv, n_ml = labels.shape
+    sag = np.zeros((n_ap, n_dv), dtype=bool)   # ML collapsed, per-AP-row
+    hor = np.zeros((n_ap, n_ml), dtype=bool)   # DV collapsed, per-AP-row
+    cor = np.zeros((n_dv, n_ml), dtype=bool)   # AP collapsed, OR-accumulated
+
+    for start in range(0, n_ap, _CHUNK_PLANES):
+        end = min(start + _CHUNK_PLANES, n_ap)
+        slab = np.asarray(labels[start:end]) != 0     # (chunk, DV, ML)
+        sag[start:end, :] = slab.any(axis=2)
+        hor[start:end, :] = slab.any(axis=1)
+        cor |= slab.any(axis=0)
+
+    return sag.T, cor, hor
 
 
 def _region_rgb(atlas, region_id: int) -> tuple[int, int, int]:
@@ -75,19 +123,31 @@ def _outline_rgba(label_img: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title, warp=None):
+def _draw_view(ax, label_img, lut, x_um, y_um, atlas, fallback_mask_fn, title, warp=None):
     """Draw one slice (colored regions + outlines), or a silhouette fallback.
 
-    ``label_img`` and ``fallback_mask`` are shaped ``(len(y_um), len(x_um))``;
-    y is DV in both views. The y-axis is oriented dorsal-up. ``warp``, if given,
-    is ``(scale_x, scale_y, rotate_deg, pivot_x, pivot_y)`` applied to the *brain
-    image only* (not the probe) so the atlas visibly squashes/tilts about bregma.
+    ``label_img`` holds compact indices (see
+    :func:`~pixelmap.anatomy.atlas.ensure_compact`) shaped
+    ``(len(y_um), len(x_um))``; y is DV in both views. The y-axis is oriented
+    dorsal-up. ``lut`` maps those indices to atlas ids for coloring — the
+    outline layer needs no mapping, since a boundary between differing
+    indices is exactly a boundary between differing ids.
+
+    ``fallback_mask_fn`` is a zero-argument callable returning the whole-brain
+    silhouette mask, called only when this slice misses the volume (tip
+    outside it) — see :func:`_brain_projections`, which is what makes this
+    lazy rather than a precomputed array.
+
+    ``warp``, if given, is ``(scale_x, scale_y, rotate_deg, pivot_x, pivot_y)``
+    applied to the *brain image only* (not the probe) so the atlas visibly
+    squashes/tilts about bregma.
     """
     # extent=(left, right, bottom, top); top = y_um[0] (DV 0) puts dorsal up.
     extent = (float(x_um[0]), float(x_um[-1]), float(y_um[-1]), float(y_um[0]))
     artists = []
     if label_img.any():
-        artists.append(ax.imshow(_region_fill_rgba(label_img, atlas), extent=extent,
+        id_img = lut[label_img]
+        artists.append(ax.imshow(_region_fill_rgba(id_img, atlas), extent=extent,
                        origin="upper", aspect="equal", interpolation="nearest", zorder=1))
         artists.append(ax.imshow(_outline_rgba(label_img), extent=extent,
                        origin="upper", aspect="equal", interpolation="nearest", zorder=2))
@@ -95,6 +155,7 @@ def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title, warp=None
         ax.set_ylim(extent[2], extent[3])
     else:
         # Tip is outside the volume here — show the whole-brain silhouette.
+        fallback_mask = fallback_mask_fn()
         artists.append(ax.contourf(x_um, y_um, fallback_mask, levels=[0.5, 1.5], colors=[_FILL]))
         artists.append(ax.contour(x_um, y_um, fallback_mask, levels=[0.5], colors=[_EDGE], linewidths=0.6))
         ax.invert_yaxis()
@@ -137,7 +198,7 @@ def render_locator(
     :class:`~matplotlib.figure.Figure` for a Panel ``Matplotlib`` pane (no
     pyplot global state).
     """
-    atlas, ann, res = _atlas_data(atlas_name)
+    atlas, ann, res, lut = _atlas_data(atlas_name)
     n_ap, n_dv, n_ml = ann.shape
     ap_um = np.arange(n_ap) * res[0]
     dv_um = np.arange(n_dv) * res[1]
@@ -158,7 +219,6 @@ def render_locator(
     ap_idx = int(np.clip(round(tip_ap / res[0]), 0, n_ap - 1))
     dv_idx = int(np.clip(round(tip_dv / res[1]), 0, n_dv - 1))
     ml_idx = int(np.clip(round(tip_ml / res[2]), 0, n_ml - 1))
-    inside = ann > 0
 
     # 2×2 grid (4th cell empty) so the figure stays narrow enough to fit the
     # side panel without overflowing the page; a 1×3 row would be too wide.
@@ -180,15 +240,17 @@ def render_locator(
         warp_hor = (ml_squish, ap_squish, 0.0, b_ml, b_ap)        # x=ML, y=AP
 
     # Labels report the coordinate along each panel's visible horizontal axis:
-    # AP on the sagittal view, ML on the coronal view.
-    _draw_view(ax_sag, ann[:, :, ml_idx].T, ap_um, dv_um, atlas,
-               fallback_mask=inside.any(axis=2).T,
+    # AP on the sagittal view, ML on the coronal view. fallback_mask_fn is
+    # lazy (see _brain_projections) — the whole-brain silhouette is only ever
+    # walked out of the volume when a slice actually misses the brain.
+    _draw_view(ax_sag, np.asarray(ann[:, :, ml_idx]).T, lut, ap_um, dv_um, atlas,
+               fallback_mask_fn=lambda: _brain_projections(atlas_name)[0],
                title=f"Sagittal · AP {ap_um[ap_idx]:.0f} µm", warp=warp_sag)
-    _draw_view(ax_cor, ann[ap_idx, :, :], ml_um, dv_um, atlas,
-               fallback_mask=inside.any(axis=0),
+    _draw_view(ax_cor, np.asarray(ann[ap_idx, :, :]), lut, ml_um, dv_um, atlas,
+               fallback_mask_fn=lambda: _brain_projections(atlas_name)[1],
                title=f"Coronal · ML {ml_um[ml_idx]:.0f} µm", warp=warp_cor)
-    _draw_view(ax_hor, ann[:, dv_idx, :], ml_um, ap_um, atlas,
-               fallback_mask=inside.any(axis=1),
+    _draw_view(ax_hor, np.asarray(ann[:, dv_idx, :]), lut, ml_um, ap_um, atlas,
+               fallback_mask_fn=lambda: _brain_projections(atlas_name)[2],
                title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm", warp=warp_hor)
 
     # Probe (red) + bregma estimate (black) per view: (axis, x-col, y-col)

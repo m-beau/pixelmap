@@ -63,7 +63,7 @@ def _load_survey(gui, content: str, filename: str = "survey.txt"):
 
 
 @pytest.fixture
-def layered_atlas(monkeypatch):
+def layered_atlas(monkeypatch, tmp_path):
     """A DV-layered fake brain wide enough to hold the whole probe.
 
     Canonical indexing is (AP, DV, ML) at 25 µm. DV voxels 0–39 are outside the
@@ -85,16 +85,16 @@ def layered_atlas(monkeypatch):
                 2: {"acronym": "SUP", "name": "Superficial region", "rgb_triplet": [200, 100, 50]},
             }
 
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+    # ensure_compact's compact-cache build (see pixelmap.anatomy.atlas) writes
+    # real files for this fake atlas the first time anything reads it — point
+    # that cache at a tmp dir so tests never touch a real ~/.brainglobe.
+    monkeypatch.setenv("PIXELMAP_ATLAS_CACHE_DIR", str(tmp_path))
+    atlas_module.clear_caches()
     monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _FakeAtlas)
     # Pretend it's cached so the GUI treats it as a local atlas throughout.
     monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=FAKE_ATLAS: True)
     yield ann
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+    atlas_module.clear_caches()
 
 
 @pytest.fixture
@@ -637,42 +637,43 @@ class TestComputeButtonRunsUnderTheDocumentLock:
         assert len(posed_gui.region_band_source.data["acronym"]) > 0
 
     def test_a_cold_atlas_is_downloaded_off_the_event_loop(self, served, monkeypatch):
-        """The download must happen in a worker thread, not on the loop.
+        """Atlas preparation (download + compact-cache build) must happen in
+        a worker thread, not on the loop.
 
-        On the server the calling thread serves every other session, so a
-        download that runs inline stalls the whole app — the behaviour this
-        handler exists to prevent.
+        On the server the calling thread serves every other session, so
+        preparation that runs inline stalls the whole app — the behaviour
+        this handler exists to prevent.
         """
         gui, session = served
-        download_threads = []
-        downloaded = []
+        prepare_threads = []
+        prepared = []
 
-        # Cold until ensure_downloaded has run, warm afterwards.
-        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name: bool(downloaded))
+        # Not ready until ensure_ready has run, ready afterwards.
+        monkeypatch.setattr(atlas_module, "is_ready", lambda name: bool(prepared))
 
-        def _fake_download(name):
-            download_threads.append(threading.current_thread())
-            downloaded.append(name)
+        def _fake_prepare(name):
+            prepare_threads.append(threading.current_thread())
+            prepared.append(name)
 
-        monkeypatch.setattr(atlas_module, "ensure_downloaded", _fake_download)
+        monkeypatch.setattr(atlas_module, "ensure_ready", _fake_prepare)
 
         asyncio.run(session.with_document_locked(gui._on_compute_anatomy_click, None))
 
-        assert downloaded == [FAKE_ATLAS]
-        assert download_threads[0] is not threading.main_thread(), (
-            "the atlas download ran on the event loop thread"
+        assert prepared == [FAKE_ATLAS]
+        assert prepare_threads[0] is not threading.main_thread(), (
+            "atlas preparation ran on the event loop thread"
         )
         assert len(gui.region_band_source.data["acronym"]) > 0
 
     def test_a_failed_download_leaves_the_button_usable(self, served, monkeypatch):
-        """A network failure must not strand the button mid-"Downloading…"."""
+        """A network failure must not strand the button mid-"Preparing…"."""
         gui, session = served
-        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name: False)
+        monkeypatch.setattr(atlas_module, "is_ready", lambda name: False)
 
         def _boom(name):
             raise ConnectionError("atlas host unreachable")
 
-        monkeypatch.setattr(atlas_module, "ensure_downloaded", _boom)
+        monkeypatch.setattr(atlas_module, "ensure_ready", _boom)
 
         asyncio.run(session.with_document_locked(gui._on_compute_anatomy_click, None))
 

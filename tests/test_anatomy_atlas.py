@@ -41,17 +41,13 @@ def _must_not_be_called(*args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def _reset_atlas_cache():
-    """Make sure no real atlas leaks across tests via the lru_cache."""
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module.derive_origin_from_ac.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+def _reset_atlas_cache(monkeypatch, tmp_path):
+    """Make sure no real atlas leaks across tests, and nothing writes to
+    a real ``~/.brainglobe`` — compact caches land under a fresh tmp dir."""
+    monkeypatch.setenv("PIXELMAP_ATLAS_CACHE_DIR", str(tmp_path))
+    atlas_module.clear_caches()
     yield
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    atlas_module.derive_origin_from_ac.cache_clear()
-    atlas_module._region_info_from_id.cache_clear()
+    atlas_module.clear_caches()
 
 
 @pytest.fixture
@@ -152,9 +148,11 @@ class TestOrientation:
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         arr, _ = atlas_module.canonical_annotation("x")
+        lut = atlas_module.label_ids("x")
         expected = np.flip(np.transpose(native, (2, 0, 1)), axis=2)  # AP from axis2, flip ML
         assert arr.shape == (4, 2, 3)
-        np.testing.assert_array_equal(arr, expected)
+        # arr holds compact indices, not raw ids — map through the LUT.
+        np.testing.assert_array_equal(lut[arr], expected)
 
     def test_derive_origin_from_ac_finds_midline_crossing(self, monkeypatch):
         # AC at AP voxel 2, DV voxel 2, ML voxels 3-5 (midline 4) in an asr volume.
@@ -454,3 +452,152 @@ class TestAtlasesAreReleased:
         # Rebuilding on eviction is expected; *retaining* the rebuilds is not.
         assert len(built) > bound, "expected evictions to force rebuilds"
         assert self._live(built) <= bound
+
+
+class TestCompactCache:
+    """Tests for the compact uint16 label volume (PR C)."""
+
+    def test_lut_round_trips_the_native_annotation(self, monkeypatch):
+        # Native "sla" volume, deliberately not asr, so compaction and the
+        # reorientation both have to hold at once.
+        native = np.arange(2 * 3 * 4, dtype=np.int32).reshape(2, 3, 4)
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("sla", native))
+        arr, _ = atlas_module.canonical_annotation("lut_roundtrip")
+        lut = atlas_module.label_ids("lut_roundtrip")
+        expected = np.flip(np.transpose(native, (2, 0, 1)), axis=2)
+        np.testing.assert_array_equal(lut[arr], expected)
+
+    def test_index_zero_always_maps_to_atlas_id_zero(self, monkeypatch):
+        # No voxel is actually 0 here, but the LUT must still reserve index 0
+        # for id 0 (the "outside the brain" sentinel every `!= 0` check relies on).
+        ann = np.full((4, 4, 4), 5, dtype=np.int32)
+        structs = {5: {"id": 5, "acronym": "X", "name": "x region", "rgb_triplet": [1, 1, 1]}}
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
+        lut = atlas_module.label_ids("all_nonzero")
+        assert lut[0] == 0
+
+    def test_compact_build_is_reused_not_rewritten(self, monkeypatch):
+        """A second ensure_compact call must not touch the source annotation
+        again, and must not rewrite the files on disk."""
+
+        class _CountingAtlas:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.structures = {}
+                self.reads = 0
+                self._data = np.zeros((4, 4, 4), dtype=np.int32)
+                self._data[2:, :, :] = 3
+                self.shape = self._data.shape  # so the size guard doesn't need `.annotation`
+
+            @property
+            def annotation(self):
+                self.reads += 1
+                return self._data
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _CountingAtlas)
+
+        out_dir1 = atlas_module.ensure_compact("reuse_me")
+        atlas = atlas_module.get_atlas("reuse_me")
+        assert atlas.reads == 1
+        mtime1 = (out_dir1 / "labels_u16.npy").stat().st_mtime_ns
+
+        out_dir2 = atlas_module.ensure_compact("reuse_me")
+        mtime2 = (out_dir2 / "labels_u16.npy").stat().st_mtime_ns
+
+        assert out_dir1 == out_dir2
+        assert mtime1 == mtime2
+        assert atlas.reads == 1, "second ensure_compact call must not re-read the annotation"
+
+    def test_sparse_id_space_round_trips_through_compaction(self, monkeypatch):
+        """Region ids far apart (0, 7, 100000) must still resolve correctly
+        once compacted into small, contiguous uint16 indices."""
+        ann = np.zeros((4, 4, 4), dtype=np.int64)
+        ann[1, 1, 1] = 7
+        ann[2, 2, 2] = 100_000
+        structs = {
+            7: {"id": 7, "acronym": "SEVEN", "name": "seven region", "rgb_triplet": [9, 9, 9]},
+            100_000: {"id": 100_000, "acronym": "BIG", "name": "big id region",
+                      "rgb_triplet": [8, 8, 8]},
+        }
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
+
+        coords = np.array([
+            [25.0, 25.0, 25.0],   # voxel (1,1,1) -> id 7
+            [50.0, 50.0, 50.0],   # voxel (2,2,2) -> id 100000
+        ])
+        out = atlas_module.lookup_regions("sparse_ids", coords)
+        assert out[0].acronym == "SEVEN"
+        assert out[1].acronym == "BIG"
+
+
+class TestSizeGuard:
+    @staticmethod
+    def _shape_only_atlas_cls(shape):
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = shape
+                self.structures = {}
+
+            @property
+            def annotation(self):
+                raise AssertionError(
+                    "annotation must not be read once the size guard rejects the atlas"
+                )
+
+        return _A
+
+    def test_oversized_atlas_is_rejected_without_reading_annotation(self, monkeypatch):
+        monkeypatch.setenv("PIXELMAP_ATLAS_MAX_BYTES", "1000")  # far smaller than any real atlas
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._shape_only_atlas_cls((100, 100, 100))
+        )
+        with pytest.raises(atlas_module.AtlasTooLargeError):
+            atlas_module.canonical_annotation("way_too_big")
+
+    def test_default_limit_admits_the_prebaked_rat_atlas(self):
+        # whs_sd_rat_39um is 1024×512×512 uint32 ≈ 1.07 GB — must fit under
+        # the default guard (1.5 GB) with room to spare.
+        rat_bytes = 1024 * 512 * 512 * 4
+        assert rat_bytes < atlas_module.atlas_max_bytes()
+
+    def test_env_override_changes_the_limit(self, monkeypatch):
+        monkeypatch.setenv("PIXELMAP_ATLAS_MAX_BYTES", "123456")
+        assert atlas_module.atlas_max_bytes() == 123456
+
+
+class TestSingleResidentVolume:
+    def test_switching_atlases_drops_the_previous_slot(self, monkeypatch):
+        data = {
+            "a": np.zeros((2, 2, 2), dtype=np.int32),
+            "b": np.ones((2, 2, 2), dtype=np.int32),
+        }
+
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.annotation = data[name]
+                self.structures = {
+                    1: {"acronym": "R", "name": "Region", "rgb_triplet": [1, 2, 3]}
+                }
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _A)
+
+        atlas_module.canonical_annotation("a")
+        assert atlas_module.canonical_annotation.cache_info().currsize == 1
+
+        atlas_module.canonical_annotation("b")
+        info = atlas_module.canonical_annotation.cache_info()
+        assert info.currsize == 1, "only one atlas's volume may be resident at a time"
+
+        # Asking for "a" again must be a fresh miss, not a cache hit — its
+        # slot was dropped when "b" was loaded, not kept alongside it.
+        misses_before = info.misses
+        atlas_module.canonical_annotation("a")
+        assert atlas_module.canonical_annotation.cache_info().misses == misses_before + 1

@@ -32,14 +32,13 @@ class _FakeAtlas:
 
 
 @pytest.fixture(autouse=True)
-def _reset_caches():
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    schematic_module._atlas_data.cache_clear()
+def _reset_caches(monkeypatch, tmp_path):
+    monkeypatch.setenv("PIXELMAP_ATLAS_CACHE_DIR", str(tmp_path))
+    atlas_module.clear_caches()
+    schematic_module._brain_projections.cache_clear()
     yield
-    atlas_module.get_atlas.cache_clear()
-    atlas_module.canonical_annotation.cache_clear()
-    schematic_module._atlas_data.cache_clear()
+    atlas_module.clear_caches()
+    schematic_module._brain_projections.cache_clear()
 
 
 @pytest.fixture

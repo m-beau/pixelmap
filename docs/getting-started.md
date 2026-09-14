@@ -52,6 +52,17 @@ On Apple Silicon (M1/M2) or ARM Linux, add `--platform linux/amd64` to the Docke
 
 For production deployments, use **Docker Compose** — see the included `docker-compose.yml` in the repository.
 
+### Environment variables
+
+The anatomy overlay converts each atlas's annotation volume into a compact,
+memory-mapped cache on first use (see `pixelmap/anatomy/atlas.py`). Two
+variables control that cache:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PIXELMAP_ATLAS_CACHE_DIR` | `<brainglobe data dir>/pixelmap_cache` | Where the compact per-atlas volumes are written. The default lives alongside brainglobe's own atlas downloads, so it persists across container restarts the same way they do. |
+| `PIXELMAP_ATLAS_MAX_BYTES` | `1500000000` (1.5 GB) | Largest atlas (as an uncompressed `uint32` volume) PixelMap will convert. Comfortably above the pre-baked `whs_sd_rat_39um` (~1.07 GB) and below any 10 µm atlas (~4.8 GB) — raise it if you need to load a larger atlas. |
+
 ## Quick Start
 
 ### Option 1: Browser GUI
