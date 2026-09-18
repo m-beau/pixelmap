@@ -16,6 +16,8 @@ from pixelmap.backend import (
     get_electrodes,
     find_forbidden_electrodes,
     _verify_hardware_violations,
+    make_wiring_maps,
+    _load_wiring_maps,
 )
 from pixelmap.utils.imro import (
     save_to_imro_file,
@@ -269,3 +271,33 @@ class TestEndToEndWorkflows:
 
             save_to_imro_file(imro_list, str(output_file))
             assert output_file.exists()
+
+
+class TestWiringMapsSharing:
+    """F1: make_wiring_maps must return one shared, process-wide object per
+    directory instead of unpickling a fresh copy on every call."""
+
+    def test_make_wiring_maps_returns_same_object_for_path_and_str(self, wiring_maps_dir):
+        by_path = make_wiring_maps(wiring_maps_dir)
+        by_str = make_wiring_maps(str(wiring_maps_dir))
+
+        assert by_path is by_str
+
+        # Sanity: still contains every probe type in WIRING_FILE_MAP.
+        assert set(by_path.keys()) == set(WIRING_FILE_MAP.keys())
+
+    def test_make_wiring_maps_returns_same_object_across_calls(self, wiring_maps_dir):
+        first = make_wiring_maps(wiring_maps_dir)
+        second = make_wiring_maps(wiring_maps_dir)
+
+        assert first is second
+
+    def test_make_wiring_maps_cache_clear_forces_reload(self, wiring_maps_dir):
+        """Tests (or callers) that mutate a wiring_maps_dir between calls
+        must clear the cache to see a fresh reload."""
+        first = make_wiring_maps(wiring_maps_dir)
+        _load_wiring_maps.cache_clear()
+        second = make_wiring_maps(wiring_maps_dir)
+
+        assert first is not second
+        assert set(first.keys()) == set(second.keys())

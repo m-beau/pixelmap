@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
@@ -115,7 +116,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 def initialize_database(db_path: Path | None = None) -> Path:
     target_path = db_path or resolve_analytics_db_path()
     with _DB_INIT_LOCK:
-        with _connect(target_path) as connection:
+        with contextlib.closing(_connect(target_path)) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS visits (
@@ -194,7 +195,7 @@ def record_visit(
     target_path = initialize_database(db_path)
     visitor_key = build_visitor_key(anonymous_visitor_id, request_context.ip_address)
 
-    with _connect(target_path) as connection:
+    with contextlib.closing(_connect(target_path)) as connection, connection:
         connection.execute(
             """
             INSERT INTO visits (
@@ -254,7 +255,7 @@ def record_session_end(
     target_path = initialize_database(db_path)
     visitor_key = build_visitor_key(anonymous_visitor_id, ip_address)
 
-    with _connect(target_path) as connection:
+    with contextlib.closing(_connect(target_path)) as connection, connection:
         connection.execute(
             """
             UPDATE visitor_summary
@@ -268,21 +269,21 @@ def record_session_end(
 
 def get_total_visits(db_path: Path | None = None) -> int:
     target_path = initialize_database(db_path)
-    with _connect(target_path) as connection:
+    with contextlib.closing(_connect(target_path)) as connection, connection:
         row = connection.execute("SELECT COUNT(*) AS visit_count FROM visits").fetchone()
     return int(row["visit_count"])
 
 
 def get_unique_visitors(db_path: Path | None = None) -> int:
     target_path = initialize_database(db_path)
-    with _connect(target_path) as connection:
+    with contextlib.closing(_connect(target_path)) as connection, connection:
         row = connection.execute("SELECT COUNT(*) AS visitor_count FROM visitor_summary").fetchone()
     return int(row["visitor_count"])
 
 
 def get_visitor_summary(visitor_key: str, db_path: Path | None = None) -> sqlite3.Row | None:
     target_path = initialize_database(db_path)
-    with _connect(target_path) as connection:
+    with contextlib.closing(_connect(target_path)) as connection, connection:
         row = connection.execute(
             """
             SELECT visitor_key, anonymous_visitor_id, ip_address, first_seen_at, last_seen_at, visit_count
