@@ -1374,6 +1374,9 @@ class ChannelmapGUI(param.Parameterized):
             tilt_deg = float(self.tilt_input.value)
 
         try:
+            # Reuse this session's figure: building one per render cost 3.1 MB
+            # of RSS per overlay compute, and the overlay recomputes on every
+            # pose edit.
             _fig = render_locator(
                 atlas_name,
                 tip_atlas=tip,
@@ -1387,11 +1390,17 @@ class ChannelmapGUI(param.Parameterized):
                 ml_squish=ml_squish,
                 dv_squish=dv_squish,
                 tilt_deg=tilt_deg,
+                fig=self._locator_fig,
             )
+            self._locator_fig = _fig
             self.anatomy_locator.object = self._fig_to_locator_html(_fig)
-            plt.close(_fig)
         except Exception as exc:  # a failed locator shouldn't sink the overlay
             print(f"Locator render failed: {exc}")
+
+        # Hand back the chunk buffers this render churned through.  They are
+        # already freed; this is what unmaps them, so repeated overlay computes
+        # don't ratchet RSS upward for the life of the process.
+        anatomy_atlas.reclaim_free_memory()
 
         # Overlay now exists → later input edits live-update it.
         self._anatomy_overlay_active = True
@@ -1415,6 +1424,9 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_locator.object = ""
         self.anatomy_locator_section.visible = False
         self._update_tip_depth_readout()  # back to a blank readout
+        if self._locator_fig is not None:
+            plt.close(self._locator_fig)
+            self._locator_fig = None
 
         # Hand back the atlas's RAM: nothing on screen needs it any more, and an
         # annotation volume is 308 MB for allen_mouse_25um and up to 4.8 GB for
@@ -2678,6 +2690,9 @@ class ChannelmapGUI(param.Parameterized):
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
         self.anatomy_locator = pn.pane.HTML("", sizing_mode="stretch_width")
+        # Reused across renders (see compute_anatomy_overlay); dropped when the
+        # overlay is cleared so an idle session doesn't sit on a canvas.
+        self._locator_fig = None
         # Hidden until the first overlay is computed; cleared by "Clear overlay".
         self.anatomy_locator_section = pn.Column(
             self.anatomy_locator,

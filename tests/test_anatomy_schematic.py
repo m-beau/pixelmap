@@ -180,3 +180,92 @@ def test_rendering_many_atlases_keeps_one_annotation_resident(monkeypatch):
             f"{live} annotation volumes still in RAM after rendering atlas_{i}; "
             "exactly 1 is allowed"
         )
+
+
+class TestSilhouetteIsOnlyBuiltWhenNeeded:
+    """The whole-brain silhouette is the one thing here that reads every voxel.
+
+    It is the fallback for a tip outside the volume, so on the normal path —
+    tip in the brain, three real slices to draw — it must never be built. It
+    used to be computed unconditionally (``inside = ann > 0``), which cost a
+    full-size bool array on every single render: 1.2 GB for a 10 µm atlas.
+    """
+
+    @staticmethod
+    def _count_projections(monkeypatch) -> list[int]:
+        from pixelmap.anatomy.volume import CanonicalVolume
+
+        calls = [0]
+        original = CanonicalVolume.projections
+
+        def counted(self):
+            calls[0] += 1
+            return original(self)
+
+        monkeypatch.setattr(CanonicalVolume, "projections", counted)
+        return calls
+
+    def test_tip_inside_the_volume_never_builds_it(self, fake_brainglobe, monkeypatch):
+        calls = self._count_projections(monkeypatch)
+        _render()
+        assert calls[0] == 0, "silhouette was built even though every view had a slice"
+
+    def test_tip_outside_the_volume_falls_back_to_it(self, fake_brainglobe, monkeypatch):
+        calls = self._count_projections(monkeypatch)
+        # Far outside the 8x6x10-voxel fake brain.
+        render_locator(
+            "fake",
+            tip_atlas=(50_000.0, 50_000.0, 50_000.0),
+            pitch_deg=0.0,
+            yaw_deg=0.0,
+            shank_orientation_deg=0.0,
+            shank_positions={0: 0.0},
+            y_range=(0.0, 80.0),
+        )
+        assert calls[0] > 0, "no slice to draw, but the silhouette was never built"
+
+
+class TestFigureReuse:
+    """``render_locator`` must be able to draw into a caller-owned figure.
+
+    Building a ``Figure`` per render — with its Agg canvas and renderer — cost
+    3.1 MB of unreturned RSS per call in the container, more than the atlas read
+    it wraps, and the overlay re-renders on every pose edit.
+    """
+
+    def test_passing_a_figure_draws_into_it(self, fake_brainglobe):
+        first = _render()
+        second = render_locator(
+            "fake",
+            tip_atlas=(100.0, 100.0, 75.0),
+            pitch_deg=0.0,
+            yaw_deg=0.0,
+            shank_orientation_deg=0.0,
+            shank_positions={0: 0.0, 1: 50.0},
+            y_range=(0.0, 80.0),
+            fig=first,
+        )
+        assert second is first, "render_locator built a new figure instead of reusing"
+
+    def test_reuse_does_not_accumulate_axes(self, fake_brainglobe):
+        """Without a clear, every render would stack another set of axes on."""
+        fig = _render()
+        n_axes = len(fig.axes)
+        for _ in range(5):
+            fig = render_locator(
+                "fake",
+                tip_atlas=(100.0, 100.0, 75.0),
+                pitch_deg=0.0,
+                yaw_deg=0.0,
+                shank_orientation_deg=0.0,
+                shank_positions={0: 0.0, 1: 50.0},
+                y_range=(0.0, 80.0),
+                fig=fig,
+            )
+        assert len(fig.axes) == n_axes, (
+            f"{len(fig.axes)} axes after 6 renders, expected {n_axes} — the "
+            "figure is not being cleared between renders"
+        )
+
+    def test_omitting_the_figure_still_builds_a_fresh_one(self, fake_brainglobe):
+        assert _render() is not _render()

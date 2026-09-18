@@ -96,9 +96,15 @@ def tip_depth_below_surface_um(
         & (ml_idx >= 0) & (ml_idx < n_ml)
     )
     inside = np.zeros(distances.shape, dtype=bool)
-    inside[in_volume] = (
-        annotation[ap_idx[in_volume], dv_idx[in_volume], ml_idx[in_volume]] != 0
-    )
+    if in_volume.any():
+        # One bounding-box read for the whole search line: the samples are
+        # collinear, so the box is thin even when the line is 30 mm long.
+        inside[in_volume] = (
+            annotation.gather(
+                ap_idx[in_volume], dv_idx[in_volume], ml_idx[in_volume]
+            )
+            != 0
+        )
 
     if not inside[0]:
         return None  # tip is not in the brain — "depth below surface" is meaningless

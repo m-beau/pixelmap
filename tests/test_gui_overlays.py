@@ -738,3 +738,28 @@ class TestClearOverlayReleasesAtlasMemory:
         assert len(posed_gui.region_band_source.data["acronym"]) > 0, (
             "overlay did not come back after a release"
         )
+
+
+class TestLocatorFigureIsReusedAcrossRenders:
+    """The GUI must keep one locator figure per session, not one per render."""
+
+    def test_recomputing_reuses_the_same_figure(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        first = posed_gui._locator_fig
+        assert first is not None, "no locator figure was retained"
+
+        for _ in range(4):
+            posed_gui.compute_anatomy_overlay()
+
+        assert posed_gui._locator_fig is first, (
+            "a new figure was built per overlay compute — 3.1 MB of RSS each, "
+            "on a path that re-runs for every pose edit"
+        )
+
+    def test_clearing_the_overlay_drops_the_figure(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        assert posed_gui._locator_fig is not None
+        posed_gui.clear_anatomy_overlay()
+        assert posed_gui._locator_fig is None, (
+            "an idle session is still holding a matplotlib canvas"
+        )

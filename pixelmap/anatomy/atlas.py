@@ -62,13 +62,18 @@ from pathlib import Path
 
 import numpy as np
 from brainglobe_atlasapi import BrainGlobeAtlas
-from brainglobe_atlasapi.descriptors import V3_ANNOTATION_NAME, V3_ATLAS_ROOTDIR
+from brainglobe_atlasapi.descriptors import (
+    V3_ANNOTATION_NAME,
+    V3_ATLAS_ROOTDIR,
+    remote_url_s3,
+)
 from brainglobe_atlasapi.list_atlases import (
     get_all_atlases_lastversions,
     get_downloaded_atlases,
 )
 
 from pixelmap.anatomy._registry_snapshot import REGISTRY_SNAPSHOT
+from pixelmap.anatomy.volume import CanonicalVolume
 
 _DEFAULT_ATLAS = "allen_mouse_25um"
 
@@ -113,11 +118,15 @@ def get_atlas(name: str = _DEFAULT_ATLAS):
 #: taken by :func:`get_atlas`, so metadata queries never block on a download.
 _resident_lock = threading.RLock()
 
-#: The single atlas whose annotation is currently in RAM, held by a *strong*
+#: The single atlas whose annotation is currently open, held by a *strong*
 #: reference so it survives eviction from :func:`get_atlas`'s cache and stays
-#: releasable.  ``None`` when no annotation is loaded.
+#: releasable.  ``None`` when nothing is open.
 _resident = None
 _resident_name: str | None = None
+#: Its :class:`~pixelmap.anatomy.volume.CanonicalVolume`.  Normally a handle on
+#: the zarr store plus a few hundred KB of cached projections; only the
+#: fallback path (test doubles, unresolvable layouts) makes it a full array.
+_resident_volume: CanonicalVolume | None = None
 
 
 def _malloc_trim() -> None:
@@ -171,11 +180,12 @@ def _release_resident() -> None:
     which keeps the whole buffer alive, so its memo has to go first or clearing
     ``_annotation`` frees nothing.  Callers hold :data:`_resident_lock`.
     """
-    global _resident, _resident_name
+    global _resident, _resident_name, _resident_volume
 
     if _resident is None:
         return
     canonical_annotation.cache_clear()
+    _resident_volume = None
     # brainglobe has no public "unload" hook; ``_annotation`` is the attribute
     # its ``annotation`` property memoises into, and clearing it makes the next
     # read re-fetch from the (already local) on-disk cache in ~130 ms.  Guarded
@@ -193,23 +203,96 @@ def _release_resident() -> None:
 def _make_resident(name: str):
     """Return ``name``'s atlas with its annotation loaded, and no other's.
 
-    The single place in PixelMap that reads ``atlas.annotation``, so that the
-    "one annotation volume in RAM" invariant holds by construction rather than
-    by everyone remembering it.  Switching releases the previous atlas *before*
-    loading the new one, which keeps the peak at whichever of the two is larger
-    instead of their sum — the difference between fitting in a 3.5 GB container
-    and being OOM-killed while swapping a 1 GB atlas for a 5 GB one.
+    The single place that opens annotation data, so the "one volume at a time"
+    invariant holds by construction rather than by everyone remembering it.
+    Switching releases the previous atlas *before* opening the new one, which
+    keeps the peak at whichever of the two is larger instead of their sum.
+
+    Normally "opening" is just a zarr handle — reads happen per query, through
+    :class:`~pixelmap.anatomy.volume.CanonicalVolume`.  The eager fallback in
+    :func:`_open_volume` is the exception, and it is the only case where this
+    costs the whole array.
     """
-    global _resident, _resident_name
+    global _resident, _resident_name, _resident_volume
 
     with _resident_lock:
-        if _resident is not None and _resident_name == name:
-            return _resident
+        if _resident_volume is not None and _resident_name == name:
+            return _resident_volume
         _release_resident()
         atlas = get_atlas(name)
-        _ = atlas.annotation  # the download / decode this module exists to bound
-        _resident, _resident_name = atlas, name
-        return atlas
+        volume = _open_volume(atlas)  # downloads the chunks if they aren't local
+        _resident, _resident_name, _resident_volume = atlas, name, volume
+        return volume
+
+
+def _open_volume(atlas) -> CanonicalVolume:
+    """Open ``atlas``'s annotation for lazy reads, fetching the data if needed.
+
+    Prefers the OME-Zarr store on disk, so reads decompress only the chunks they
+    touch.  Falls back to brainglobe's ``atlas.annotation`` — which materialises
+    the whole array — when the store cannot be resolved: test doubles, and any
+    future layout this does not understand.  The fallback is correct, just
+    expensive, so it must never raise on the happy path.
+    """
+    axes = anatomical_axes(atlas)
+    resolution = (axes["AP"].res_um, axes["DV"].res_um, axes["ML"].res_um)
+    try:
+        store = _open_annotation_store(atlas)
+    except Exception:  # noqa: BLE001 - any failure falls back to the eager read
+        store = atlas.annotation
+    return CanonicalVolume(store, axes, resolution)
+
+
+def _annotation_level_dir(atlas) -> Path:
+    """Directory of the OME-Zarr pyramid level matching the atlas's resolution.
+
+    brainglobe picks the level at construction (``_annotation_pyramid_level``);
+    we only have to turn that index into its on-disk name, which the multiscale
+    metadata beside the levels spells out.
+    """
+    import json
+
+    location = atlas.metadata["annotation_set"]["location"][1:]
+    root = Path(atlas.root_dir) / location / V3_ANNOTATION_NAME
+    meta = json.loads((root / "zarr.json").read_text())
+    attrs = meta.get("attributes", meta)
+    ome = attrs.get("ome", attrs)
+    multiscales = ome["multiscales"]
+    datasets = (multiscales[0] if isinstance(multiscales, list) else multiscales)["datasets"]
+    return root / datasets[atlas._annotation_pyramid_level]["path"]
+
+
+def _open_annotation_store(atlas):
+    """A ``zarr.Array`` over the atlas's annotation, downloading it if absent.
+
+    Mirrors what ``brainglobe_atlasapi.core.Atlas.annotation`` does to fetch a
+    level, minus the ``.compute()`` that turns it into an in-memory array — the
+    whole point being to leave the data on disk.  Coupled to brainglobe's v3
+    layout, as :func:`_annotation_is_cached` already is.
+    """
+    import zarr
+
+    level_dir = _annotation_level_dir(atlas)
+    if not (level_dir / "c").exists():
+        location = atlas.metadata["annotation_set"]["location"][1:]
+        remote = remote_url_s3.format(
+            f"{location}/{V3_ANNOTATION_NAME}/{level_dir.name}/"
+        )
+        atlas.fs.get(remote, str(level_dir), recursive=True)
+    return zarr.open_array(str(level_dir), mode="r")
+
+
+def reclaim_free_memory() -> None:
+    """Return already-freed heap to the OS, without dropping the open atlas.
+
+    Reading a slice allocates and frees a burst of chunk buffers, and the C
+    allocator keeps that space for reuse rather than unmapping it.  Nothing is
+    leaking in Python — object counts are flat across hundreds of renders — but
+    RSS is what a container limit measures, so the space has to be handed back
+    explicitly.  Cheap (a few ms) and safe to call after any read-heavy
+    operation; a no-op where the platform offers no way to do it (macOS).
+    """
+    _malloc_trim()
 
 
 def release_atlas_memory() -> None:
@@ -499,7 +582,9 @@ def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     if not ac_ids:
         return None
     ann, res = canonical_annotation(name)  # (AP, DV, ML)
-    ap, dv, ml = np.where(np.isin(ann, ac_ids))
+    # Slab-wise: ``np.isin`` over a whole volume would allocate a bool array the
+    # size of the voxel count on top of the volume itself.
+    ap, dv, ml = ann.find_label_voxels(ac_ids)
     if ap.size == 0:
         return None
     midline = float(ml.mean())                 # AC ~symmetric → centroid ML = midline
@@ -579,25 +664,18 @@ def canonical_annotation(atlas_name: str):
     non-Allen orientations work. For an already-``asr`` atlas this is a no-op
     (identity transpose, no flips), so Allen behavior is unchanged.
 
-    Transpose and flip both return *views*, so a memoised entry here keeps the
-    whole annotation buffer alive — dropping the owning atlas's reference is not
-    enough to free it. That is why :func:`_release_resident` clears this memo
-    first, and that clear, not the ``maxsize``, is what enforces the
-    one-volume-at-a-time bound. ``maxsize=1`` is defence in depth: it keeps the
-    memo from outliving the atlas it describes even if some future caller
-    reaches this function without going through a release.
+    The first element is a :class:`~pixelmap.anatomy.volume.CanonicalVolume`,
+    not an ``ndarray``: it indexes like one for the ints and step-1 slices this
+    package uses, but each read pulls only the chunks it touches instead of
+    materialising hundreds of MB. Use ``.gather()`` for scattered points and
+    ``.projections()`` for a whole-brain silhouette — both are far cheaper than
+    the equivalent numpy expression, and neither needs the full array.
+
+    Memoised at ``maxsize=1`` to match the one-atlas-at-a-time bound;
+    :func:`_release_resident` clears it, which is what actually enforces that.
     """
-    atlas = _make_resident(atlas_name)
-    axes = anatomical_axes(atlas)
-    order = (axes["AP"].array_axis, axes["DV"].array_axis, axes["ML"].array_axis)
-    arr = np.transpose(atlas.annotation, order)
-    flip_axes = tuple(i for i, kind in enumerate(("AP", "DV", "ML")) if axes[kind].flip)
-    if flip_axes:
-        arr = np.flip(arr, axis=flip_axes)
-    res = np.array(
-        [axes["AP"].res_um, axes["DV"].res_um, axes["ML"].res_um], dtype=float
-    )
-    return arr, res
+    volume = _make_resident(atlas_name)
+    return volume, np.array(volume.resolution, dtype=float)
 
 
 def volume_center_um(name: str = _DEFAULT_ATLAS) -> tuple[float, float, float]:
@@ -644,17 +722,26 @@ def lookup_regions(
     ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
 
     shape = annotation.shape
+    inside = (
+        (ap_idx >= 0) & (ap_idx < shape[0])
+        & (dv_idx >= 0) & (dv_idx < shape[1])
+        & (ml_idx >= 0) & (ml_idx < shape[2])
+    )
+
+    # One read of the trajectory's bounding box, rather than a chunk
+    # decompression per voxel — see :meth:`CanonicalVolume.gather`.
+    ids = np.zeros(len(coords), dtype=np.int64)
+    if inside.any():
+        ids[inside] = annotation.gather(
+            ap_idx[inside], dv_idx[inside], ml_idx[inside]
+        )
 
     results: list[RegionInfo | None] = []
-    for ap, dv, ml in zip(ap_idx, dv_idx, ml_idx):
-        if not (0 <= ap < shape[0] and 0 <= dv < shape[1] and 0 <= ml < shape[2]):
+    for is_inside, region_id in zip(inside, ids):
+        if not is_inside or region_id == 0:  # outside the volume, or undefined
             results.append(None)
             continue
-        region_id = int(annotation[ap, dv, ml])
-        if region_id == 0:  # outside-brain or undefined
-            results.append(None)
-            continue
-        results.append(_region_info_from_id(atlas_name, region_id))
+        results.append(_region_info_from_id(atlas_name, int(region_id)))
     return results
 
 

@@ -21,13 +21,20 @@ not.  See the module docstring of ``pixelmap/anatomy/atlas.py``.
 Set ``PREFETCH_ALLOW_PARTIAL=1`` to downgrade the failure to a warning.  That
 is for local experimentation only — never for a release build.
 
-Why reading ``.annotation`` matters
------------------------------------
+Why this goes through PixelMap's own loader
+-------------------------------------------
 ``BrainGlobeAtlas(...)`` only fetches the manifest and metadata — a few
-hundred KB — and pulls the annotation array from S3 lazily, the first time
-something reads ``atlas.annotation``.  Constructing the atlas would therefore
-"succeed" while leaving the expensive part for the first user to hit at
-runtime, which is exactly what this script exists to prevent.
+hundred KB — and pulls the annotation from S3 lazily.  Constructing the atlas
+would therefore "succeed" while leaving the expensive part for the first user
+to hit at runtime, which is exactly what this script exists to prevent.
+
+So it calls ``pixelmap.anatomy.atlas.ensure_downloaded`` and then asserts
+``is_downloaded``: the same two functions the GUI uses to decide whether
+opening an atlas is free.  Going through the app's loader rather than
+brainglobe's means "the build warmed the cache" and "the app considers the
+atlas local" cannot drift apart — and it puts the chunks on disk without
+materialising the array, which brainglobe's ``.annotation`` would (3.4x the
+array size in peak RAM, for data we only want cached).
 """
 
 import os
@@ -61,13 +68,19 @@ def warm_registry() -> bool:
 
 def fetch(atlas_name: str) -> bool:
     """Download one atlas, retrying transient failures. True if it landed."""
-    from brainglobe_atlasapi import BrainGlobeAtlas
+    from pixelmap.anatomy.atlas import (
+        ensure_downloaded,
+        is_downloaded,
+        release_atlas_memory,
+    )
 
     for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
         try:
-            atlas = BrainGlobeAtlas(atlas_name, check_latest=False)
-            # Force the annotation onto disk (see the module docstring).
-            _ = atlas.annotation
+            ensure_downloaded(atlas_name)
+            # Ask the same question the GUI asks before calling an atlas free.
+            if not is_downloaded(atlas_name):
+                raise RuntimeError("annotation chunks are still missing")
+            release_atlas_memory()
             print(f"[prefetch] {atlas_name}: ok", flush=True)
             return True
         except Exception as exc:  # noqa: BLE001 - retried, then reported below

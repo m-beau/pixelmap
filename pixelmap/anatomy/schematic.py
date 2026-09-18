@@ -80,13 +80,20 @@ def _outline_rgba(label_img: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title, warp=None):
+def _draw_view(ax, label_img, x_um, y_um, atlas, silhouette, title, warp=None):
     """Draw one slice (colored regions + outlines), or a silhouette fallback.
 
-    ``label_img`` and ``fallback_mask`` are shaped ``(len(y_um), len(x_um))``;
-    y is DV in both views. The y-axis is oriented dorsal-up. ``warp``, if given,
-    is ``(scale_x, scale_y, rotate_deg, pivot_x, pivot_y)`` applied to the *brain
-    image only* (not the probe) so the atlas visibly squashes/tilts about bregma.
+    ``label_img`` and the mask ``silhouette`` returns are shaped
+    ``(len(y_um), len(x_um))``; y is DV in both views. The y-axis is oriented
+    dorsal-up. ``warp``, if given, is ``(scale_x, scale_y, rotate_deg, pivot_x,
+    pivot_y)`` applied to the *brain image only* (not the probe) so the atlas
+    visibly squashes/tilts about bregma.
+
+    ``silhouette`` is a *callable*, not a mask: building it is the one operation
+    here that has to read every voxel, and it is only needed when the tip falls
+    outside the volume and there is no slice to draw. Passing the array instead
+    meant paying for it on every render, including the overwhelmingly common
+    case where it goes unused.
     """
     # extent=(left, right, bottom, top); top = y_um[0] (DV 0) puts dorsal up.
     extent = (float(x_um[0]), float(x_um[-1]), float(y_um[-1]), float(y_um[0]))
@@ -100,8 +107,9 @@ def _draw_view(ax, label_img, x_um, y_um, atlas, fallback_mask, title, warp=None
         ax.set_ylim(extent[2], extent[3])
     else:
         # Tip is outside the volume here — show the whole-brain silhouette.
-        artists.append(ax.contourf(x_um, y_um, fallback_mask, levels=[0.5, 1.5], colors=[_FILL]))
-        artists.append(ax.contour(x_um, y_um, fallback_mask, levels=[0.5], colors=[_EDGE], linewidths=0.6))
+        mask = silhouette()
+        artists.append(ax.contourf(x_um, y_um, mask, levels=[0.5, 1.5], colors=[_FILL]))
+        artists.append(ax.contour(x_um, y_um, mask, levels=[0.5], colors=[_EDGE], linewidths=0.6))
         ax.invert_yaxis()
 
     if warp is not None:
@@ -128,6 +136,7 @@ def render_locator(
     ml_squish: float = 1.0,
     dv_squish: float = 1.0,
     tilt_deg: float = 0.0,
+    fig: Figure | None = None,
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
 
@@ -141,6 +150,13 @@ def render_locator(
     shape with the probe straight. Returns a bare matplotlib
     :class:`~matplotlib.figure.Figure` for a Panel ``Matplotlib`` pane (no
     pyplot global state).
+
+    Pass ``fig`` to draw into an existing figure instead of building one. The
+    overlay re-renders on every pose edit, and constructing a figure per render
+    — with its Agg canvas and renderer — was measured at 3.1 MB of unreturned
+    RSS per call inside the container, more than everything the atlas itself
+    costs. Reusing one figure per session removes that; the caller owns it and
+    must not keep references to artists across renders, since this clears it.
     """
     atlas, ann, res = _atlas_data(atlas_name)
     n_ap, n_dv, n_ml = ann.shape
@@ -163,11 +179,13 @@ def render_locator(
     ap_idx = int(np.clip(round(tip_ap / res[0]), 0, n_ap - 1))
     dv_idx = int(np.clip(round(tip_dv / res[1]), 0, n_dv - 1))
     ml_idx = int(np.clip(round(tip_ml / res[2]), 0, n_ml - 1))
-    inside = ann > 0
 
     # 2×2 grid (4th cell empty) so the figure stays narrow enough to fit the
     # side panel without overflowing the page; a 1×3 row would be too wide.
-    fig = Figure(figsize=(3.7, 3.3), dpi=110)
+    if fig is None:
+        fig = Figure(figsize=(3.7, 3.3), dpi=110)
+    else:
+        fig.clear()  # reuse the canvas and renderer; drop the previous render
     fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.02,
                         wspace=0.08, hspace=0.20)
     ax_sag = fig.add_subplot(2, 2, 1)
@@ -186,14 +204,17 @@ def render_locator(
 
     # Labels report the coordinate along each panel's visible horizontal axis:
     # AP on the sagittal view, ML on the coronal view.
+    # ``projections()`` returns the silhouette reduced over ML, AP and DV
+    # respectively, and caches, so at most one whole-volume scan happens — and
+    # only if some view actually has no slice to draw.
     _draw_view(ax_sag, ann[:, :, ml_idx].T, ap_um, dv_um, atlas,
-               fallback_mask=inside.any(axis=2).T,
+               silhouette=lambda: ann.projections()[0].T,
                title=f"Sagittal · AP {ap_um[ap_idx]:.0f} µm", warp=warp_sag)
     _draw_view(ax_cor, ann[ap_idx, :, :], ml_um, dv_um, atlas,
-               fallback_mask=inside.any(axis=0),
+               silhouette=lambda: ann.projections()[1],
                title=f"Coronal · ML {ml_um[ml_idx]:.0f} µm", warp=warp_cor)
     _draw_view(ax_hor, ann[:, dv_idx, :], ml_um, ap_um, atlas,
-               fallback_mask=inside.any(axis=1),
+               silhouette=lambda: ann.projections()[2],
                title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm", warp=warp_hor)
 
     # Probe (red) + bregma estimate (black) per view: (axis, x-col, y-col)

@@ -378,12 +378,26 @@ class TestListAtlasesNeverBlocks:
 
 
 class TestEnsureDownloaded:
-    def test_materialises_the_annotation(self, monkeypatch):
+    """``ensure_downloaded`` must actually fetch the data, not just construct.
+
+    Constructing a ``BrainGlobeAtlas`` pulls only the manifest and metadata —
+    a few hundred KB — and leaves the annotation on S3.  An ``ensure_downloaded``
+    that stopped there would shift the real download onto the first user to open
+    the anatomy panel, on the Bokeh event loop, which is what it exists to
+    prevent.  (It no longer *materialises* the array: with the lazy volume it
+    only guarantees the data is on disk.  For a double with no zarr store to
+    resolve, that falls back to reading ``annotation``.)
+    """
+
+    def test_fetches_the_annotation_data(self, monkeypatch):
         reads = []
 
         class _A:
             def __init__(self, name, **_kwargs):
                 self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = (2, 2, 2)
 
             @property
             def annotation(self):
@@ -393,6 +407,28 @@ class TestEnsureDownloaded:
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _A)
         atlas_module.ensure_downloaded("some_atlas")
         assert reads == ["some_atlas"]
+
+    def test_constructing_alone_is_not_enough(self, monkeypatch):
+        """Guards the failure that shipped three cold images: a build that
+        'succeeded' because the atlas object existed, while the data never
+        left S3."""
+        reads = []
+
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = (2, 2, 2)
+
+            @property
+            def annotation(self):
+                reads.append(self.name)
+                return np.zeros((2, 2, 2), np.int32)
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _A)
+        atlas_module.get_atlas("some_atlas")
+        assert reads == [], "constructing an atlas must not fetch the annotation"
 
 
 class TestAtlasesAreReleased:
