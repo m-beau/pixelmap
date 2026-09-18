@@ -6,6 +6,9 @@ atlas so nothing is downloaded.
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import numpy as np
 import pytest
 
@@ -33,13 +36,15 @@ class _FakeAtlas:
 
 @pytest.fixture(autouse=True)
 def _reset_caches():
+    # ``schematic._atlas_data`` is deliberately uncached now (it used to pin a
+    # fourth set of annotation volumes), so there is nothing to clear for it.
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
-    schematic_module._atlas_data.cache_clear()
     yield
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
-    schematic_module._atlas_data.cache_clear()
 
 
 @pytest.fixture
@@ -106,3 +111,72 @@ def test_falls_back_to_silhouette_when_tip_outside_volume(fake_brainglobe):
         y_range=(0.0, 80.0),
     )
     assert len(fig.axes) == 4  # 3 slices + legend; renders without crashing
+
+
+
+class _LoadTrackingAtlas:
+    """Fake atlas whose annotation arrays are individually weak-referenced.
+
+    Liveness is tracked on the *array*, not on the atlas object: a cache that
+    stores the array directly keeps it alive even after the owning atlas has
+    dropped its own reference, and that is exactly the failure mode being
+    guarded against.
+    """
+
+    alive: list = []  # weakrefs to every annotation array ever materialised
+
+    def __init__(self, name: str, **_kwargs):
+        self.name = name
+        self.orientation = "asr"
+        self.resolution = (25.0, 25.0, 25.0)
+        self.shape = (8, 6, 10)
+        self.structures = {
+            1: {"acronym": "L", "name": "Left", "rgb_triplet": [200, 0, 0]},
+            2: {"acronym": "R", "name": "Right", "rgb_triplet": [0, 0, 200]},
+        }
+        self._annotation = None
+
+    @property
+    def annotation(self):
+        if self._annotation is None:
+            ann = np.zeros((8, 6, 10), dtype=np.int32)
+            ann[1:7, 1:5, 1:5] = 1
+            ann[1:7, 1:5, 5:9] = 2
+            type(self).alive.append(weakref.ref(ann))
+            self._annotation = ann
+        return self._annotation
+
+    @classmethod
+    def live_annotations(cls) -> int:
+        gc.collect()
+        return sum(ref() is not None for ref in cls.alive)
+
+
+def test_rendering_many_atlases_keeps_one_annotation_resident(monkeypatch):
+    """The locator must not build an atlas cache of its own.
+
+    ``_atlas_data`` used to be an ``lru_cache(maxsize=4)`` holding
+    ``(atlas, annotation, resolution)``. Keyed and evicted independently of the
+    caches in :mod:`pixelmap.anatomy.atlas`, it pinned up to four more
+    annotation volumes — hundreds of MB apiece — which is part of why the
+    server's RSS climbed monotonically as a user browsed atlases. Note it held
+    the *array*, so releasing the atlas object would not have freed it.
+    """
+    monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _LoadTrackingAtlas)
+    monkeypatch.setattr(_LoadTrackingAtlas, "alive", [])
+
+    for i in range(12):  # three times the old cache bound
+        render_locator(
+            f"atlas_{i}",
+            tip_atlas=(100.0, 100.0, 75.0),
+            pitch_deg=0.0,
+            yaw_deg=0.0,
+            shank_orientation_deg=0.0,
+            shank_positions={0: 0.0},
+            y_range=(0.0, 80.0),
+        )
+        live = _LoadTrackingAtlas.live_annotations()
+        assert live == 1, (
+            f"{live} annotation volumes still in RAM after rendering atlas_{i}; "
+            "exactly 1 is allowed"
+        )

@@ -29,10 +29,12 @@ class _LayeredAtlas:
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     yield
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()

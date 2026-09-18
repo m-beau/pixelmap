@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -85,6 +86,7 @@ def layered_atlas(monkeypatch):
                 2: {"acronym": "SUP", "name": "Superficial region", "rgb_triplet": [200, 100, 50]},
             }
 
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
@@ -92,6 +94,7 @@ def layered_atlas(monkeypatch):
     # Pretend it's cached so the GUI treats it as a local atlas throughout.
     monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=FAKE_ATLAS: True)
     yield ann
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
@@ -696,3 +699,42 @@ def test_no_unlocked_async_gui_callbacks():
         f"async GUI callbacks missing @pn.io.with_lock: {unlocked}. Panel "
         "schedules these nolock, so any Bokeh model write inside them raises."
     )
+
+
+class TestClearOverlayReleasesAtlasMemory:
+    """"Clear overlay" must hand the annotation volume back, not just blank the plot.
+
+    Blanking the Bokeh sources left the atlas resident — 308 MB for
+    allen_mouse_25um, up to 4.8 GB for a 10 µm atlas — so a user who cleared the
+    overlay saw RSS stay exactly where it was.
+    """
+
+    @staticmethod
+    def _wait_for_release(timeout: float = 5.0) -> bool:
+        """The release runs on a daemon thread; give it a moment to land."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if atlas_module._resident is None:
+                return True
+            time.sleep(0.01)
+        return atlas_module._resident is None
+
+    def test_clearing_the_overlay_releases_the_atlas(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        assert atlas_module._resident is not None, "overlay should have loaded an atlas"
+
+        posed_gui.clear_anatomy_overlay()
+
+        assert self._wait_for_release(), "clear overlay left the atlas resident in RAM"
+
+    def test_recomputing_after_a_clear_still_works(self, posed_gui):
+        """Releasing must be transparent — the next compute reloads from disk."""
+        posed_gui.compute_anatomy_overlay()
+        posed_gui.clear_anatomy_overlay()
+        assert self._wait_for_release()
+
+        posed_gui.compute_anatomy_overlay()
+        assert atlas_module._resident is not None
+        assert len(posed_gui.region_band_source.data["acronym"]) > 0, (
+            "overlay did not come back after a release"
+        )

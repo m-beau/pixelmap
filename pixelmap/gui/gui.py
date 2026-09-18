@@ -11,6 +11,7 @@ import gc
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -1414,6 +1415,22 @@ class ChannelmapGUI(param.Parameterized):
         self.anatomy_locator.object = ""
         self.anatomy_locator_section.visible = False
         self._update_tip_depth_readout()  # back to a blank readout
+
+        # Hand back the atlas's RAM: nothing on screen needs it any more, and an
+        # annotation volume is 308 MB for allen_mouse_25um and up to 4.8 GB for
+        # a 10 µm atlas.  Recomputing reloads it from the local on-disk cache in
+        # ~130 ms, which is a fair price for not sitting on gigabytes.
+        #
+        # Off-thread on purpose: the release takes the atlas lock, which a
+        # concurrent download can hold for seconds, and this method runs on the
+        # Bokeh event loop that serves every other session.  Fire-and-forget —
+        # if it loses a race with someone else loading an atlas, that atlas is
+        # simply the resident one and the memory is reclaimed on the next switch.
+        threading.Thread(
+            target=anatomy_atlas.release_atlas_memory,
+            name="pixelmap-atlas-release",
+            daemon=True,
+        ).start()
 
     def _fig_to_locator_html(self, fig) -> str:
         """Convert a matplotlib figure to an HTML img with click-to-lightbox."""

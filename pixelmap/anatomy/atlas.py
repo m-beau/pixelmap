@@ -26,6 +26,19 @@ supported.  Two properties of that layout shape the code below:
   ~9 MB of compressed chunks, against ~1.3 GB of tiffs under v2.  That is what
   makes baking them into the Docker image cheap and reliable.
 
+Only one annotation volume is ever resident
+-------------------------------------------
+The decompressed annotation is by far the largest thing PixelMap holds: 308 MB
+for allen_mouse_25um, 1.07 GB for whs_sd_rat_39um, 4.8 GB for allen_mouse_10um
+(mean across the registry: ~700 MB).  Caching more than one of those is what
+took the server to 3 GB RSS with a single user simply trying atlases.
+
+So exactly one atlas's annotation is kept in RAM at a time, and switching
+atlases *releases the old one before loading the new* — see
+:func:`_make_resident`.  The atlas *objects* are a separate, cheap cache
+(:func:`get_atlas`, ~5 MB each, metadata only): keeping several of those costs
+almost nothing and is what lets metadata queries stay lock-free.
+
 Why the network never runs inline
 ---------------------------------
 The deployed app is a single-process Panel/Bokeh server: a blocking call on
@@ -39,7 +52,10 @@ the one genuinely expensive call onto a worker thread.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import functools
+import gc
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,26 +83,143 @@ class RegionInfo:
     rgb: tuple[int, int, int]  # 0-255 color as defined by the atlas
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=8)
 def get_atlas(name: str = _DEFAULT_ATLAS):
-    """Return a cached :class:`BrainGlobeAtlas` instance.
+    """Return a cached, **metadata-only** :class:`BrainGlobeAtlas` instance.
 
     We delegate the download/caching to brainglobe — its on-disk cache is
     shared across processes.  ``check_latest=False`` skips the remote version
     check so the app doesn't hang when the atlas host is unreachable.
 
-    Construction fetches only the manifest and metadata (a few hundred KB);
-    the annotation array is pulled from S3 later, when something first reads
-    ``atlas.annotation``.  Either step is free once the data is local, but
-    neither is free on a cold cache — see :func:`ensure_downloaded` for
-    getting that cost off the event loop.
+    Construction fetches only the manifest and metadata (a few hundred KB, ~5 MB
+    resident, ~65 ms); the annotation array is pulled from S3 later, when
+    something first reads ``atlas.annotation``.  **Nothing may read that
+    attribute except** :func:`_make_resident`, which is what keeps the
+    one-annotation-at-a-time invariant true — every other function here is a
+    metadata query and must stay that way.
 
-    The cache is bounded so a server that sees many atlases doesn't hold every
-    annotation volume it has ever decoded.  Nothing else may keep a strong
-    reference to an atlas object, or that bound stops meaning anything (see
-    :func:`_region_info_from_id`).
+    Because the objects this returns are small, the bound is generous and this
+    function takes no lock: metadata queries (:func:`is_downloaded`,
+    :func:`volume_center_um`, :func:`origin_corner`, region lookups) stay cheap
+    and never block, even while another thread is mid-download.  The annotation
+    is bounded separately, and far more tightly, by :func:`_make_resident`.
     """
     return BrainGlobeAtlas(name, check_latest=False)
+
+
+#: Serialises atlas *switches*.  Held across a download, so a second session
+#: asking for a different atlas waits rather than putting two annotation
+#: volumes in RAM at once — the whole point of this module.  Deliberately not
+#: taken by :func:`get_atlas`, so metadata queries never block on a download.
+_resident_lock = threading.RLock()
+
+#: The single atlas whose annotation is currently in RAM, held by a *strong*
+#: reference so it survives eviction from :func:`get_atlas`'s cache and stays
+#: releasable.  ``None`` when no annotation is loaded.
+_resident = None
+_resident_name: str | None = None
+
+
+def _malloc_trim() -> None:
+    """Hand glibc's freed heap back to the OS.  No-op where unavailable.
+
+    Freeing the array is not enough: the annotation is decoded from thousands
+    of small OME-Zarr chunks, and those land on the heap, where glibc keeps
+    them after ``free()``.  Measured on one 1.07 GB atlas: dropping every
+    reference returned the array itself but left ~585 MB of high-water behind,
+    and that is what made RSS ratchet up across atlas switches instead of
+    returning to baseline.  ``MALLOC_ARENA_MAX=2`` (see the Dockerfile) bounds
+    how many arenas can hoard it; this returns what they are already holding.
+
+    Absent on macOS/musl, where there is no ``malloc_trim`` — the caller has
+    still dropped its references either way.
+    """
+    trim = _malloc_trim_fn()
+    if trim is None:
+        return
+    try:
+        trim(0)
+    except Exception:  # noqa: BLE001 - best-effort reclaim, never fatal
+        pass
+
+
+@functools.lru_cache(maxsize=1)
+def _malloc_trim_fn():
+    """Resolve glibc's ``malloc_trim`` once, or ``None`` where there isn't one.
+
+    ``libc.so.6`` by name first: it is the glibc soname on every platform that
+    has this function, including the Ubuntu base image, and it avoids
+    ``find_library``, which shells out to ``ldconfig``/``gcc`` and returns
+    ``None`` in slim containers that have neither.  Resolved once per process
+    because that fallback is far too expensive to run on every atlas switch.
+    """
+    candidates = ("libc.so.6", ctypes.util.find_library("c"))
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            return ctypes.CDLL(name).malloc_trim
+        except (OSError, AttributeError):
+            continue
+    return None
+
+
+def _release_resident() -> None:
+    """Drop the resident annotation volume and return its pages to the OS.
+
+    Order matters.  ``canonical_annotation`` memoises a *view* onto the array,
+    which keeps the whole buffer alive, so its memo has to go first or clearing
+    ``_annotation`` frees nothing.  Callers hold :data:`_resident_lock`.
+    """
+    global _resident, _resident_name
+
+    if _resident is None:
+        return
+    canonical_annotation.cache_clear()
+    # brainglobe has no public "unload" hook; ``_annotation`` is the attribute
+    # its ``annotation`` property memoises into, and clearing it makes the next
+    # read re-fetch from the (already local) on-disk cache in ~130 ms.  Guarded
+    # because test doubles expose ``annotation`` as a plain attribute instead.
+    try:
+        _resident._annotation = None
+    except AttributeError:
+        pass
+    _resident = None
+    _resident_name = None
+    gc.collect()
+    _malloc_trim()
+
+
+def _make_resident(name: str):
+    """Return ``name``'s atlas with its annotation loaded, and no other's.
+
+    The single place in PixelMap that reads ``atlas.annotation``, so that the
+    "one annotation volume in RAM" invariant holds by construction rather than
+    by everyone remembering it.  Switching releases the previous atlas *before*
+    loading the new one, which keeps the peak at whichever of the two is larger
+    instead of their sum — the difference between fitting in a 3.5 GB container
+    and being OOM-killed while swapping a 1 GB atlas for a 5 GB one.
+    """
+    global _resident, _resident_name
+
+    with _resident_lock:
+        if _resident is not None and _resident_name == name:
+            return _resident
+        _release_resident()
+        atlas = get_atlas(name)
+        _ = atlas.annotation  # the download / decode this module exists to bound
+        _resident, _resident_name = atlas, name
+        return atlas
+
+
+def release_atlas_memory() -> None:
+    """Drop the resident annotation volume, freeing its RAM.
+
+    For callers that know no atlas is needed for a while.  The next lookup
+    reloads from the local on-disk cache.
+    """
+    with _resident_lock:
+        _release_resident()
 
 
 def ensure_downloaded(name: str = _DEFAULT_ATLAS) -> None:
@@ -95,9 +228,9 @@ def ensure_downloaded(name: str = _DEFAULT_ATLAS) -> None:
     The one call in this module that can block for seconds on a cold cache, in
     a single place so callers can push it onto a worker thread — which the GUI
     does, because on the server the calling thread also serves every other
-    session.  A no-op once the atlas is local.
+    session.  A no-op once the atlas is local *and* already resident.
     """
-    _ = get_atlas(name).annotation
+    _make_resident(name)
 
 
 @functools.lru_cache(maxsize=1)
@@ -398,8 +531,9 @@ def _atlas_shape(atlas) -> tuple[int, ...]:
 
     brainglobe publishes ``shape`` from the atlas manifest, which is the cheap
     way to ask: reading ``annotation.shape`` instead would pull the entire
-    array from S3.  Test doubles only carry ``annotation``, so fall back to
-    that.
+    array from S3 — outside :func:`_make_resident`, and so outside the
+    one-volume-at-a-time bound.  Every real v3 atlas carries ``shape``; only
+    test doubles reach the fallback.
     """
     shape = getattr(atlas, "shape", None)
     if shape is not None:
@@ -434,7 +568,7 @@ def anatomical_axes(atlas) -> dict[str, _AnatAxis]:
     return axes
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=1)
 def canonical_annotation(atlas_name: str):
     """Return ``(annotation, resolution)`` reoriented to canonical ``(AP, DV, ML)``.
 
@@ -444,8 +578,16 @@ def canonical_annotation(atlas_name: str):
     assumes this layout, so funnelling every atlas through here is what lets
     non-Allen orientations work. For an already-``asr`` atlas this is a no-op
     (identity transpose, no flips), so Allen behavior is unchanged.
+
+    Transpose and flip both return *views*, so a memoised entry here keeps the
+    whole annotation buffer alive — dropping the owning atlas's reference is not
+    enough to free it. That is why :func:`_release_resident` clears this memo
+    first, and that clear, not the ``maxsize``, is what enforces the
+    one-volume-at-a-time bound. ``maxsize=1`` is defence in depth: it keeps the
+    memo from outliving the atlas it describes even if some future caller
+    reaches this function without going through a release.
     """
-    atlas = get_atlas(atlas_name)
+    atlas = _make_resident(atlas_name)
     axes = anatomical_axes(atlas)
     order = (axes["AP"].array_axis, axes["DV"].array_axis, axes["ML"].array_axis)
     arr = np.transpose(atlas.annotation, order)

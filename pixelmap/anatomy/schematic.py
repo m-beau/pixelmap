@@ -14,8 +14,6 @@ atlas orientation.
 
 from __future__ import annotations
 
-import functools
-
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -31,12 +29,19 @@ _REGION_ALPHA = 0.6        # region fill opacity
 _OUTLINE_RGBA = (0.2, 0.2, 0.25, 0.8)
 
 
-@functools.lru_cache(maxsize=4)
 def _atlas_data(atlas_name: str):
-    """Cached ``(atlas, annotation, resolution)`` in canonical ``(AP, DV, ML)``.
+    """``(atlas, annotation, resolution)`` in canonical ``(AP, DV, ML)``.
 
     Going through :func:`~pixelmap.anatomy.atlas.canonical_annotation` means the
     slicing/projection below works for any atlas orientation, not just Allen's.
+
+    Deliberately **not** memoised.  It used to be an ``lru_cache(maxsize=4)``,
+    which made it a third independent cache holding atlas objects and their
+    annotation volumes — keyed and evicted independently of the two in
+    :mod:`pixelmap.anatomy.atlas`, so between them they could pin a dozen
+    volumes (~700 MB each) while each looked individually well-bounded.  That
+    was the server's monotonic RSS climb.  Both calls below are already cached
+    upstream, so there is nothing to memoise here anyway.
     """
     atlas = get_atlas(atlas_name)
     annotation, resolution = canonical_annotation(atlas_name)
