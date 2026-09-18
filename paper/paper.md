@@ -52,7 +52,7 @@ Beyond satisfying hardware constraints, channelmaps must be tailored to the expe
 1. **Being available on any machine installation-free** at [https://pixelmap.pni.princeton.edu](https://pixelmap.pni.princeton.edu).
 2. **Visualising wiring constraints in real time**: When users select electrodes (red), the interface immediately shows which become unavailable (black) due to shared lines or ADCs, preventing invalid configurations.
 3. **Supporting arbitrary electrode geometries** through 1) common preset geometries, 2) entering electrode ranges as text for reproducibility, 3) directly clicking or dragging on the probe visualisation, or 4) loading pre-existing `.imro` files. These four selection methods are compatible with one another and meant to be combined.
-4. **Guiding channelmap design with anatomy and activity overlays**: Users can overlay anatomical region boundaries from any brain atlas available through BrainGlobe [@claudi2020] to plan recordings around specific brain regions of interest, and **simultaneously** a SpikeGLX activity survey heatmap to identify the most active channels and confirm anatomical predictions after probe implantation.
+4. **Guiding channelmap design with anatomy and activity overlays**: Users can overlay anatomical region boundaries from any brain atlas available through BrainGlobe [@claudi2020] to plan recordings around specific brain regions of interest. They can also **simultaneously** overlay a SpikeGLX activity survey heatmap to identify the most active channels and confirm anatomical predictions after probe implantation.
 
 | Probe Version | Physical Electrodes | Readout Channels |
 |---------------|---------------------|------------------|
