@@ -43,11 +43,13 @@ def _must_not_be_called(*args, **kwargs):
 @pytest.fixture(autouse=True)
 def _reset_atlas_cache():
     """Make sure no real atlas leaks across tests via the lru_cache."""
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     yield
+    atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
     atlas_module.derive_origin_from_ac.cache_clear()
@@ -89,6 +91,7 @@ class TestLookup:
                 self.annotation = np.zeros((4, 4, 4), dtype=np.int32)
 
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", Zeros)
+        atlas_module.release_atlas_memory()
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
 
@@ -149,6 +152,7 @@ class TestOrientation:
         # Native "sla" volume is indexed (DV, ML, AP); canonical must be (AP, DV, ML).
         native = np.arange(2 * 3 * 4, dtype=np.int32).reshape(2, 3, 4)
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("sla", native))
+        atlas_module.release_atlas_memory()
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         arr, _ = atlas_module.canonical_annotation("x")
@@ -163,6 +167,7 @@ class TestOrientation:
         structs = {5: {"id": 5, "acronym": "ac", "name": "anterior commissure",
                        "rgb_triplet": [1, 2, 3]}}
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
+        atlas_module.release_atlas_memory()
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         atlas_module.derive_origin_from_ac.cache_clear()
@@ -175,6 +180,7 @@ class TestOrientation:
         structs = {9: {"id": 9, "acronym": "x", "name": "some nucleus",
                        "rgb_triplet": [0, 0, 0]}}
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("asr", ann, structs))
+        atlas_module.release_atlas_memory()
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         atlas_module.derive_origin_from_ac.cache_clear()
@@ -187,6 +193,7 @@ class TestOrientation:
         native[0, :, :] = 2     # native index 0 = posterior
         native[1:, :, :] = 1
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _atlas_cls("psr", native))
+        atlas_module.release_atlas_memory()
         atlas_module.get_atlas.cache_clear()
         atlas_module.canonical_annotation.cache_clear()
         anterior = atlas_module.lookup_regions("x", np.array([[0.0, 0.0, 0.0]]))
@@ -371,12 +378,26 @@ class TestListAtlasesNeverBlocks:
 
 
 class TestEnsureDownloaded:
-    def test_materialises_the_annotation(self, monkeypatch):
+    """``ensure_downloaded`` must actually fetch the data, not just construct.
+
+    Constructing a ``BrainGlobeAtlas`` pulls only the manifest and metadata —
+    a few hundred KB — and leaves the annotation on S3.  An ``ensure_downloaded``
+    that stopped there would shift the real download onto the first user to open
+    the anatomy panel, on the Bokeh event loop, which is what it exists to
+    prevent.  (It no longer *materialises* the array: with the lazy volume it
+    only guarantees the data is on disk.  For a double with no zarr store to
+    resolve, that falls back to reading ``annotation``.)
+    """
+
+    def test_fetches_the_annotation_data(self, monkeypatch):
         reads = []
 
         class _A:
             def __init__(self, name, **_kwargs):
                 self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = (2, 2, 2)
 
             @property
             def annotation(self):
@@ -386,6 +407,28 @@ class TestEnsureDownloaded:
         monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _A)
         atlas_module.ensure_downloaded("some_atlas")
         assert reads == ["some_atlas"]
+
+    def test_constructing_alone_is_not_enough(self, monkeypatch):
+        """Guards the failure that shipped three cold images: a build that
+        'succeeded' because the atlas object existed, while the data never
+        left S3."""
+        reads = []
+
+        class _A:
+            def __init__(self, name, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = (2, 2, 2)
+
+            @property
+            def annotation(self):
+                reads.append(self.name)
+                return np.zeros((2, 2, 2), np.int32)
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _A)
+        atlas_module.get_atlas("some_atlas")
+        assert reads == [], "constructing an atlas must not fetch the annotation"
 
 
 class TestAtlasesAreReleased:
@@ -454,3 +497,122 @@ class TestAtlasesAreReleased:
         # Rebuilding on eviction is expected; *retaining* the rebuilds is not.
         assert len(built) > bound, "expected evictions to force rebuilds"
         assert self._live(built) <= bound
+
+
+
+class TestOnlyOneAnnotationIsResident:
+    """At most one annotation volume may be in RAM at any moment.
+
+    Regression test for the production leak that took RSS from 86 MB to 3 GB
+    while a single user tried out atlases.  Three independent ``lru_cache``es
+    (``get_atlas``, ``canonical_annotation`` and ``schematic._atlas_data``,
+    ``maxsize=4`` apiece) each pinned atlases and their annotation volumes, and
+    because they were keyed and evicted independently they could hold a dozen
+    between them — ~700 MB each on average across the registry, 5.2 GB at the
+    top end.  Each cache looked individually well-bounded; the total was not.
+
+    Liveness is asserted on the annotation *arrays*, via weakrefs, not on the
+    atlas objects that own them: ``canonical_annotation`` memoises a transposed
+    *view*, which keeps the whole buffer alive on its own, so counting atlas
+    objects would miss precisely the leak that matters.
+    """
+
+    @staticmethod
+    def _atlas_cls(alive: list, peak: list[int]):
+        """A fake that weak-references every annotation array it materialises."""
+
+        class _LoadTrackingAtlas:
+            def __init__(self, name: str, **_kwargs):
+                self.name = name
+                self.orientation = "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.shape = (4, 4, 4)
+                self.structures = {
+                    1: {"acronym": "R", "name": "Region", "rgb_triplet": [1, 2, 3]}
+                }
+                self._annotation = None
+
+            @property
+            def annotation(self):
+                if self._annotation is None:
+                    ann = np.ones((4, 4, 4), dtype=np.int32)
+                    alive.append(weakref.ref(ann))
+                    self._annotation = ann
+                    gc.collect()
+                    peak[0] = max(peak[0], sum(r() is not None for r in alive))
+                return self._annotation
+
+        return _LoadTrackingAtlas
+
+    @staticmethod
+    def _live(alive: list) -> int:
+        gc.collect()
+        return sum(ref() is not None for ref in alive)
+
+    def test_switching_atlases_never_holds_two_volumes(self, monkeypatch):
+        alive: list = []
+        peak = [0]
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._atlas_cls(alive, peak)
+        )
+        coords = np.array([[0.0, 0.0, 0.0]])
+
+        # Many more distinct atlases than any of the old caches could hold.
+        for i in range(24):
+            name = f"atlas_{i}"
+            atlas_module.ensure_downloaded(name)
+            atlas_module.lookup_regions(name, coords)
+            atlas_module.canonical_annotation(name)
+            live = self._live(alive)
+            assert live == 1, (
+                f"{live} annotation volumes in RAM after {name}; 1 is allowed"
+            )
+
+        assert peak[0] == 1, (
+            f"peak of {peak[0]} concurrently-live annotations: the previous "
+            "atlas must be released *before* the next is read, or a switch "
+            "transiently costs the sum of the two"
+        )
+
+    def test_revisiting_the_resident_atlas_does_not_reload(self, monkeypatch):
+        alive: list = []
+        peak = [0]
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._atlas_cls(alive, peak)
+        )
+        coords = np.array([[0.0, 0.0, 0.0]])
+
+        atlas_module.ensure_downloaded("a")
+        for _ in range(5):
+            atlas_module.ensure_downloaded("a")
+            atlas_module.lookup_regions("a", coords)
+        assert len(alive) == 1, "resident atlas was needlessly reloaded"
+        assert self._live(alive) == 1
+
+    def test_release_atlas_memory_frees_everything(self, monkeypatch):
+        alive: list = []
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._atlas_cls(alive, [0])
+        )
+        atlas_module.ensure_downloaded("a")
+        atlas_module.canonical_annotation("a")
+        assert self._live(alive) == 1
+        atlas_module.release_atlas_memory()
+        assert self._live(alive) == 0, "release_atlas_memory left a volume in RAM"
+
+    def test_metadata_queries_do_not_load_annotations(self, monkeypatch):
+        """The cheap path must stay cheap — and must not evict the resident."""
+        alive: list = []
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", self._atlas_cls(alive, [0])
+        )
+
+        atlas_module.ensure_downloaded("resident")
+        assert len(alive) == 1
+
+        for i in range(12):  # more than get_atlas's own bound
+            atlas_module.volume_center_um(f"other_{i}")
+            atlas_module.orientation_code(f"other_{i}")
+
+        assert len(alive) == 1, "a metadata query materialised an annotation"
+        assert self._live(alive) == 1, "a metadata query evicted the resident atlas"
