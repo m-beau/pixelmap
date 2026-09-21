@@ -111,7 +111,7 @@ PixelMap addresses a practical bottleneck in Neuropixels experimental workflows.
 
 PixelMap is released under an open-source licence (GPLv3), provides comprehensive documentation including a [contributor guide](https://pixelmap-neuropixels.readthedocs.io/en/latest/development.html), and is accessible via web application, Python package, Docker container, or programmatic API. It builds on the authors' track record using Neuropixels probes [@steinmetz2021; @bondy2024; @beau2025; @fabre2026basal] and developing Neuropixels software [@beau2021].
 
-Adoption is evidenced by deployment on PNI's public server, 59 GitHub stars, and web traffic of roughly 400 unique visitors between March and May 2026 (~45/week; see the [analytics](https://github.com/m-beau/pixelmap/tree/main/analytics) folder of the repository). The package has been under active development for over ten months, with external contributors implementing new features (anatomical and activity overlays).
+Adoption is evidenced by deployment on Princeton Neuroscience Institute's (PNI) public server, 59 GitHub stars, and web traffic of roughly 400 unique visitors between March and May 2026 (~45/week; see the [analytics](https://github.com/m-beau/pixelmap/tree/main/analytics) folder of the repository). The package has been under active development for over ten months, with external contributors implementing new features (anatomical and activity overlays).
 
 # AI Usage Disclosure
 
