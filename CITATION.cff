@@ -1,0 +1,64 @@
+cff-version: 1.2.0
+message: If you use this software, please cite the JOSS paper below.
+title: 'PixelMap: A Browser-Based Tool for Wiring-Aware, Anatomy- and Activity-Guided Design of Neuropixels
+  Channelmaps'
+type: software
+authors:
+- given-names: Maxime
+  family-names: Beau
+  orcid: https://orcid.org/0000-0002-8907-6612
+- given-names: Julie M. J.
+  family-names: Fabre
+  orcid: https://orcid.org/0000-0003-0550-0410
+- given-names: Christian
+  family-names: Tabedzki
+  orcid: https://orcid.org/0000-0001-8409-6094
+- given-names: Jorge
+  family-names: Yanar
+  orcid: https://orcid.org/0000-0003-1416-3567
+- given-names: Carlos D.
+  family-names: Brody
+  orcid: https://orcid.org/0000-0002-4201-561X
+version: 1.4.0
+date-released: '2026-09-19'
+doi: 10.5281/zenodo.22850328
+identifiers:
+- type: doi
+  value: 10.5281/zenodo.22850327
+  description: Zenodo concept DOI (all versions)
+- type: doi
+  value: 10.5281/zenodo.22850328
+  description: Zenodo archive of the v1.4.0 JOSS release
+- type: doi
+  value: 10.21105/joss.11008
+  description: JOSS paper
+repository-code: https://github.com/m-beau/pixelmap
+url: https://pixelmap.pni.princeton.edu
+license: GPL-3.0-only
+preferred-citation:
+  type: article
+  title: 'PixelMap: A Browser-Based Tool for Wiring-Aware, Anatomy- and Activity-Guided Design of
+    Neuropixels Channelmaps'
+  authors:
+  - given-names: Maxime
+    family-names: Beau
+    orcid: https://orcid.org/0000-0002-8907-6612
+  - given-names: Julie M. J.
+    family-names: Fabre
+    orcid: https://orcid.org/0000-0003-0550-0410
+  - given-names: Christian
+    family-names: Tabedzki
+    orcid: https://orcid.org/0000-0001-8409-6094
+  - given-names: Jorge
+    family-names: Yanar
+    orcid: https://orcid.org/0000-0003-1416-3567
+  - given-names: Carlos D.
+    family-names: Brody
+    orcid: https://orcid.org/0000-0002-4201-561X
+  journal: Journal of Open Source Software
+  publisher:
+    name: Open Journals
+  year: 2026
+  start: 11008
+  doi: 10.21105/joss.11008
+  url: https://doi.org/10.21105/joss.11008
