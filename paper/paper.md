@@ -29,9 +29,9 @@ authors:
     orcid: 0000-0002-4201-561X
     affiliation: "1, 2"
 affiliations:
-  - name: Princeton Neuroscience Institute, Princeton University, USA
+  - name: Princeton Neuroscience Institute, Princeton University, United States of America
     index: 1
-  - name: Howard Hughes Medical Institute, USA
+  - name: Howard Hughes Medical Institute, United States of America
     index: 2
 date: 29 May 2026
 bibliography: paper.bib
