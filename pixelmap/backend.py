@@ -2,8 +2,10 @@
 ## Imports ##
 #############
 
+from functools import cache
 from pathlib import Path
 import pickle
+from types import MappingProxyType
 
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -105,9 +107,21 @@ def find_forbidden_electrodes(selected_electrodes, wiring_df):
     return np.array(forbidden_electrodes).astype(int)
 
 def make_wiring_maps(wiring_maps_dir):
-    "Precomputes electrode wiring conflict maps for each probe type."
-    wiring_maps_dir = Path(wiring_maps_dir)
+    """
+    Precomputes electrode wiring conflict maps for each probe type.
+
+    The result is cached per resolved directory, so every caller (and every
+    Panel session) shares one read-only mapping instead of unpickling its own.
+    """
+    wiring_maps_dir = Path(wiring_maps_dir).resolve()
     assert wiring_maps_dir.exists(), f"{wiring_maps_dir} does not exist!"
+    return _load_wiring_maps(str(wiring_maps_dir))
+
+
+@cache
+def _load_wiring_maps(wiring_maps_dir):
+    "Loads (or builds and pickles) the wiring conflict maps. Call cache_clear() after changing a directory's wiring files."
+    wiring_maps_dir = Path(wiring_maps_dir)
     cache_file = wiring_maps_dir / "wiring_maps.pkl"
 
     # If pickled result found and covers all current probe types, preload it
@@ -116,7 +130,7 @@ def make_wiring_maps(wiring_maps_dir):
         with open(cache_file, 'rb') as f:
             wiring_maps = pickle.load(f)
         if set(wiring_maps.keys()) == expected_keys:
-            return wiring_maps
+            return _freeze_wiring_maps(wiring_maps)
         # Cache is stale (probe types changed) — rebuild below
     
     # Generate wiring maps
@@ -140,7 +154,17 @@ def make_wiring_maps(wiring_maps_dir):
     with open(cache_file, 'wb') as f:
         pickle.dump(wiring_maps, f)
     
-    return wiring_maps
+    return _freeze_wiring_maps(wiring_maps)
+
+
+def _freeze_wiring_maps(wiring_maps):
+    "Read-only view of the wiring maps, so the copy shared by every session can't be mutated."
+    return MappingProxyType({
+        probe_type: MappingProxyType({
+            electrode: frozenset(conflicting) for electrode, conflicting in conflicts.items()
+        })
+        for probe_type, conflicts in wiring_maps.items()
+    })
 
 
 def format_wiring_df(wiring_df):
