@@ -150,15 +150,17 @@ def format_wiring_df(wiring_df):
     """
     # add shank id to electrode id, in dataframe's cells
     df = wiring_df.copy()
+    new_columns = {}
     for column in df.columns[1:]:
         shank_id = int(column[5])
         electrode_ids = df.loc[:, column].values
         shank_electrode_ids = np.vstack([np.zeros(len(electrode_ids)) + shank_id, electrode_ids]).T
-        shank_electrode_ids = [tuple(se) for se in shank_electrode_ids]
-        df[column] = df[column].astype(object)
-        df[column] = shank_electrode_ids
+        # object-dtype Series so each cell holds a (shank_id, electrode_id) tuple
+        new_columns[column] = pd.Series(
+            [tuple(se) for se in shank_electrode_ids], index=df.index, dtype=object
+        )
 
-    return df
+    return df.assign(**new_columns)
 
 
 def _imro_format_for(probe_subtype, probe_type):
