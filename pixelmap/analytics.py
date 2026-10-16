@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import panel as pn
 import param
@@ -103,13 +104,16 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
+@contextlib.contextmanager
+def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a connection that commits on success, rolls back on error, and always closes."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL;")
-    connection.execute("PRAGMA foreign_keys=ON;")
-    return connection
+    with contextlib.closing(sqlite3.connect(db_path, timeout=30)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL;")
+        connection.execute("PRAGMA foreign_keys=ON;")
+        with connection:
+            yield connection
 
 
 def initialize_database(db_path: Path | None = None) -> Path:
