@@ -37,9 +37,12 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        # Pre-releases (PEP 440 a/b/rc/dev, e.g. v1.4.1rc1) get only their
+        # own tag, never `latest`: prod pulls `latest` via Watchtower, so an
+        # RC must not roll out on its own. contains() is case-insensitive.
         tags: |
           type=ref,event=tag
-          type=raw,value=latest
+          type=raw,value=latest,enable=${{ !contains(github.ref_name, 'a') && !contains(github.ref_name, 'b') && !contains(github.ref_name, 'rc') && !contains(github.ref_name, 'dev') }}
 
     - name: Build and push Docker image
       id: build
