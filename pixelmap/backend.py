@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import cm, patches
-from matplotlib.collections import PatchCollection
+from matplotlib.collections import PolyCollection
 
 from .constants import (
     LEGACY_INT_TO_IMRO_FORMAT,
@@ -103,28 +103,27 @@ def _wiring_index(wiring_df):
 
 def find_forbidden_electrodes(selected_electrodes, wiring_df):
     "Return list of forbidden electrodes [[shank_id, electrode_id], ...] given selected electrodes and wiring diagram."
+    return _forbidden_electrodes(selected_electrodes, *_wiring_index(wiring_df))
 
-    table, shanks, index = _wiring_index(wiring_df)
 
-    rows, sel_shanks, sel_electrodes = [], [], []
+def _forbidden_electrodes(selected_electrodes, table, shanks, index):
+    """``find_forbidden_electrodes`` against a prebuilt :func:`_wiring_index`."""
+    rows = []
     for shank_id, electrode_id in selected_electrodes:
         loc = index.get((float(shank_id), float(electrode_id)))
         assert loc is not None, f"electrode {electrode_id} on shank {shank_id} not found in wiring map!"
         rows.append(loc[0])
-        sel_shanks.append(float(shank_id))
-        sel_electrodes.append(float(electrode_id))
+    selected = np.asarray(selected_electrodes, dtype=float).reshape(-1, 2)
 
     # Every selected electrode's wiring-table row: the electrodes sharing its
     # channel.  Keep the wired (non-NaN), non-self cells; boolean indexing is
     # row-major, so the order matches the old per-electrode loop.
     row_electrodes = table[rows]                                    # (n_selected, n_columns)
     row_shanks = np.broadcast_to(shanks, row_electrodes.shape)
-    is_self = (row_shanks == np.array(sel_shanks)[:, None]) & (
-        row_electrodes == np.array(sel_electrodes)[:, None]
-    )
+    is_self = (row_shanks == selected[:, :1]) & (row_electrodes == selected[:, 1:])
     keep = ~np.isnan(row_electrodes) & ~is_self
     if not keep.any():
-        return np.array([]).astype(int)  # 1-D when empty, as callers expect
+        return np.array([], dtype=int)  # 1-D when empty, as callers expect
     return np.column_stack([row_shanks[keep], row_electrodes[keep]]).astype(int)
 
 def make_wiring_maps(wiring_maps_dir):
@@ -165,9 +164,10 @@ def _load_wiring_maps(wiring_maps_dir):
         wiring_df = pd.read_csv(wiring_file)
 
         wiring_maps[probe_type] = {}
+        wiring = _wiring_index(wiring_df)  # once per table, not per electrode
         for (shank_id, electrode_id, _, _) in positions_df.values:
             electrode = Electrode(shank_id=shank_id, electrode_id=electrode_id)
-            conflicting_electrodes = find_forbidden_electrodes([(shank_id, electrode_id)], wiring_df)
+            conflicting_electrodes = _forbidden_electrodes([(shank_id, electrode_id)], *wiring)
             conflicting_electrodes = {Electrode(e[0], e[1]) for e in conflicting_electrodes}
             wiring_maps[probe_type][electrode] = conflicting_electrodes
 
@@ -685,18 +685,38 @@ def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _add_rects(ax, rects, facecolors, zorder=1):
-    """Add borderless rectangles to ``ax`` as a single PatchCollection.
+_SELECTED_COLOR, _UNSELECTED_COLOR, _FORBIDDEN_COLOR = "red", "lightgrey", "black"
+_SELECTED_RGBA = mcolors.to_rgba(_SELECTED_COLOR, 1.0)
+_FORBIDDEN_RGBA = mcolors.to_rgba(_FORBIDDEN_COLOR, 1.0)
+_UNSELECTED_RGBA = mcolors.to_rgba(_UNSELECTED_COLOR, 0.7)
+
+
+def _electrode_rgba(is_selected, is_forbidden):
+    """Per-electrode facecolour: selected wins over forbidden over unselected."""
+    return np.select(
+        [np.asarray(is_selected)[:, None], np.asarray(is_forbidden)[:, None]],
+        [_SELECTED_RGBA, _FORBIDDEN_RGBA],
+        default=_UNSELECTED_RGBA,
+    )
+
+
+def _add_rects(ax, x0, y0, width, height, facecolors, zorder=1):
+    """Add borderless rectangles (lower-left corners ``x0, y0``) as one collection.
 
     A probe has thousands of electrodes; adding each as its own patch made the
     PDF export spend seconds in per-artist bookkeeping (data-limit updates,
     transform setup, separate draw calls) on the server's event loop.  One
-    collection renders identically for a fraction of the cost.
+    collection built straight from a vertex array renders identically for a
+    fraction of the cost.
     """
-    if not rects:
+    x0 = np.asarray(x0, dtype=float)
+    if not x0.size:
         return
+    y0 = np.asarray(y0, dtype=float)
+    x1, y1 = x0 + width, y0 + height
+    verts = np.stack([np.column_stack(c) for c in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))], axis=1)
     ax.add_collection(
-        PatchCollection(rects, facecolors=facecolors, edgecolors="none", linewidths=0, zorder=zorder),
+        PolyCollection(verts, facecolors=facecolors, edgecolors="none", linewidths=0, zorder=zorder),
         autolim=False,
     )
 
@@ -711,11 +731,6 @@ def plot_probe_layout(
     figsize: (width, height) per shank in inch
 
     """
-
-    # Format parameters
-    selected_color = "red"
-    unselected_color = "lightgrey"
-    forbidden_color = "black"
 
     if probe_type in ["1.0", "2.0-1shank"]:
         n_shanks = 1
@@ -827,48 +842,27 @@ def plot_probe_layout(
         # Draw electrodes (and optional survey sidebar bars)
         is_selected = np.isin(positions[:, 1], selected_electrodes[:, 1])
         is_forbidden = np.isin(positions[:, 1], forbidden_electrodes[:, 1])
-        electrode_rects, electrode_colors = [], []
-        bar_rects, bar_colors = [], []
-        for (electrode, orig_x, y), sel, forb in zip(positions[:, 1:], is_selected, is_forbidden):
-            if sel:
-                color = selected_color
-                alpha = 1.0
-            elif forb:
-                color = forbidden_color
-                alpha = 1
-            else:
-                color = unselected_color
-                alpha = 0.7
-
-            # Map original x positions to shank width (normalized then scaled)
-            if probe_type in ["1.0"]:
-                # Original positions: 11,27,43,59 μm (range: 48 μm, center at 35)
-                # Normalize to [-1, 1] range: (x - 35) / 24
-                x_norm = (orig_x - 35) / 24
-                x = x_norm * (shank_width * 0.8) / 2  # Use 80% of shank width
-            else:  # linear
-                # Original positions: 0,32 μm (range: 32 μm, center at 16)
-                # Normalize to [-1, 1] range: (x - 16) / 16
-                x_norm = (orig_x - 16) / 16
-                x = x_norm * (shank_width * 0.6) / 2  # Use 60% of shank width
-
-            electrode_rects.append(patches.Rectangle(
-                (x - electrode_width // 2, y - electrode_height // 2),
-                electrode_width,
-                electrode_height,
-            ))
-            electrode_colors.append(mcolors.to_rgba(color, alpha))
-
-            # Survey sidebar bar (always on right side in PDF)
-            if survey_colors is not None:
-                bar_rects.append(patches.Rectangle(
-                    (survey_bar_center_x - survey_bar_width / 2, y - electrode_height / 2),
-                    survey_bar_width, electrode_height,
-                ))
-                bar_colors.append(survey_colors.get((0, int(electrode)), "#dddddd"))
-
-        _add_rects(ax, electrode_rects, electrode_colors)
-        _add_rects(ax, bar_rects, bar_colors, zorder=50)
+        electrodes, orig_x, ys = positions[:, 1], positions[:, 2], positions[:, 3]
+        # Map original x positions to shank width (normalized then scaled)
+        if probe_type in ["1.0"]:
+            # Original positions: 11,27,43,59 μm (range: 48 μm, center at 35)
+            # Normalize to [-1, 1] range: (x - 35) / 24; use 80% of shank width
+            xs = (orig_x - 35) / 24 * (shank_width * 0.8) / 2
+        else:  # linear
+            # Original positions: 0,32 μm (range: 32 μm, center at 16)
+            # Normalize to [-1, 1] range: (x - 16) / 16; use 60% of shank width
+            xs = (orig_x - 16) / 16 * (shank_width * 0.6) / 2
+        _add_rects(
+            ax, xs - electrode_width // 2, ys - electrode_height // 2,
+            electrode_width, electrode_height, _electrode_rgba(is_selected, is_forbidden),
+        )
+        # Survey sidebar bars (always on right side in PDF)
+        if survey_colors is not None:
+            _add_rects(
+                ax, np.full(len(ys), survey_bar_center_x - survey_bar_width / 2), ys - electrode_height / 2,
+                survey_bar_width, electrode_height,
+                [survey_colors.get((0, int(e)), "#dddddd") for e in electrodes], zorder=50,
+            )
 
         ax.set_xlim(-shank_width // 2 - 20, shank_width // 2 + 20)
         ax.set_ylim(min_y - tip_height - 50, max_y + 100)
@@ -1011,43 +1005,23 @@ def plot_probe_layout(
             is_forbidden = np.isin(shank_positions[:, 0], forbidden_electrodes[:, 0]) & np.isin(
                 shank_positions[:, 1], forbidden_electrodes[:, 1]
             )
-            electrode_rects, electrode_colors = [], []
-            bar_rects, bar_colors = [], []
-            for (shank_id_pos, electrode, orig_x, y), sel, forb in zip(shank_positions, is_selected, is_forbidden):
-                # Check if this electrode is selected
-                if sel:
-                    electrode_color = selected_color
-                    alpha = 1.0
-                elif forb:
-                    electrode_color = forbidden_color
-                    alpha = 1
-                else:
-                    electrode_color = unselected_color
-                    alpha = 0.7
-
-                # Map electrode positions to shank width (normalized then scaled)
-                # Original positions: 0,32 μm (center at 16) - always 2.0
-                x_norm = (orig_x - true_shank_spacing * shank_id - 16) / 16
-                x = x_center + x_norm * (shank_width * 0.5) / 2
-
-                electrode_rects.append(patches.Rectangle(
-                    (x - electrode_width // 2, y - electrode_height // 2),
-                    electrode_width,
-                    electrode_height,
-                ))
-                electrode_colors.append(mcolors.to_rgba(electrode_color, alpha))
-
-                # Survey sidebar bar (always on right side of each shank in PDF)
-                if survey_colors is not None:
-                    bar_x = x_center + ms_survey_bar_center_offset
-                    bar_rects.append(patches.Rectangle(
-                        (bar_x - ms_survey_bar_width / 2, y - electrode_height / 2),
-                        ms_survey_bar_width, electrode_height,
-                    ))
-                    bar_colors.append(survey_colors.get((int(shank_id_pos), int(electrode)), "#dddddd"))
-
-            _add_rects(ax, electrode_rects, electrode_colors)
-            _add_rects(ax, bar_rects, bar_colors, zorder=50)
+            shank_ids, electrodes, orig_x, ys = shank_positions.T
+            # Map electrode positions to shank width (normalized then scaled)
+            # Original positions: 0,32 μm (center at 16) - always 2.0
+            xs = x_center + (orig_x - true_shank_spacing * shank_id - 16) / 16 * (shank_width * 0.5) / 2
+            _add_rects(
+                ax, xs - electrode_width // 2, ys - electrode_height // 2,
+                electrode_width, electrode_height, _electrode_rgba(is_selected, is_forbidden),
+            )
+            # Survey sidebar bars (always on right side of each shank in PDF)
+            if survey_colors is not None:
+                bar_x = x_center + ms_survey_bar_center_offset
+                _add_rects(
+                    ax, np.full(len(ys), bar_x - ms_survey_bar_width / 2), ys - electrode_height / 2,
+                    ms_survey_bar_width, electrode_height,
+                    [survey_colors.get((int(sh), int(e)), "#dddddd") for sh, e in zip(shank_ids, electrodes)],
+                    zorder=50,
+                )
 
             # Add shank label
             ax.text(
@@ -1116,19 +1090,19 @@ def plot_probe_layout(
     from matplotlib.lines import Line2D
 
     legend_elements = [
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=selected_color, markersize=10, label="Selected"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor=_SELECTED_COLOR, markersize=10, label="Selected"),
         Line2D(
             [0],
             [0],
             marker="s",
             color="w",
-            markerfacecolor=unselected_color,
+            markerfacecolor=_UNSELECTED_COLOR,
             markersize=10,
             alpha=0.7,
             label="Unselected",
         ),
         Line2D(
-            [0], [0], marker="s", color="w", markerfacecolor=forbidden_color, markersize=10, alpha=1, label="Forbidden"
+            [0], [0], marker="s", color="w", markerfacecolor=_FORBIDDEN_COLOR, markersize=10, alpha=1, label="Forbidden"
         ),
     ]
     # Pin ``loc`` explicitly.  Without it matplotlib uses loc="best", which on

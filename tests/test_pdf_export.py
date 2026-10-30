@@ -17,7 +17,7 @@ matplotlib.use("agg")
 
 import matplotlib.pyplot as plt
 import pytest
-from matplotlib.collections import PatchCollection
+from matplotlib.collections import PolyCollection
 
 from pixelmap import backend
 from pixelmap.gui.gui import ChannelmapGUI
@@ -104,7 +104,7 @@ def test_electrodes_drawn_as_collections(gui, probe_type, with_survey):
         kwargs = {"survey_colors": {(0, 0): "#ff0000"}, "survey_range": (0.0, 1.0)}
     ax = _plot(gui, **kwargs)
 
-    collections = [c for c in ax.collections if isinstance(c, PatchCollection)]
+    collections = [c for c in ax.collections if isinstance(c, PolyCollection)]
     per_shank = 2 if with_survey else 1
     assert len(collections) == n_shanks * per_shank
     # Only shank outlines / anatomy bands remain as standalone patches.
@@ -118,7 +118,7 @@ def test_selected_electrodes_coloured(gui):
     """Selected electrodes keep the opaque red facecolour inside the collection."""
     _select_preset(gui, "2.0-1shank")
     ax = _plot(gui)
-    (electrodes,) = [c for c in ax.collections if isinstance(c, PatchCollection)]
+    (electrodes,) = [c for c in ax.collections if isinstance(c, PolyCollection)]
 
     def rgba(c):
         return tuple(round(float(v), 6) for v in c)
@@ -133,5 +133,5 @@ def test_selected_electrodes_coloured(gui):
 
 def test_add_rects_empty_is_noop():
     _fig, ax = plt.subplots()
-    backend._add_rects(ax, [], [])
+    backend._add_rects(ax, [], [], 1.0, 1.0, [])
     assert len(ax.collections) == 0

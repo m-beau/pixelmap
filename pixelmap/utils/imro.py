@@ -5,7 +5,6 @@
 
 import numpy as np
 import pandas as pd
-import panel as pn
 
 from pixelmap.backend import format_imro_string, get_electrodes
 from pixelmap.constants import (
@@ -192,23 +191,26 @@ def parse_imro_list(imro_list):
             hp_filter)
 
 
+def _fail(message):
+    """Toast ``message`` in the GUI session, if any, then raise it."""
+    # Imported here so `import pixelmap` doesn't pull in Panel and Bokeh.
+    from pixelmap.error_reporting import notify
+
+    notify("error", message, duration=10_000)
+    raise AssertionError(message)
+
+
 def ref_id_to_string(reference_id, imro_fmt):
     ref_map = {v: k for k, v in REF_ELECTRODES[imro_fmt].items() if k != "Join Tips"}
     if reference_id not in ref_map:
-        error_message = f"Unexpected reference id {reference_id} for IMRO format {imro_fmt}!"
-        pn.state.notifications.error(error_message,
-                                    duration=10_000)
-        raise AssertionError(error_message)
+        _fail(f"Unexpected reference id {reference_id} for IMRO format {imro_fmt}!")
     return ref_map[reference_id]
 
 
 def check_entry_elements(n_expected_elements, entry, probe_type):
     n_entry_elements = len(entry)
     if n_entry_elements != n_expected_elements:
-        error_message = f"Corrupt .imro file - IMRO table entries for {probe_type} probes should have {n_expected_elements} elements, not {n_entry_elements}."
-        pn.state.notifications.error(error_message,
-                                duration=10_000)
-        raise AssertionError(error_message)
+        _fail(f"Corrupt .imro file - IMRO table entries for {probe_type} probes should have {n_expected_elements} elements, not {n_entry_elements}.")
 
 
 def generate_imro_channelmap(

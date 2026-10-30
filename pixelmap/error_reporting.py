@@ -150,7 +150,7 @@ def load_webhook_config(environ: Mapping[str, str] | None = None) -> WebhookConf
 
 def _format_traceback(exc: BaseException) -> str:
     try:
-        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        return "".join(traceback.format_exception(exc))
     except Exception:  # noqa: BLE001 - formatting must never fail the report
         return f"<traceback unavailable for {type(exc).__name__}>"
 
@@ -214,23 +214,26 @@ def post_webhook(payload: dict[str, Any], config: WebhookConfig) -> bool:
 
 
 def _dedupe_key(exc: BaseException) -> tuple:
-    location = None
-    tb = exc.__traceback__
-    while tb is not None and tb.tb_next is not None:
-        tb = tb.tb_next
-    if tb is not None:
-        location = (tb.tb_frame.f_code.co_filename, tb.tb_lineno)
+    frames = traceback.extract_tb(exc.__traceback__)
+    location = (frames[-1].filename, frames[-1].lineno) if frames else None
     return (type(exc).__qualname__, _safe_str(exc)[:200], location)
 
 
-def _toast(message: str) -> None:
-    """Show an error toast in the current session, if it has a notification area."""
+def notify(level: str, message: str, **kwargs) -> None:
+    """Emit a Panel notification, or do nothing if the session has no area.
+
+    `pn.state.notifications` is None outside a served session (tests, scripts).
+    Reaching through it unguarded raises inside a Bokeh callback, and Bokeh
+    discards every pending document write when a locked callback raises -- so
+    one missing notification silently loses all the plot updates the callback
+    had already made. Swallowing the notification is always the lesser evil.
+    """
     try:
         notifications = pn.state.notifications
         if notifications is not None:
-            notifications.error(message, duration=10_000)
+            getattr(notifications, level)(message, **kwargs)
     except Exception:
-        logger.debug("Could not show error toast", exc_info=True)
+        logger.debug("Could not show %s notification", level, exc_info=True)
 
 
 class ErrorReporter:
@@ -286,7 +289,7 @@ class ErrorReporter:
             message = _truncate(message, MAX_TOAST_CHARS)
             if config.enabled:
                 message += " (the error has been reported)"
-            _toast(message)
+            notify("error", message, duration=10_000)
 
         if config.enabled and self._should_send(exc, config):
             self._dispatch(build_payload(exc, context, _current_session_id()), config)
