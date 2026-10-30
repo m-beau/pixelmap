@@ -90,6 +90,7 @@ def layered_atlas(monkeypatch):
     atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _FakeAtlas)
     # Pretend it's cached so the GUI treats it as a local atlas throughout.
@@ -98,6 +99,7 @@ def layered_atlas(monkeypatch):
     atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
 
 
@@ -815,6 +817,14 @@ class TestAtlasSwitchNeverDownloadsOnTheEventLoop:
         assert len(gui.region_band_source.data["acronym"]) > 0
 
 
+def _assert_off_loop(threads, what: str):
+    """``what`` ran, and never on the main (event loop) thread."""
+    assert threads, f"{what} never ran"
+    assert all(t is not threading.main_thread() for t in threads), (
+        f"{what} ran on the event loop thread"
+    )
+
+
 class TestOverlayComputeRunsOffTheEventLoop:
     """Regression tests: even a *cached* atlas froze the server on every edit.
 
@@ -841,14 +851,6 @@ class TestOverlayComputeRunsOffTheEventLoop:
             monkeypatch.setattr(gui_module, label, _tracing(label, getattr(gui_module, label)))
         return seen
 
-    @staticmethod
-    def _assert_off_loop(seen, *labels):
-        for label in labels:
-            assert seen.get(label), f"{label} never ran"
-            assert all(t is not threading.main_thread() for t in seen[label]), (
-                f"{label} ran on the event loop thread"
-            )
-
     def test_a_live_pose_edit_computes_off_the_event_loop(self, posed_gui, threads):
         posed_gui.compute_anatomy_overlay()
         before = list(posed_gui.region_band_source.data["y"])
@@ -856,8 +858,8 @@ class TestOverlayComputeRunsOffTheEventLoop:
 
         posed_gui.tip_dv_input.value = 2200.0
 
-        self._assert_off_loop(threads, "compute_region_bands", "render_locator",
-                              "tip_depth_below_surface_um")
+        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+            _assert_off_loop(threads.get(label), label)
         assert list(posed_gui.region_band_source.data["y"]) != before
         # 2200 µm tip, surface at ≈ 987.5 µm → ≈ 1212 µm below it.
         assert "1,2" in posed_gui.tip_depth_readout.object
@@ -867,7 +869,8 @@ class TestOverlayComputeRunsOffTheEventLoop:
 
         asyncio.run(session.with_document_locked(gui._on_compute_anatomy_click, None))
 
-        self._assert_off_loop(threads, "compute_region_bands", "render_locator")
+        for label in ("compute_region_bands", "render_locator"):
+            _assert_off_loop(threads.get(label), label)
         assert len(gui.region_band_source.data["acronym"]) > 0
         assert gui.compute_anatomy_button.disabled is False
 
@@ -937,10 +940,8 @@ class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
             seen.append(threading.current_thread())
             return self.AC_ORIGIN
 
-        atlas_module.derive_origin_from_ac.cache_clear()
         monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", _derive)
-        yield posed_gui, seen
-        atlas_module.derive_origin_from_ac.cache_clear()
+        return posed_gui, seen
 
     def _assert_origin_filled(self, gui):
         assert (gui.bregma_ap_input.value, gui.bregma_ml_input.value,
@@ -953,10 +954,7 @@ class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
 
         gui.atlas_name_input.value = self.AC_ATLAS
 
-        assert seen, "the AC origin was never located"
-        assert all(t is not threading.main_thread() for t in seen), (
-            "the whole-volume AC scan ran on the event loop thread"
-        )
+        _assert_off_loop(seen, "the whole-volume AC scan")
         self._assert_origin_filled(gui)
 
     def test_with_an_overlay_the_recompute_derives_it_off_the_loop(self, ac_threads):
@@ -965,7 +963,7 @@ class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
 
         gui.atlas_name_input.value = self.AC_ATLAS
 
-        assert seen and all(t is not threading.main_thread() for t in seen)
+        _assert_off_loop(seen, "the whole-volume AC scan")
         self._assert_origin_filled(gui)
         assert len(gui.region_band_source.data["acronym"]) > 0
 

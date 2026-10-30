@@ -581,6 +581,10 @@ def landmark_policy(name: str) -> str | None:
 _ac_origin_memo: dict[str, tuple[float, float, float] | None] = {}
 _AC_ORIGIN_MEMO_SIZE = 8
 _MISSING = object()
+#: One lock per atlas name, so concurrent callers (several sessions, or a quick
+#: A→B→A switch) wait for the scan already running instead of starting another.
+_ac_origin_locks: dict[str, threading.Lock] = {}
+_ac_origin_locks_guard = threading.Lock()
 
 
 def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
@@ -593,15 +597,22 @@ def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     Slow the first time: it scans every voxel of the annotation (0.8 s for a
     25 µm atlas, ~8 s at 10 µm), so the GUI only ever calls it from a worker
     thread and uses :func:`peek_origin_from_ac` on the event loop.  Memoised
-    per atlas; exceptions are not cached, so a failed lookup is retried.
+    per atlas and single-flight per name; exceptions are not cached, so a
+    failed lookup is retried.
     """
     cached = _ac_origin_memo.get(name, _MISSING)
     if cached is not _MISSING:
         return cached
-    origin = _derive_origin_from_ac(name)
-    _ac_origin_memo[name] = origin
-    while len(_ac_origin_memo) > _AC_ORIGIN_MEMO_SIZE:
-        _ac_origin_memo.pop(next(iter(_ac_origin_memo)))
+    with _ac_origin_locks_guard:
+        lock = _ac_origin_locks.setdefault(name, threading.Lock())
+    with lock:
+        cached = _ac_origin_memo.get(name, _MISSING)  # a concurrent caller's scan
+        if cached is not _MISSING:
+            return cached
+        origin = _derive_origin_from_ac(name)
+        _ac_origin_memo[name] = origin
+        while len(_ac_origin_memo) > _AC_ORIGIN_MEMO_SIZE:
+            _ac_origin_memo.pop(next(iter(_ac_origin_memo)))
     return origin
 
 
