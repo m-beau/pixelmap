@@ -1261,11 +1261,24 @@ class ChannelmapGUI(param.Parameterized):
         if anatomy_atlas.is_downloaded(name):
             self.compute_anatomy_overlay()
             return
+        if self._anatomy_download_in_flight:
+            # The running download re-reads the dropdown when it finishes and
+            # fetches whatever is selected by then, so a second one is redundant.
+            return
 
+        self._anatomy_download_in_flight = True
         self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
         self.compute_anatomy_button.disabled = True
         try:
-            await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
+            # The atlas can change mid-download, and the draw below reads the
+            # dropdown, not ``name``: keep fetching until what is selected is
+            # what is local, or the draw would download it on the loop.
+            while True:
+                await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
+                latest = str(self.atlas_name_input.value).strip()
+                if latest == name or anatomy_atlas.is_downloaded(latest):
+                    break
+                name = latest
         except Exception as exc:  # noqa: BLE001 - any download failure is reported to the user
             print(f"Atlas download failed: {exc}")
             self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
@@ -1275,6 +1288,7 @@ class ChannelmapGUI(param.Parameterized):
             )
             return
         finally:
+            self._anatomy_download_in_flight = False
             self.compute_anatomy_button.disabled = False
         self.compute_anatomy_overlay()
 
@@ -1831,9 +1845,18 @@ class ChannelmapGUI(param.Parameterized):
         """Re-run the overlay on input changes, but only once one exists."""
         if getattr(self, "_suppress_anatomy_recompute", False):
             return
-        if getattr(self, "_anatomy_overlay_active", False):
+        if not getattr(self, "_anatomy_overlay_active", False):
+            return
+        if self._atlas_is_downloaded():
             # compute_anatomy_overlay refreshes the depth readout on its way out.
             self.compute_anatomy_overlay()
+        else:
+            # A cold atlas (typically just picked from the dropdown) would be
+            # downloaded inline by compute_anatomy_overlay — on the server that
+            # is the event loop, freezing every session for the whole fetch.
+            # Take the Compute button's route instead: download in a worker
+            # thread, then draw under the document lock.
+            pn.state.execute(functools.partial(self._on_compute_anatomy_click, None))
 
     def _update_anatomy_legend(self, bands: list):
         """Render a deduplicated region legend on the right-side panel."""
@@ -2708,6 +2731,9 @@ class ChannelmapGUI(param.Parameterized):
         # pose / bregma / squish / tilt input changes, so edits are visible
         # immediately instead of only on the next Compute click.
         self._anatomy_overlay_active = False
+        # Set while _on_compute_anatomy_click is fetching an atlas, so live
+        # updates arriving mid-download don't start a second one.
+        self._anatomy_download_in_flight = False
         # atlas_name + bregma toggle do their own batched recompute (via
         # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
         for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,

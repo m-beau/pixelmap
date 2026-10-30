@@ -683,6 +683,137 @@ class TestComputeButtonRunsUnderTheDocumentLock:
         assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
 
 
+class TestAtlasSwitchNeverDownloadsOnTheEventLoop:
+    """Regression tests for a server-wide freeze on atlas switch.
+
+    With an overlay on screen, picking a not-yet-cached atlas from the dropdown
+    live-recomputed the overlay *synchronously* — so the multi-second atlas
+    download ran on the Bokeh event loop, freezing every session and the
+    healthcheck (the watchdog logged 5–10 s stalls in
+    ``_on_atlas_change → _recompute_anatomy_if_active → compute_anatomy_overlay``).
+    The Compute button already pushed downloads to a worker thread; the live
+    update path has to do the same.
+    """
+
+    COLD = "cold_gui_atlas"
+    COLDER = "colder_gui_atlas"
+
+    @pytest.fixture
+    def traced(self, posed_gui, monkeypatch):
+        """Record every atlas construction and download, with its thread.
+
+        Atlases in ``cold`` count as not downloaded until ``ensure_downloaded``
+        has fetched them; constructing one before then is exactly the inline
+        network fetch that froze the server.
+        """
+        events: list[tuple[str, str, threading.Thread]] = []
+        cold = {self.COLD, self.COLDER}
+        fake_atlas = atlas_module.BrainGlobeAtlas
+
+        class _TracingAtlas(fake_atlas):
+            def __init__(self, name, **kwargs):
+                events.append(("construct", name, threading.current_thread()))
+                super().__init__(name, **kwargs)
+
+        def _fake_download(name):
+            events.append(("download", name, threading.current_thread()))
+            cold.discard(name)
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _TracingAtlas)
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=FAKE_ATLAS: name not in cold)
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _fake_download)
+        return posed_gui, events, cold
+
+    def _assert_downloaded_off_loop_before_use(self, events, name):
+        mine = [(kind, thread) for kind, n, thread in events if n == name]
+        assert mine, f"{name} was never downloaded or opened"
+        kind, thread = mine[0]
+        assert kind == "download", (
+            f"{name} was opened before being downloaded — on a cold cache that "
+            "is an inline network fetch"
+        )
+        assert thread is not threading.main_thread(), (
+            f"{name} was downloaded on the event loop thread"
+        )
+
+    def test_switching_to_a_cold_atlas_downloads_off_the_event_loop(self, traced):
+        gui, events, _cold = traced
+        gui.compute_anatomy_overlay()
+        assert gui._anatomy_overlay_active is True
+
+        gui.atlas_name_input.value = self.COLD
+
+        self._assert_downloaded_off_loop_before_use(events, self.COLD)
+        # And the overlay is redrawn for the new atlas once it has arrived.
+        assert gui._anatomy_overlay_active is True
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+        assert gui.compute_anatomy_button.name == "Compute anatomical overlay 🧠"
+
+    def test_switching_again_mid_download_fetches_the_latest_off_the_loop(self, traced, monkeypatch):
+        """The atlas can change while the first download is still running.
+
+        The draw that follows a download reads the *current* dropdown value, so
+        it must not assume that is the atlas it just fetched.
+        """
+        gui, events, cold = traced
+        gui.compute_anatomy_overlay()
+
+        def _download_then_switch(name):
+            events.append(("download", name, threading.current_thread()))
+            cold.discard(name)
+            if name == self.COLD:
+                gui.atlas_name_input.value = self.COLDER  # user picks again
+
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _download_then_switch)
+
+        gui.atlas_name_input.value = self.COLD
+
+        downloads = [n for kind, n, _t in events if kind == "download"]
+        assert downloads == [self.COLD, self.COLDER], (
+            "each atlas should be fetched exactly once, the second by the "
+            "in-flight download rather than a parallel or inline one"
+        )
+        self._assert_downloaded_off_loop_before_use(events, self.COLDER)
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+
+    def test_a_failed_download_on_switch_leaves_the_button_usable(self, traced, monkeypatch):
+        gui, events, _cold = traced
+        gui.compute_anatomy_overlay()
+
+        def _boom(name):
+            raise ConnectionError("atlas host unreachable")
+
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _boom)
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[1] == self.COLD and e[2] is threading.main_thread()]
+        assert gui.compute_anatomy_button.disabled is False
+        assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
+
+    def test_switching_to_a_cold_atlas_without_an_overlay_downloads_nothing(self, traced):
+        gui, events, _cold = traced
+        assert gui._anatomy_overlay_active is False
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[1] == self.COLD]
+        assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
+
+    def test_switching_to_a_warm_atlas_still_recomputes_immediately(self, traced):
+        gui, events, cold = traced
+        gui.compute_anatomy_overlay()
+        cold.discard(self.COLD)  # already on disk
+        gui.region_band_source.data = {k: [] for k in gui.region_band_source.data}
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[0] == "download"]
+        assert len(gui.region_band_source.data["acronym"]) > 0
+
+
 def test_no_unlocked_async_gui_callbacks():
     """Every async GUI callback needs the same treatment.
 
