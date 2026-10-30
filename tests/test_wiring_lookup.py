@@ -51,7 +51,7 @@ def _reference_forbidden(selected_electrodes, wiring_df):
             for se in table_ids[table_row]
             if (~np.any(np.isnan(se))) & ~((shank_id == se[0]) & (electrode_id == se[1]))
         ]
-    return np.array(forbidden_electrodes).astype(int)
+    return np.array(forbidden_electrodes).astype(int).reshape(-1, 2)
 
 
 def _reference_coordinates(electrodes, wiring_df):
@@ -163,8 +163,8 @@ def test_empty_selection(probe):
     empty = np.zeros((0, 2), dtype=int)
     got = backend.find_forbidden_electrodes(empty, wiring_df)
     want = _reference_forbidden(empty, wiring_df)
-    # The original returns a 1-D empty array; callers depend on that shape.
-    assert got.shape == want.shape == (0,)
+    # (0, 2), not 1-D: callers index columns (plot_probe_layout crashed on 1-D).
+    assert got.shape == want.shape == (0, 2)
     assert backend.find_electrode_coordinates(empty, wiring_df) == []
 
 
