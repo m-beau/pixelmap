@@ -3,7 +3,9 @@
 #############
 
 import pickle
+from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -76,36 +78,71 @@ def _verify_hardware_violations(probe_type, selected_electrodes, wiring_df, prob
     )
 
 
+def _wiring_index(wiring_df):
+    """Index the wiring table once: ``(shank, electrode) -> (row, col)``.
+
+    Returns ``(table, shanks, index)``: the electrode-id table (float, NaN for
+    unwired cells, ``col`` 0 = first shank/bank column), each column's shank
+    id, and the index.  Keys are floats; an int lookup matches too, since
+    equal ints and floats hash alike.  On duplicates the first cell in
+    row-major order wins, as with the ``np.nonzero`` scan this replaces.
+
+    The scan it replaces ran once per selected electrode -- O(selected x
+    table), ~0.45 s per QuadBase IMRO on the server's event loop.
+    """
+    table = wiring_df.iloc[:, 1:].to_numpy(dtype=float)
+    shanks = np.array([int(column[5]) for column in wiring_df.columns[1:]], dtype=float)
+    rows, cols = np.nonzero(~np.isnan(table))
+    index = {}
+    for r, c, shank, electrode in zip(
+        rows.tolist(), cols.tolist(), shanks[cols].tolist(), table[rows, cols].tolist()
+    ):
+        index.setdefault((shank, electrode), (r, c))
+    return table, shanks, index
+
+
 def find_forbidden_electrodes(selected_electrodes, wiring_df):
     "Return list of forbidden electrodes [[shank_id, electrode_id], ...] given selected electrodes and wiring diagram."
 
-    df = format_wiring_df(wiring_df)
+    table, shanks, index = _wiring_index(wiring_df)
 
-    table_ids = df.iloc[:, 1:].values
-    table_shape = table_ids.shape
-    flat_ids = table_ids.ravel()
-    flat_shank_ids = np.array([id[0] for id in flat_ids])
-    flat_electrode_ids = np.array([id[1] for id in flat_ids])
-
-    forbidden_electrodes = []
+    rows, sel_shanks, sel_electrodes = [], [], []
     for shank_id, electrode_id in selected_electrodes:
-        table_bool = ((flat_shank_ids == shank_id) & (flat_electrode_ids == electrode_id)).reshape(table_shape)
-        assert np.any(table_bool), f"electrode {electrode_id} on shank {shank_id} not found in wiring map!"
-        table_loc = np.nonzero(table_bool)
-        table_row = table_loc[0][0]
-        # grab non-nan and non-self electrodes on row of wiring table
-        forbidden_electrodes += [
-            se
-            for se in table_ids[table_row]
-            if (~np.any(np.isnan(se))) & ~((shank_id == se[0]) & (electrode_id == se[1]))
-        ]
+        loc = index.get((float(shank_id), float(electrode_id)))
+        assert loc is not None, f"electrode {electrode_id} on shank {shank_id} not found in wiring map!"
+        rows.append(loc[0])
+        sel_shanks.append(float(shank_id))
+        sel_electrodes.append(float(electrode_id))
 
-    return np.array(forbidden_electrodes).astype(int)
+    # Every selected electrode's wiring-table row: the electrodes sharing its
+    # channel.  Keep the wired (non-NaN), non-self cells; boolean indexing is
+    # row-major, so the order matches the old per-electrode loop.
+    row_electrodes = table[rows]                                    # (n_selected, n_columns)
+    row_shanks = np.broadcast_to(shanks, row_electrodes.shape)
+    is_self = (row_shanks == np.array(sel_shanks)[:, None]) & (
+        row_electrodes == np.array(sel_electrodes)[:, None]
+    )
+    keep = ~np.isnan(row_electrodes) & ~is_self
+    if not keep.any():
+        return np.array([]).astype(int)  # 1-D when empty, as callers expect
+    return np.column_stack([row_shanks[keep], row_electrodes[keep]]).astype(int)
 
 def make_wiring_maps(wiring_maps_dir):
-    "Precomputes electrode wiring conflict maps for each probe type."
-    wiring_maps_dir = Path(wiring_maps_dir)
+    """
+    Precomputes electrode wiring conflict maps for each probe type.
+
+    The result is cached per resolved directory, so every caller (and every
+    Panel session) shares one read-only mapping instead of unpickling its own.
+    """
+    wiring_maps_dir = Path(wiring_maps_dir).resolve()
     assert wiring_maps_dir.exists(), f"{wiring_maps_dir} does not exist!"
+    return _load_wiring_maps(str(wiring_maps_dir))
+
+
+@cache
+def _load_wiring_maps(wiring_maps_dir):
+    "Loads (or builds and pickles) the wiring conflict maps. Call cache_clear() after changing a directory's wiring files."
+    wiring_maps_dir = Path(wiring_maps_dir)
     cache_file = wiring_maps_dir / "wiring_maps.pkl"
 
     # If pickled result found and covers all current probe types, preload it
@@ -114,7 +151,7 @@ def make_wiring_maps(wiring_maps_dir):
         with open(cache_file, 'rb') as f:
             wiring_maps = pickle.load(f)
         if set(wiring_maps.keys()) == expected_keys:
-            return wiring_maps
+            return _freeze_wiring_maps(wiring_maps)
         # Cache is stale (probe types changed) — rebuild below
     
     # Generate wiring maps
@@ -138,7 +175,17 @@ def make_wiring_maps(wiring_maps_dir):
     with open(cache_file, 'wb') as f:
         pickle.dump(wiring_maps, f)
     
-    return wiring_maps
+    return _freeze_wiring_maps(wiring_maps)
+
+
+def _freeze_wiring_maps(wiring_maps):
+    "Read-only view of the wiring maps, so the copy shared by every session can't be mutated."
+    return MappingProxyType({
+        probe_type: MappingProxyType({
+            electrode: frozenset(conflicting) for electrode, conflicting in conflicts.items()
+        })
+        for probe_type, conflicts in wiring_maps.items()
+    })
 
 
 def format_wiring_df(wiring_df):
@@ -148,15 +195,17 @@ def format_wiring_df(wiring_df):
     """
     # add shank id to electrode id, in dataframe's cells
     df = wiring_df.copy()
+    new_columns = {}
     for column in df.columns[1:]:
         shank_id = int(column[5])
         electrode_ids = df.loc[:, column].values
         shank_electrode_ids = np.vstack([np.zeros(len(electrode_ids)) + shank_id, electrode_ids]).T
-        shank_electrode_ids = [tuple(se) for se in shank_electrode_ids]
-        df[column] = df[column].astype(object)
-        df[column] = shank_electrode_ids
+        # object-dtype Series so each cell holds a (shank_id, electrode_id) tuple
+        new_columns[column] = pd.Series(
+            [tuple(se) for se in shank_electrode_ids], index=df.index, dtype=object
+        )
 
-    return df
+    return df.assign(**new_columns)
 
 
 def _imro_format_for(probe_subtype, probe_type):
@@ -242,19 +291,13 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
 
 
 def find_electrode_coordinates(electrodes, wiring_df):
-    df = format_wiring_df(wiring_df)
-
-    table_ids = df.iloc[:, 1:].values
-    table_shape = table_ids.shape
-    flat_ids = table_ids.ravel()
-    flat_shank_ids = np.array([id[0] for id in flat_ids])
-    flat_electrode_ids = np.array([id[1] for id in flat_ids])
+    "Return ``[row, column]`` of each electrode in ``wiring_df`` (column 0 is 'channel')."
+    _, _, index = _wiring_index(wiring_df)
 
     coordinates = []
     for shank_id, electrode_id in electrodes:
-        table_bool = ((flat_shank_ids == shank_id) & (flat_electrode_ids == electrode_id)).reshape(table_shape)
-        row, col = np.nonzero(table_bool)
-        coordinates.append([int(row[0]), int(col[0]) + 1])
+        row, col = index[(float(shank_id), float(electrode_id))]
+        coordinates.append([row, col + 1])
 
     return coordinates
 

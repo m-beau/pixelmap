@@ -10,6 +10,8 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -131,7 +133,7 @@ def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
 class Electrodes:
     """Manages electrode selection state."""
 
-    wiring_map: dict[Electrode, set[Electrode]]
+    wiring_map: Mapping[Electrode, AbstractSet[Electrode]]
     n_maximum_electrodes: int # TODO: implement per-shank maximum for NXTs
     available: set[Electrode] = field(default_factory=set)
     selected: set[Electrode] = field(default_factory=set)
