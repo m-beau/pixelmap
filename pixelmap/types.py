@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+
 # Note: frozen attributes (@dataclass(frozen=True)) allows hashability
 # (thus usability as dictionnary keys or set elements)
 @dataclass(frozen=True) 

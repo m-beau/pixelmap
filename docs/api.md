@@ -43,13 +43,13 @@ PixelMap can be used programmatically from Python scripts or Jupyter notebooks.
 
 ## Constants
 
-The following constants are defined in `pixelmap.constants`:
+The following constants are defined in `pixelmap.constants` and re-exported from the top-level `pixelmap` package:
 
 `PROBE_TYPE_MAP`
-: Mapping from probe type names (`"1.0"`, `"2.0-1shank"`, `"2.0-4shanks"`) to lists of SpikeGLX probe types.
+: Mapping from probe type names (`"1.0"`, `"2.0-1shank"`, `"2.0-4shanks"`) to lists of probe part numbers.
 
-`PROBE_N`
-: Number of physical electrodes (`N`), ADC channels (`n`), and channels per shank (`n_per_shank`) for each probe type.
+`PROBE_FEATURES`
+: Per-part-number probe features (e.g. electrode, shank and readout-channel counts, IMRO format).
 
 `SUPPORTED_1shank_PRESETS`
 : Available preset names for single-shank probes. See the [preset reference](presets.md).

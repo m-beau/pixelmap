@@ -2,30 +2,27 @@
 ## Imports ##
 #############
 
-from pathlib import Path
 import pickle
+from pathlib import Path
 
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import matplotlib.patches as patches
 import matplotlib.pyplot as plt
-from matplotlib.collections import PatchCollection
 import numpy as np
 import pandas as pd
+from matplotlib import cm, patches
+from matplotlib.collections import PatchCollection
 
 from .constants import (
-    PROBE_FEATURES,
-    PROBE_TYPE_MAP,
-    LEGACY_PROBE_TYPE_MAP,
     LEGACY_INT_TO_IMRO_FORMAT,
-    WIRING_FILE_MAP,
+    LEGACY_PROBE_TYPE_MAP,
+    PROBE_FEATURES,
     REF_BANKS,
     REF_ELECTRODES,
+    WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
     SUPPORTED_QuadBase_PRESETS,
 )
-
 from .types import Electrode
 
 ############################
@@ -564,7 +561,7 @@ def get_preset_candidates(preset, probe_type, wiring_df):
 
 def find_selected_electrodes(imro_list):
     "imro_list: list of tuples starting with (probe_id, n_channels)"
-    probe_id, n_channels = imro_list[0]
+    probe_id, _n_channels = imro_list[0]
     # probe_id is a part-number string (new) or legacy integer
     if isinstance(probe_id, str) and probe_id in PROBE_FEATURES:
         probe_type = PROBE_FEATURES[probe_id]["pixelmap_probe_type"]

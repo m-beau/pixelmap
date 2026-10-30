@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import weakref
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -296,7 +297,7 @@ def _v3_atlas(root, *, chunks: bool):
 
     class _A:
         root_dir = root
-        metadata = {
+        metadata: ClassVar[dict] = {
             # brainglobe stores locations with a leading "/" that it strips.
             "annotation_set": {"location": "/annotation-sets/some-annotation/1_0"}
         }

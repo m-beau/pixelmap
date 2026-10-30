@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Interactive GUI for Neuropixels Channelmap Generation
 Using Bokeh for better interactivity with hover, click, and rectangular selection
@@ -39,29 +38,27 @@ from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
 from bokeh.util.logconfig import basicConfig
 
-from pixelmap import __version__, backend
+from pixelmap import __version__, backend, error_reporting
 from pixelmap.analytics import AnalyticsSessionTracker
-from pixelmap import error_reporting
-from pixelmap.error_reporting import guarded
+from pixelmap.anatomy import atlas as anatomy_atlas
+from pixelmap.anatomy.regions import tip_depth_below_surface_um
+from pixelmap.anatomy.schematic import render_locator
+from pixelmap.anatomy.transform import bregma_to_atlas_um
+from pixelmap.anatomy.visualization import compute_region_bands
 from pixelmap.constants import (
+    LEGACY_INT_TO_IMRO_FORMAT,
     PROBE_FEATURES,
     PROBE_TYPE_MAP,
-    LEGACY_INT_TO_IMRO_FORMAT,
     REF_ELECTRODES,
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
     SUPPORTED_QuadBase_PRESETS,
 )
+from pixelmap.error_reporting import guarded
 from pixelmap.types import Electrode
-from pixelmap.utils import imro, survey
+from pixelmap.utils import imro, survey, url_share
 from pixelmap.utils.survey import default_survey_range
-from pixelmap.utils import url_share
-from pixelmap.anatomy import atlas as anatomy_atlas
-from pixelmap.anatomy.regions import tip_depth_below_surface_um
-from pixelmap.anatomy.schematic import render_locator
-from pixelmap.anatomy.transform import bregma_to_atlas_um
-from pixelmap.anatomy.visualization import compute_region_bands
 
 ## Configure logging
 basicConfig(level=logging.ERROR)  # no warnings
@@ -503,7 +500,8 @@ class ChannelmapGUI(param.Parameterized):
         else:
             frac = (val - low) / (high - low)
         frac = max(0.0, min(1.0, frac))
-        idx = int(round(frac * (len(Viridis256) - 1)))
+        # frac can be a NumPy scalar, whose round() is not an int on NumPy < 2.
+        idx = int(round(frac * (len(Viridis256) - 1)))  # noqa: RUF046
         return Viridis256[idx]
 
     def _get_bar_color_alpha(self, electrode: Electrode) -> tuple[str, float]:
@@ -892,7 +890,7 @@ class ChannelmapGUI(param.Parameterized):
             self.update_electrode_counter()
             self.refresh_undo_buttons()
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - bad user input must not crash the session
             print(f"Error parsing electrode input: {e}")
 
 
@@ -1178,7 +1176,7 @@ class ChannelmapGUI(param.Parameterized):
         default = "allen_mouse_25um"
         try:
             atlases = anatomy_atlas.list_atlases()
-        except Exception:
+        except Exception:  # noqa: BLE001 - registry unavailable: offer the default atlas
             return [default], default
         if not atlases:
             return [default], default
@@ -1257,7 +1255,7 @@ class ChannelmapGUI(param.Parameterized):
         self.compute_anatomy_button.disabled = True
         try:
             await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any download failure is reported to the user
             print(f"Atlas download failed: {exc}")
             self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
             _notify(
@@ -1299,7 +1297,7 @@ class ChannelmapGUI(param.Parameterized):
                 atlas_name=atlas_name,
                 step_um=25.0,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any lookup failure is reported to the user
             print(f"Anatomy lookup failed: {exc}")
             self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
             self.compute_anatomy_button.disabled = False
@@ -1404,7 +1402,7 @@ class ChannelmapGUI(param.Parameterized):
             )
             self._locator_fig = _fig
             self.anatomy_locator.object = self._fig_to_locator_html(_fig)
-        except Exception as exc:  # a failed locator shouldn't sink the overlay
+        except Exception as exc:  # noqa: BLE001 - a failed locator shouldn't sink the overlay
             print(f"Locator render failed: {exc}")
 
         # Hand back the chunk buffers this render churned through.  They are
@@ -1504,7 +1502,7 @@ class ChannelmapGUI(param.Parameterized):
                     anatomy_atlas.orientation_code(name),
                     anatomy_atlas.origin_corner(name),
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 - unreadable atlas metadata: no native orientation
             native = None
         if native:
             code, origin = native
@@ -1618,7 +1616,7 @@ class ChannelmapGUI(param.Parameterized):
         """True if the selected atlas is on disk, so reading it won't download."""
         try:
             return anatomy_atlas.is_downloaded(str(self.atlas_name_input.value).strip())
-        except Exception:
+        except Exception:  # noqa: BLE001 - unreadable atlas means not downloaded
             return False
 
     def _tip_depth_below_surface(self) -> float | None:
@@ -1637,7 +1635,7 @@ class ChannelmapGUI(param.Parameterized):
                 yaw_deg=float(self.yaw_input.value),
                 atlas_name=str(self.atlas_name_input.value).strip(),
             )
-        except Exception as exc:  # a readout must never sink the GUI
+        except Exception as exc:  # noqa: BLE001 - a readout must never sink the GUI
             print(f"Tip depth lookup failed: {exc}")
             return None
 
@@ -1705,7 +1703,7 @@ class ChannelmapGUI(param.Parameterized):
             if not anatomy_atlas.is_downloaded(name):
                 return None
             return anatomy_atlas.volume_center_um(name)
-        except Exception:
+        except Exception:  # noqa: BLE001 - no atlas centre: keep the current tip
             return None
 
     def _update_tip_to_atlas_center(self, *events):
@@ -1770,7 +1768,7 @@ class ChannelmapGUI(param.Parameterized):
                 return spec
             try:
                 ac = anatomy_atlas.derive_origin_from_ac(name)
-            except Exception:
+            except Exception:  # noqa: BLE001 - AC not derivable: handled as ac is None below
                 ac = None
             if ac is None:
                 # AC is the convention but this atlas doesn't delineate it
@@ -1919,7 +1917,7 @@ class ChannelmapGUI(param.Parameterized):
                     full_url = origin + pathname + query
                 # Reflect the new state in the address bar so it's also copyable from there.
                 location.search = query
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - address-bar update is cosmetic; still copy
             pass
         # Trigger the JS clipboard copy via the hidden TextInput watcher.
         # Counter prefix ensures value always changes so jscallback fires on re-click.
@@ -2212,7 +2210,7 @@ class ChannelmapGUI(param.Parameterized):
         tap_tool = self.plot.select_one(TapTool)
         if tap_tool:
             tap_tool.callback = CustomJS(
-                args=dict(source=self.electrode_source),
+                args={"source": self.electrode_source},
                 code="""
                 console.log('Tap tool activated');
                 const indices = source.selected.indices;
@@ -2286,7 +2284,7 @@ class ChannelmapGUI(param.Parameterized):
         js_code = js_code.replace("deselect_box_string", deselect_box_string)
         js_code = js_code.replace("select_box_string", select_box_string)
 
-        JS_selection_monitor = CustomJS(args=dict(tool_state=self.tool_state_source), code=js_code)
+        JS_selection_monitor = CustomJS(args={"tool_state": self.tool_state_source}, code=js_code)
 
         # Hack - monitor random GUI events to trigger javascript fetch of selection box type
         self.plot.js_on_event("selectiongeometry", JS_selection_monitor)  # Selection events
@@ -2791,38 +2789,38 @@ class ChannelmapGUI(param.Parameterized):
         (
             "selector.png",
             "Select",
-            "Selects every available (grey) electrode inside the box. "
-            "Electrodes already blocked (black) are skipped.",
+            ("Selects every available (grey) electrode inside the box. "
+             "Electrodes already blocked (black) are skipped."),
         ),
         (
             "deselector.png",
             "Deselect",
-            "Deselects every selected (red) electrode inside the box, freeing "
-            "the electrodes they were blocking.",
+            ("Deselects every selected (red) electrode inside the box, freeing "
+             "the electrodes they were blocking."),
         ),
         (
             "zigzag_selector.png",
             "Zigzag-select",
-            "Selects only the electrodes of a fixed checkerboard pattern inside "
-            "the box (every other site on 1.0; the 0, 3, 4, 7… pattern on 2.0), "
-            "for sparse coverage over a longer stretch of shank.",
+            ("Selects only the electrodes of a fixed checkerboard pattern inside "
+             "the box (every other site on 1.0; the 0, 3, 4, 7… pattern on 2.0), "
+             "for sparse coverage over a longer stretch of shank."),
         ),
         (
             "interleaved_selector.png",
             "Interleaved-select",
-            "Selects only every other <i>pair</i> of rows inside the box "
-            "(sites 0, 1, 4, 5, 8, 9…), for two-column coverage at half density.",
+            ("Selects only every other <i>pair</i> of rows inside the box "
+             "(sites 0, 1, 4, 5, 8, 9…), for two-column coverage at half density."),
         ),
         (
             "dependent_deselector.png",
             "Deselect dependents",
-            "Frees up blocked electrodes. Drag over <b>black (unavailable)</b> "
-            "electrodes you wish you could select: PixelMap looks up which "
-            "<font color='#c00000'><b>red</b></font> electrodes are blocking "
-            "them through shared readout lines / ADCs, and deselects "
-            "<i>those</i>: the red ones, wherever they sit on the probe. "
-            "The black electrodes inside your box turn grey and become "
-            "selectable.",
+            ("Frees up blocked electrodes. Drag over <b>black (unavailable)</b> "
+             "electrodes you wish you could select: PixelMap looks up which "
+             "<font color='#c00000'><b>red</b></font> electrodes are blocking "
+             "them through shared readout lines / ADCs, and deselects "
+             "<i>those</i>: the red ones, wherever they sit on the probe. "
+             "The black electrodes inside your box turn grey and become "
+             "selectable."),
         ),
     )
 
@@ -3168,7 +3166,7 @@ def _extract_cfg_from_session_args() -> str | None:
     """Pull the ``cfg`` query param out of pn.state.session_args, if any."""
     try:
         args = pn.state.session_args or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - no session args outside a server session
         return None
     raw = args.get(url_share.QUERY_PARAM)
     if not raw:
@@ -3229,7 +3227,7 @@ def create_app():
 
     try:
         gui = ChannelmapGUI()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
         # Show the visitor something instead of a blank page.
         error_reporting.report_error(exc, context="session startup", notify_user=False)
         return pn.pane.Alert(
@@ -3244,7 +3242,7 @@ def create_app():
             applied = gui.apply_url_state(cfg)
             if not applied:
                 print("Ignored invalid or unsupported ?cfg= share link.")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - a bad share link must not break app start
             print(f"Failed to apply shared layout from URL: {e}")
 
     analytics_tracker = AnalyticsSessionTracker()

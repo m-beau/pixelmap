@@ -395,5 +395,5 @@ for _pn, _feat in PROBE_FEATURES.items():
     _pt = _feat["pixelmap_probe_type"]
     if _pt in PROBE_TYPE_MAP:
         PROBE_TYPE_MAP[_pt].append(_pn)
-for _pt in PROBE_TYPE_MAP:
-    PROBE_TYPE_MAP[_pt].sort()
+for _part_numbers in PROBE_TYPE_MAP.values():
+    _part_numbers.sort()

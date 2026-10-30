@@ -5,17 +5,17 @@
 
 import numpy as np
 import pandas as pd
-
 import panel as pn
 
 from pixelmap.backend import format_imro_string, get_electrodes
 from pixelmap.constants import (
+    LEGACY_INT_TO_IMRO_FORMAT,
+    LEGACY_PROBE_TYPE_MAP,
     PROBE_FEATURES,
     PROBE_TYPE_MAP,
-    LEGACY_PROBE_TYPE_MAP,
-    LEGACY_INT_TO_IMRO_FORMAT,
     REF_ELECTRODES,
 )
+
 
 def save_to_imro_file(imro_list, filename="channelmap.imro"):
     """

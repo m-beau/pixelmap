@@ -46,8 +46,8 @@ def main() -> int:
             79,
         ),
         "",
-        f"Snapshot taken {datetime.date.today().isoformat()} "
-        f"from brainglobe-atlasapi {bg.__version__}.",
+        (f"Snapshot taken {datetime.date.today().isoformat()} "
+         f"from brainglobe-atlasapi {bg.__version__}."),
         '"""',
         "",
         "REGISTRY_SNAPSHOT: tuple[str, ...] = (",

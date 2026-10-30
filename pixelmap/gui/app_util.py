@@ -8,8 +8,8 @@ from pathlib import Path
 import panel as pn
 import psutil
 
-from pixelmap.gui import watchdog
 from pixelmap.error_reporting import install_global_handlers
+from pixelmap.gui import watchdog
 from pixelmap.gui.gui import create_app
 
 pn.extension(notifications=True)

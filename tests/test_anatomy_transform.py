@@ -18,7 +18,6 @@ import pytest
 
 from pixelmap.anatomy.transform import probe_to_atlas
 
-
 TOL = 1e-6
 
 

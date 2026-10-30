@@ -8,34 +8,48 @@ on:
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.12']
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+    # ruff is a standalone binary, so the runner's own Python is enough here.
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3  # no floating major tags since v8
       with:
-        python-version: ${{ matrix.python-version }}
+        cache-suffix: lint
 
+    # uv.lock pins the ruff version, so CI and local runs check the same rules.
+    - name: Lint with ruff
+      run: uv run --locked --only-group lint ruff check --output-format=github .
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Keep in step with UV_PYTHON in the Dockerfile: test what ships.
+      UV_PYTHON: '3.14'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3  # no floating major tags since v8
+      with:
+        cache-suffix: test
+
+    # --locked installs exactly uv.lock and fails if the lockfile is out of
+    # date with pyproject.toml.
     - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e .
-        pip install pytest pytest-cov
+      run: uv sync --locked
 
     - name: Run tests with coverage
-      run: |
-        pytest tests/ -v --cov=pixelmap --cov-report=xml --cov-report=term
+      run: uv run --locked pytest tests/ -v --cov=pixelmap --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
-      if: matrix.python-version == '3.12'
       with:
         file: ./coverage.xml
         fail_ci_if_error: false

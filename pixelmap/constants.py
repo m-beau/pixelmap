@@ -3,12 +3,28 @@
 ######################
 
 from pixelmap.utils.probe_features import (
+    IMRO_FORMAT_TO_PROBE_TYPE,
+    LEGACY_INT_TO_IMRO_FORMAT,
+    LEGACY_PROBE_TYPE_MAP,
     PROBE_FEATURES,
     PROBE_TYPE_MAP,
-    LEGACY_PROBE_TYPE_MAP,
-    LEGACY_INT_TO_IMRO_FORMAT,
-    IMRO_FORMAT_TO_PROBE_TYPE,
 )
+
+# The probe-feature tables are re-exported: the rest of the package, and the
+# docs, import them from here.
+__all__ = [
+    "IMRO_FORMAT_TO_PROBE_TYPE",
+    "LEGACY_INT_TO_IMRO_FORMAT",
+    "LEGACY_PROBE_TYPE_MAP",
+    "PROBE_FEATURES",
+    "PROBE_TYPE_MAP",
+    "REF_BANKS",
+    "REF_ELECTRODES",
+    "WIRING_FILE_MAP",
+    "SUPPORTED_1shank_PRESETS",
+    "SUPPORTED_4shanks_PRESETS",
+    "SUPPORTED_QuadBase_PRESETS",
+]
 
 # ---------------------------------------------------------------------------
 # Wiring / position file map  (unchanged – keyed by internal probe type)

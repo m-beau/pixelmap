@@ -81,18 +81,30 @@ dev = [
     "furo>=2025.12.19",
     "myst-parser>=4.0.1",
     "pytest>=8.4.1",
+    "pytest-cov>=6.0.0",
     "sphinx-autobuild>=2024.10.3",
     "sphinx-design>=0.6.1",
+    {include-group = "lint"},
+]
+# Floor only: uv.lock pins the exact ruff CI runs. ruff's default rule set
+# grows between releases, so bump it deliberately
+# (`uv lock --upgrade-package ruff`) and fix what it flags in the same PR.
+lint = [
+    "ruff>=0.17.3",
 ]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-exclude = [".venv", "output", "docs/_build", "pixelmap.egg-info"]
+# Notebooks are left as authored; lint only the package, tests and scripts.
+exclude = [".venv", "output", "docs/_build", "pixelmap.egg-info", "*.ipynb"]
+# An older ruff checks fewer default rules and would pass what CI rejects.
+required-version = ">=0.17.3"
 
 [tool.ruff.lint]
+# ruff's own defaults, plus the classic pyflakes/pycodestyle set, so those
+# stay on even if a future default set drops them.
+extend-select = ["E4", "E7", "E9", "F"]
 ignore = [
     "E722",  # bare except
-    "F403",  # 'from module import *' used
-    "F405",  # name may be undefined, or defined from star imports
 ]

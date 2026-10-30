@@ -8,24 +8,25 @@ These tests demonstrate that the software's core functionality works correctly:
 - File I/O round-trip consistency
 """
 
-import pytest
-import numpy as np
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from pixelmap.backend import (
-    get_electrodes,
-    find_forbidden_electrodes,
     _verify_hardware_violations,
-)
-from pixelmap.utils.imro import (
-    save_to_imro_file,
-    read_imro_file,
-    generate_imro_channelmap,
+    find_forbidden_electrodes,
+    get_electrodes,
 )
 from pixelmap.constants import (
     WIRING_FILE_MAP,
     SUPPORTED_1shank_PRESETS,
     SUPPORTED_4shanks_PRESETS,
+)
+from pixelmap.utils.imro import (
+    generate_imro_channelmap,
+    read_imro_file,
+    save_to_imro_file,
 )
 
 

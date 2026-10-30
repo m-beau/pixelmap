@@ -176,10 +176,9 @@ def test_connect_commits_on_success(tmp_path, tracked_connections):
 def test_connect_rolls_back_and_closes_on_error(tmp_path, tracked_connections):
     db_path = initialize_database(tmp_path / "visitor_analytics.sqlite3")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with _connect(db_path) as connection:
-            connection.execute(_INSERT_SUMMARY)
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), _connect(db_path) as connection:
+        connection.execute(_INSERT_SUMMARY)
+        raise RuntimeError("boom")
 
     assert get_visitor_summary("k", db_path) is None
     _assert_all_closed(tracked_connections)

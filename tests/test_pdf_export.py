@@ -101,7 +101,7 @@ def test_electrodes_drawn_as_collections(gui, probe_type, with_survey):
     kwargs = {}
     if with_survey:
         # Includes an electrode with no survey value -> falls back to grey.
-        kwargs = dict(survey_colors={(0, 0): "#ff0000"}, survey_range=(0.0, 1.0))
+        kwargs = {"survey_colors": {(0, 0): "#ff0000"}, "survey_range": (0.0, 1.0)}
     ax = _plot(gui, **kwargs)
 
     collections = [c for c in ax.collections if isinstance(c, PatchCollection)]
@@ -132,6 +132,6 @@ def test_selected_electrodes_coloured(gui):
 
 
 def test_add_rects_empty_is_noop():
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     backend._add_rects(ax, [], [])
     assert len(ax.collections) == 0

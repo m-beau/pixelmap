@@ -28,7 +28,7 @@ from pixelmap.error_reporting import (
 def _raise(exc):
     try:
         raise exc
-    except BaseException as caught:
+    except BaseException as caught:  # noqa: BLE001 - capture whatever was raised
         return caught
 
 
@@ -392,7 +392,7 @@ def test_asynchronous_dispatch_drops_when_backlogged(no_toasts):
 def _raise_from(fn):
     try:
         fn()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - capture whatever was raised
         return exc
 
 

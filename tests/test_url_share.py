@@ -6,15 +6,15 @@ from pixelmap.utils import url_share
 
 
 def _sample_state():
-    return dict(
-        probe_type="2.0-4shanks",
-        probe_subtype=24,
-        reference_id="External",
-        ap_gain=500.0,
-        lf_gain=250.0,
-        hp_filter=1,
-        electrodes=[(s, e) for s in range(4) for e in range(96)],
-    )
+    return {
+        "probe_type": "2.0-4shanks",
+        "probe_subtype": 24,
+        "reference_id": "External",
+        "ap_gain": 500.0,
+        "lf_gain": 250.0,
+        "hp_filter": 1,
+        "electrodes": [(s, e) for s in range(4) for e in range(96)],
+    }
 
 
 class TestRoundTrip:

@@ -1,6 +1,5 @@
 """Tests for the undo/redo stack on the Electrodes selection state."""
 
-import pytest
 
 from pixelmap.gui.gui import Electrodes
 from pixelmap.types import Electrode

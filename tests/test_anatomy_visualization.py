@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -115,7 +117,7 @@ def test_band_y_ranges_are_monotonic(fake_brainglobe):
 
     # Consecutive bands on the same shank should not overlap.
     same_shank = [b for b in bands if b.shank_id == 0]
-    for a, b in zip(same_shank, same_shank[1:]):
+    for a, b in itertools.pairwise(same_shank):
         assert b.y_min >= a.y_max - 1e-6  # allow tiny float slack
 
 

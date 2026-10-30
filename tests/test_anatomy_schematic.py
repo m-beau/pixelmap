@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import weakref
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -74,8 +75,8 @@ def test_render_has_three_slices_plus_legend_with_a_probe_per_shank(fake_braingl
 
 
 def test_bregma_dot_adds_one_marker_per_slice(fake_brainglobe):
-    common = dict(tip_atlas=(100.0, 100.0, 75.0), pitch_deg=0.0, yaw_deg=0.0,
-                  shank_orientation_deg=0.0, shank_positions={0: 0.0}, y_range=(0.0, 80.0))
+    common = {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
+              "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
     without = render_locator("fake", **common)
     with_bregma = render_locator("fake", bregma_um=(100.0, 100.0, 50.0), **common)
     for a_no, a_yes in zip(without.axes[:3], with_bregma.axes[:3]):
@@ -123,7 +124,7 @@ class _LoadTrackingAtlas:
     guarded against.
     """
 
-    alive: list = []  # weakrefs to every annotation array ever materialised
+    alive: ClassVar[list] = []  # weakrefs to every annotation array ever materialised
 
     def __init__(self, name: str, **_kwargs):
         self.name = name

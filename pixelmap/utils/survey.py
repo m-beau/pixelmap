@@ -9,7 +9,6 @@ import pandas as pd
 
 from pixelmap.types import Electrode
 
-
 SURVEY_COLUMNS = ("shank", "xum", "zum", "val")
 
 # Tolerance for matching a survey (Xum, Zum) to a probe electrode.

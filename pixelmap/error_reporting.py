@@ -70,7 +70,7 @@ MAX_TOAST_CHARS = 300
 def _safe_str(value: Any) -> str:
     try:
         return str(value)
-    except Exception:
+    except Exception:  # noqa: BLE001 - str() of arbitrary objects may raise anything
         return f"<unprintable {type(value).__name__}>"
 
 
@@ -151,14 +151,14 @@ def load_webhook_config(environ: Mapping[str, str] | None = None) -> WebhookConf
 def _format_traceback(exc: BaseException) -> str:
     try:
         return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    except Exception:
+    except Exception:  # noqa: BLE001 - formatting must never fail the report
         return f"<traceback unavailable for {type(exc).__name__}>"
 
 
 def _current_session_id() -> str | None:
     try:
         return pn.state.curdoc.session_context.id
-    except Exception:
+    except Exception:  # noqa: BLE001 - no session outside a server context
         return None
 
 
@@ -202,7 +202,7 @@ def post_webhook(payload: dict[str, Any], config: WebhookConfig) -> bool:
         )
         with urllib.request.urlopen(request, timeout=config.timeout) as response:
             return 200 <= response.status < 300
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any delivery failure is only logged
         # Deliberately not report_error: a dead webhook must not recurse.
         logger.warning("Error webhook delivery failed: %s", _safe_str(exc))
         return False
@@ -261,11 +261,11 @@ class ErrorReporter:
         """Log, toast and webhook ``exc``. Never raises."""
         try:
             self._report(exc, context, notify_user)
-        except Exception:
+        except Exception:  # noqa: BLE001 - the reporter must never raise
             # Last line of defence: the reporter itself must not crash callers.
             try:
                 logger.exception("Error reporter failed")
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - logging failed too; nothing left to do
                 pass
 
     def _report(self, exc: BaseException, context: str | None, notify_user: bool) -> None:
@@ -357,7 +357,7 @@ def session_exception_handler(exc: BaseException) -> None:
     """
     try:
         report_error(exc, context="GUI callback")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - the exception handler must never raise
         pass
 
 
@@ -374,7 +374,7 @@ def guarded(context: str):
         def wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - report any callback error instead of raising
                 report_error(exc, context=context)
                 return None
 
