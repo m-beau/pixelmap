@@ -184,6 +184,7 @@ def _release_resident() -> None:
 
     if _resident is None:
         return
+    in_memory = _resident_volume is not None and _resident_volume.in_memory
     canonical_annotation.cache_clear()
     _resident_volume = None
     # brainglobe has no public "unload" hook; ``_annotation`` is the attribute
@@ -196,7 +197,12 @@ def _release_resident() -> None:
         pass
     _resident = None
     _resident_name = None
-    gc.collect()
+    # A full collection holds the GIL for seconds on a busy server, freezing
+    # every session even from a worker thread.  Only pay for it when dropping
+    # an in-RAM volume (the eager fallback, up to GBs), to be sure it is gone
+    # before the next one loads.  A zarr handle is freed by refcounting.
+    if in_memory:
+        gc.collect()
     _malloc_trim()
 
 

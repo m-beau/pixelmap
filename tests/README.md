@@ -46,6 +46,61 @@ Complete workflow tests simulating real usage:
 - Custom electrode selection workflow
 - Multiple presets for the same probe
 
+### `test_imro_bank_masks.py`
+
+Regression coverage for [issue #77](https://github.com/m-beau/pixelmap/issues/77):
+NP2 single-shank bank 0 must export mask `1`, not `0`. Eight cases cover bank-0
+and mixed-bank full-readout selections with modern and legacy headers for
+both single-shank NP2 formats (`NP2000`/`21` and `NP2003`/`2003`). Frozen
+`np2_bank0.imro` and `np2_mixed_banks.imro` fixtures were built independently
+from the raw wiring CSV and the [SpikeGLX mask rule](https://billkarsh.github.io/SpikeGLX/help/imroTables/)
+(`1 << bank`). Tests require exact tuples and saved bytes, correct masks for
+all four banks, sorted channels, and file round trips.
+
+### `test_imro_reference.py`
+
+A frozen oracle from dev commit `b73bd4da38f910465d4b43b52028d2b58a58c30b`
+(after the NP2 bank-mask fix in #78):
+100 reproducibly random, valid full-readout IMRO files, with 25 cases each for
+`1.0`, `2.0-1shank`, `2.0-4shanks`, and `QuadBase`. The seed is `20261029`.
+All supported part numbers and all reference modes for each supported IMRO
+format are represented. Each case chooses one nonempty wiring CSV cell per
+readout channel and shuffles the selection before generation. This exercises
+multiple banks and shanks, channel sorting, gains, and both filter settings.
+
+Every group includes all of its banks. NP2 single-shank cases now include
+banks 0–3 and assert `mask == 1 << bank`, so bank 0 must export mask `1`.
+Other probe groups continue to use bank indices, where `0` is valid. The
+corpus was recaptured from merged dev after #78; the 75 non-single-shank-NP2
+IMRO files retain their original bytes.
+
+An additional 25 backward-compatibility checks simulate NP2 single-shank
+exports from before the fix (bank 0 encoded as mask `0`). They verify that
+those files still load to the same electrode selections and re-export with
+the corrected mask `1`.
+
+The manifest freezes input selections and parameters; `.imro` files freeze the
+captured dev output. Tests validate hardware constraints directly against raw
+CSV cells, compare coordinate lookup and forbidden electrodes, require exact
+IMRO tuple and byte equality, and check save/read/parse round trips with modern
+and legacy headers. Expected outputs are never regenerated during tests.
+
+The same module includes 40 deliberately invalid selections: 10 per group.
+Each group has four pairs of contacts sharing an ADC channel, two selections
+exceeding its per-shank readout limit, two invalid electrode IDs, and two
+invalid shank IDs. These tests require the specific validation assertion and
+message from the public generation path. Valid controls confirm conflicting
+contacts work individually and selections at the readout limit are accepted.
+They are normal passing tests when rejection works, not expected failures.
+
+Run with `python -m pytest tests/test_imro_reference.py -q` (170 checks: 100
+valid cases, 40 invalid cases, 25 older-export compatibility cases, four
+per-group bank coverage checks, and one corpus coverage check). To deliberately
+create a new corpus, use an unmodified baseline checkout and run
+`PYTHONPATH=. python tests/generate_imro_reference.py OUTPUT_DIR` with a new,
+nonexistent output directory. Review any baseline change before replacing the
+committed corpus; never regenerate expected outputs on a performance branch.
+
 ### Activity survey overlay ⚡
 
 #### `test_survey.py` (17 tests)

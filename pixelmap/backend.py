@@ -9,6 +9,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+from matplotlib.collections import PatchCollection
 import numpy as np
 import pandas as pd
 
@@ -644,6 +645,22 @@ def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _add_rects(ax, rects, facecolors, zorder=1):
+    """Add borderless rectangles to ``ax`` as a single PatchCollection.
+
+    A probe has thousands of electrodes; adding each as its own patch made the
+    PDF export spend seconds in per-artist bookkeeping (data-limit updates,
+    transform setup, separate draw calls) on the server's event loop.  One
+    collection renders identically for a fraction of the cost.
+    """
+    if not rects:
+        return
+    ax.add_collection(
+        PatchCollection(rects, facecolors=facecolors, edgecolors="none", linewidths=0, zorder=zorder),
+        autolim=False,
+    )
+
+
 def plot_probe_layout(
     probe_type, imro_list, positions_file, wiring_file, title, figsize=(2, 30), save_plot=False, saveDir=None,
     anatomy_bands=None, survey_colors=None, survey_range=None
@@ -768,11 +785,15 @@ def plot_probe_layout(
             )
 
         # Draw electrodes (and optional survey sidebar bars)
-        for electrode, orig_x, y in positions[:, 1:]:
-            if electrode in selected_electrodes[:, 1]:
+        is_selected = np.isin(positions[:, 1], selected_electrodes[:, 1])
+        is_forbidden = np.isin(positions[:, 1], forbidden_electrodes[:, 1])
+        electrode_rects, electrode_colors = [], []
+        bar_rects, bar_colors = [], []
+        for (electrode, orig_x, y), sel, forb in zip(positions[:, 1:], is_selected, is_forbidden):
+            if sel:
                 color = selected_color
                 alpha = 1.0
-            elif electrode in forbidden_electrodes[:, 1]:
+            elif forb:
                 color = forbidden_color
                 alpha = 1
             else:
@@ -791,26 +812,23 @@ def plot_probe_layout(
                 x_norm = (orig_x - 16) / 16
                 x = x_norm * (shank_width * 0.6) / 2  # Use 60% of shank width
 
-            rect = patches.Rectangle(
+            electrode_rects.append(patches.Rectangle(
                 (x - electrode_width // 2, y - electrode_height // 2),
                 electrode_width,
                 electrode_height,
-                linewidth=0,
-                edgecolor="black",
-                facecolor=color,
-                alpha=alpha,
-            )
-            ax.add_patch(rect)
+            ))
+            electrode_colors.append(mcolors.to_rgba(color, alpha))
 
             # Survey sidebar bar (always on right side in PDF)
             if survey_colors is not None:
-                bar_color = survey_colors.get((0, int(electrode)), "#dddddd")
-                bar_rect = patches.Rectangle(
+                bar_rects.append(patches.Rectangle(
                     (survey_bar_center_x - survey_bar_width / 2, y - electrode_height / 2),
                     survey_bar_width, electrode_height,
-                    linewidth=0, facecolor=bar_color, alpha=1.0, zorder=50,
-                )
-                ax.add_patch(bar_rect)
+                ))
+                bar_colors.append(survey_colors.get((0, int(electrode)), "#dddddd"))
+
+        _add_rects(ax, electrode_rects, electrode_colors)
+        _add_rects(ax, bar_rects, bar_colors, zorder=50)
 
         ax.set_xlim(-shank_width // 2 - 20, shank_width // 2 + 20)
         ax.set_ylim(min_y - tip_height - 50, max_y + 100)
@@ -945,16 +963,22 @@ def plot_probe_layout(
                     )
 
             # Draw electrodes (and optional survey sidebar bars)
-            for shank_id_pos, electrode, orig_x, y in positions[shank_m]:
-                if shank_id_pos != shank_id:
-                    continue
+            shank_positions = positions[shank_m]
+            shank_selected = selected_electrodes[shank_m_selected]
+            is_selected = np.isin(shank_positions[:, 0], shank_selected[:, 0]) & np.isin(
+                shank_positions[:, 1], shank_selected[:, 1]
+            )
+            is_forbidden = np.isin(shank_positions[:, 0], forbidden_electrodes[:, 0]) & np.isin(
+                shank_positions[:, 1], forbidden_electrodes[:, 1]
+            )
+            electrode_rects, electrode_colors = [], []
+            bar_rects, bar_colors = [], []
+            for (shank_id_pos, electrode, orig_x, y), sel, forb in zip(shank_positions, is_selected, is_forbidden):
                 # Check if this electrode is selected
-                if np.isin(shank_id_pos, selected_electrodes[shank_m_selected, 0]) & np.isin(
-                    electrode, selected_electrodes[shank_m_selected, 1]
-                ):
+                if sel:
                     electrode_color = selected_color
                     alpha = 1.0
-                elif np.isin(shank_id_pos, forbidden_electrodes[:, 0]) & np.isin(electrode, forbidden_electrodes[:, 1]):
+                elif forb:
                     electrode_color = forbidden_color
                     alpha = 1
                 else:
@@ -966,27 +990,24 @@ def plot_probe_layout(
                 x_norm = (orig_x - true_shank_spacing * shank_id - 16) / 16
                 x = x_center + x_norm * (shank_width * 0.5) / 2
 
-                rect = patches.Rectangle(
+                electrode_rects.append(patches.Rectangle(
                     (x - electrode_width // 2, y - electrode_height // 2),
                     electrode_width,
                     electrode_height,
-                    linewidth=0,
-                    edgecolor="black",
-                    facecolor=electrode_color,
-                    alpha=alpha,
-                )
-                ax.add_patch(rect)
+                ))
+                electrode_colors.append(mcolors.to_rgba(electrode_color, alpha))
 
                 # Survey sidebar bar (always on right side of each shank in PDF)
                 if survey_colors is not None:
-                    bar_color = survey_colors.get((int(shank_id_pos), int(electrode)), "#dddddd")
                     bar_x = x_center + ms_survey_bar_center_offset
-                    bar_rect = patches.Rectangle(
+                    bar_rects.append(patches.Rectangle(
                         (bar_x - ms_survey_bar_width / 2, y - electrode_height / 2),
                         ms_survey_bar_width, electrode_height,
-                        linewidth=0, facecolor=bar_color, alpha=1.0, zorder=50,
-                    )
-                    ax.add_patch(bar_rect)
+                    ))
+                    bar_colors.append(survey_colors.get((int(shank_id_pos), int(electrode)), "#dddddd"))
+
+            _add_rects(ax, electrode_rects, electrode_colors)
+            _add_rects(ax, bar_rects, bar_colors, zorder=50)
 
             # Add shank label
             ax.text(
@@ -1070,7 +1091,13 @@ def plot_probe_layout(
             [0], [0], marker="s", color="w", markerfacecolor=forbidden_color, markersize=10, alpha=1, label="Forbidden"
         ),
     ]
-    ax.legend(title="Electrode state:", handles=legend_elements, bbox_to_anchor=(0.9, 0))
+    # Pin ``loc`` explicitly.  Without it matplotlib uses loc="best", which on
+    # every draw (tight_layout, savefig's tight-bbox pass and the final render)
+    # scores candidate spots against thousands of electrode patches -- seconds of
+    # work that blocked the server's event loop on each PDF download.  These are
+    # the spots "best" settled on, so the output is unchanged.
+    legend_loc = "upper right" if n_shanks == 1 else "upper left"
+    ax.legend(title="Electrode state:", handles=legend_elements, bbox_to_anchor=(0.9, 0), loc=legend_loc)
 
     plt.tight_layout()
 

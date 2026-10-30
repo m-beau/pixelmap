@@ -52,6 +52,11 @@ class CanonicalVolume:
         self.dtype = np.dtype(getattr(store, "dtype", np.int32))
         self._projections = None
 
+    @property
+    def in_memory(self) -> bool:
+        """Whether the whole annotation is held in RAM (the eager fallback)."""
+        return isinstance(self._store, np.ndarray)
+
     # -- indexing ----------------------------------------------------------
 
     def __getitem__(self, key) -> np.ndarray:

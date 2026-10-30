@@ -201,3 +201,33 @@ def test_panel_still_leaks_notification_views_without_workaround():
         assert _dead_doc_views() == []
     finally:
         srv.stop()
+
+
+# --------------------------------------------------------------------------
+# Session teardown must not stall the shared event loop
+# --------------------------------------------------------------------------
+
+def test_session_cleanup_does_not_force_gc(monkeypatch):
+    """A full ``gc.collect()`` per closed tab froze every other session.
+
+    The production watchdog measured ~6 s per full collection.  Teardown runs
+    on the event loop for every session that ends, so it must leave cycle
+    collection to the regular generational GC.
+    """
+    gui = gui_module.ChannelmapGUI()
+    calls = []
+    monkeypatch.setattr(gc, "collect", lambda *a, **k: calls.append(a) or 0)
+
+    gui._cleanup_session(types.SimpleNamespace(id="test-session"))
+
+    assert calls == []
+    assert not hasattr(gui, "electrode_source")
+    assert not hasattr(gui, "plot")
+
+
+def test_session_cleanup_is_idempotent():
+    """Cleanup may run after attributes are already gone (double destroy)."""
+    gui = gui_module.ChannelmapGUI()
+    ctx = types.SimpleNamespace(id="test-session")
+    gui._cleanup_session(ctx)
+    gui._cleanup_session(ctx)

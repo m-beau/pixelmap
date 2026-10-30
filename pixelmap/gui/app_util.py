@@ -9,9 +9,12 @@ import panel as pn
 import psutil
 
 from pixelmap.gui import watchdog
+from pixelmap.error_reporting import install_global_handlers
 from pixelmap.gui.gui import create_app
 
 pn.extension(notifications=True)
+# Background-thread and top-level errors go to the error webhook too.
+install_global_handlers()
 
 # Browser tab icon, served by Bokeh at /favicon.ico -- assets/npix_map_logo.png
 # centred on a transparent square canvas, at 16-256px. Passed to pn.serve below;

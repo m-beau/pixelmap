@@ -23,6 +23,9 @@ services:
       # pixelmap/gui/watchdog.py. Set PIXELMAP_STALL_WARN_S=0 to disable.
       - PIXELMAP_STALL_WARN_S=5
       - PIXELMAP_RSS_WARN_MB=3000
+      # Optional: POST unhandled errors to a webhook (see docs/getting-started.md).
+      - PIXELMAP_ERROR_WEBHOOK_URL=${PIXELMAP_ERROR_WEBHOOK_URL:-}
+      - PIXELMAP_ERROR_WEBHOOK_TOKEN=${PIXELMAP_ERROR_WEBHOOK_TOKEN:-}
     volumes:
       - ./output:/app/output
       - brainglobe_cache:/root/.brainglobe

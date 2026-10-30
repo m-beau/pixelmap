@@ -9,9 +9,10 @@ the healthcheck failed and the reverse proxy dropped users' websockets.
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 
-from pixelmap.gui import gui as gui_module
 from pixelmap.gui.gui import ChannelmapGUI
 from pixelmap.types import Electrode
 
@@ -32,9 +33,9 @@ def clean_selection(gui):
 
 @pytest.fixture
 def gc_calls(monkeypatch):
-    """Count full collections triggered from the GUI module."""
+    """Count full collections triggered anywhere while the handler runs."""
     calls = []
-    monkeypatch.setattr(gui_module.gc, "collect", lambda *a, **k: calls.append(a) or 0)
+    monkeypatch.setattr(gc, "collect", lambda *a, **k: calls.append(a) or 0)
     return calls
 
 

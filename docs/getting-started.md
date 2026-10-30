@@ -62,6 +62,20 @@ RAM is sized for multiple copies of every cache. Mount the
 RSS is logged to stdout every 60 s.
 :::
 
+:::{note}
+**Error notifications**: errors raised while handling a user's action are
+shown to that user as a toast and logged with a traceback; they do not take
+down the session or the server. To also receive them, set
+`PIXELMAP_ERROR_WEBHOOK_URL` to an `http(s)` endpoint. Each error is POSTed
+as JSON with a one-line `text`/`content` summary (so Slack, Mattermost and
+Discord incoming webhooks work as-is) and an `event` object holding the
+type, message, traceback, session id, host and version. Optional settings:
+`PIXELMAP_ERROR_WEBHOOK_TOKEN` (sent as `Authorization: Bearer <token>`),
+`PIXELMAP_ERROR_WEBHOOK_TIMEOUT` (seconds, default 5) and
+`PIXELMAP_ERROR_WEBHOOK_DEDUPE_SECONDS` (identical errors are sent at most
+once per window, default 60; `0` sends every one).
+:::
+
 ## Quick Start
 
 ### Option 1: Browser GUI

@@ -500,6 +500,62 @@ class TestAtlasesAreReleased:
 
 
 
+class TestReleaseDoesNotStallTheServer:
+    """Releasing the resident atlas must not run a full ``gc.collect()``
+    unless it is actually dropping an in-RAM volume.
+
+    Atlas switches happen on user actions, and a full collection holds the GIL
+    for ~6 s on the production server -- freezing every session even when run
+    from a worker thread.  The normal resident is a zarr handle, which
+    refcounting frees on its own; only the eager ``atlas.annotation`` fallback
+    holds the whole array, and there the collection guards the
+    "never two volumes at once" peak.
+    """
+
+    @pytest.fixture
+    def gc_calls(self, monkeypatch):
+        """Count full collections triggered anywhere while the test runs."""
+        calls = []
+        monkeypatch.setattr(gc, "collect", lambda *a, **k: calls.append(a) or 0)
+        return calls
+
+    @pytest.fixture
+    def lazy_store(self, monkeypatch):
+        import zarr
+
+        def _store(atlas):
+            store = zarr.zeros(shape=(4, 4, 4), dtype="int32")
+            store[:] = np.asarray(atlas.annotation)
+            return store
+
+        monkeypatch.setattr(atlas_module, "_open_annotation_store", _store)
+
+    def test_releasing_lazy_volume_skips_gc(self, fake_brainglobe, lazy_store, gc_calls):
+        atlas_module.ensure_downloaded("a")
+        assert not atlas_module._resident_volume.in_memory
+        atlas_module.release_atlas_memory()
+        assert gc_calls == []
+        assert atlas_module._resident_volume is None
+
+    def test_switching_lazy_atlases_skips_gc(self, fake_brainglobe, lazy_store, gc_calls):
+        for name in ("a", "b", "a", "c"):
+            atlas_module.ensure_downloaded(name)
+        assert gc_calls == []
+        assert atlas_module._resident_name == "c"
+
+    def test_releasing_eager_volume_still_collects(self, fake_brainglobe, gc_calls):
+        # The fake has no zarr store, so this takes the eager fallback.
+        atlas_module.ensure_downloaded("a")
+        assert atlas_module._resident_volume.in_memory
+        atlas_module.release_atlas_memory()
+        assert len(gc_calls) == 1
+
+    def test_releasing_nothing_skips_gc(self, gc_calls):
+        atlas_module.release_atlas_memory()
+        atlas_module.release_atlas_memory()
+        assert gc_calls == []
+
+
 class TestOnlyOneAnnotationIsResident:
     """At most one annotation volume may be in RAM at any moment.
 
