@@ -18,7 +18,7 @@ matplotlib.use("agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from matplotlib.collections import PatchCollection
+from matplotlib.collections import PolyCollection
 
 from pixelmap import backend
 from pixelmap.gui.gui import ChannelmapGUI
@@ -104,11 +104,11 @@ SURVEY_BAR_ZORDER = 50
 
 
 def _electrode_collections(ax):
-    """Per-shank electrode PatchCollections, in shank order (survey bars excluded)."""
+    """Per-shank electrode PolyCollections, in shank order (survey bars excluded)."""
     return [
         c
         for c in ax.collections
-        if isinstance(c, PatchCollection) and c.get_zorder() != SURVEY_BAR_ZORDER
+        if isinstance(c, PolyCollection) and c.get_zorder() != SURVEY_BAR_ZORDER
     ]
 
 
@@ -124,7 +124,7 @@ def test_electrodes_drawn_as_collections(gui, probe_type, with_survey):
         kwargs = {"survey_colors": {(0, 0): "#ff0000"}, "survey_range": (0.0, 1.0)}
     ax = _plot(gui, **kwargs)
 
-    collections = [c for c in ax.collections if isinstance(c, PatchCollection)]
+    collections = [c for c in ax.collections if isinstance(c, PolyCollection)]
     per_shank = 2 if with_survey else 1
     assert len(collections) == n_shanks * per_shank
     # Only shank outlines / anatomy bands remain as standalone patches.
@@ -191,5 +191,5 @@ def test_no_forbidden_electrodes(gui, probe_type, monkeypatch):
 
 def test_add_rects_empty_is_noop():
     _fig, ax = plt.subplots()
-    backend._add_rects(ax, [], [])
+    backend._add_rects(ax, [], [], 1.0, 1.0, [])
     assert len(ax.collections) == 0

@@ -364,6 +364,16 @@ class TestAnatomyOverlayClearing:
         assert "No anatomical overlay computed yet" in posed_gui.anatomy_legend.object
 
 
+def _measured_depth(gui):
+    """The depth the overlay compute would measure for ``gui``'s current pose."""
+    return gui_module._measure_tip_depth(
+        gui._tip_atlas_um(),
+        float(gui.pitch_input.value),
+        float(gui.yaw_input.value),
+        gui._selected_atlas_name(),
+    )
+
+
 class TestTipDepthReadout:
     """The readout is tied to the overlay: blank until Compute, blank after Clear."""
 
@@ -396,38 +406,42 @@ class TestTipDepthReadout:
         posed_gui.compute_anatomy_overlay()
         posed_gui.tip_dv_input.value = 2000.0  # 1 mm below the fake surface
         assert "1,0" in posed_gui.tip_depth_readout.object
-        assert posed_gui._tip_depth_below_surface() == pytest.approx(1012.5, abs=25.0)
+        assert _measured_depth(posed_gui) == pytest.approx(1012.5, abs=25.0)
 
     def test_tilting_the_probe_lengthens_the_measured_path(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
-        vertical = posed_gui._tip_depth_below_surface()
+        vertical = _measured_depth(posed_gui)
         posed_gui.pitch_input.value = 30.0
-        tilted = posed_gui._tip_depth_below_surface()
+        tilted = _measured_depth(posed_gui)
         assert tilted > vertical
         assert tilted == pytest.approx(vertical / np.cos(np.deg2rad(30.0)), abs=30.0)
 
     def test_tip_above_the_brain_is_reported_as_outside(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
         posed_gui.tip_dv_input.value = 100.0
-        assert posed_gui._tip_depth_below_surface() is None
+        assert _measured_depth(posed_gui) is None
         assert "outside the brain" in posed_gui.tip_depth_readout.object
 
-    def test_undownloaded_atlas_is_reported_without_triggering_a_download(
-        self, posed_gui, monkeypatch
+    @pytest.mark.parametrize("depth", [None, 0.0, 1012.5])
+    def test_refreshing_the_readout_never_reads_the_atlas(
+        self, posed_gui, monkeypatch, depth
     ):
-        """Refreshing a readout must never kick off a tens-of-MB download."""
+        """The readout runs on the event loop, so it must only format a depth
+        the off-loop compute already measured — never touch the atlas, which
+        could mean a tens-of-MB download."""
         posed_gui.compute_anatomy_overlay()
 
-        def _boom(name):
-            raise AssertionError("must not read an atlas that isn't downloaded")
+        def _boom(*args, **kwargs):
+            raise AssertionError("the readout read the atlas")
 
-        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name: False)
+        monkeypatch.setattr(atlas_module, "is_downloaded", _boom)
         # regions.py imports the symbol directly, so patch it where it's used.
         monkeypatch.setattr(regions_module, "canonical_annotation", _boom)
 
-        posed_gui._update_tip_depth_readout()
+        posed_gui._update_tip_depth_readout(depth)
 
-        assert "once the atlas is downloaded" in posed_gui.tip_depth_readout.object
+        expected = "outside the brain" if depth is None else f"{depth:,.0f} µm"
+        assert expected in posed_gui.tip_depth_readout.object
 
 
 class TestBothOverlaysTogether:

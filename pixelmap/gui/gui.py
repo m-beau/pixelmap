@@ -16,6 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,6 +60,7 @@ from pixelmap.constants import (
     SUPPORTED_QuadBase_PRESETS,
 )
 from pixelmap.error_reporting import guarded
+from pixelmap.error_reporting import notify as _notify
 from pixelmap.types import Electrode
 from pixelmap.utils import imro, survey, url_share
 from pixelmap.utils.survey import default_survey_range
@@ -85,19 +87,6 @@ PANEL_EXTENSIONS = ("tabulator",)
 pn.extension(*PANEL_EXTENSIONS, notifications=True)
 
 
-def _notify(level: str, message: str, **kwargs) -> None:
-    """Emit a Panel notification, or do nothing if the session has no area.
-
-    `pn.state.notifications` is None outside a served session (tests, scripts).
-    Reaching through it unguarded raises inside a Bokeh callback, and Bokeh
-    discards every pending document write when a locked callback raises -- so
-    one missing notification silently loses all the plot updates the callback
-    had already made. Swallowing the notification is always the lesser evil.
-    """
-    notifications = pn.state.notifications
-    if notifications is None:
-        return
-    getattr(notifications, level)(message, **kwargs)
 
 
 @functools.lru_cache(maxsize=16)
@@ -159,14 +148,13 @@ class _AnatomyRequest:
     pitch_deg: float
     yaw_deg: float
     shank_orientation_deg: float
-    width: float
-    label_offset: float
     bregma_um: tuple | None
     ap_squish: float
     ml_squish: float
     dv_squish: float
     tilt_deg: float
     generation: int
+    locator_fig: Any = None  # reused across renders; see _compute_anatomy
 
 
 @dataclass
@@ -177,6 +165,7 @@ class _AnatomyResult:
     error: Exception | None = None
     locator_html: str | None = None
     tip_depth: float | None = None
+    locator_fig: Any = None
 
 
 ###################################
@@ -356,6 +345,21 @@ class ChannelmapGUI(param.Parameterized):
         self.survey_color_bar = None
         self.survey_color_bar_title = None
         self._survey_range_suspend = False
+
+        # Anatomy overlay state.  Once an overlay is requested, live-update it
+        # whenever any pose / bregma / squish / tilt input changes; set on
+        # Compute, not on the first draw, so edits made while that first
+        # compute runs reach it too.
+        self._anatomy_overlay_active = False
+        # Off-loop compute bookkeeping (see _drain_anatomy_requests): whether
+        # inputs changed since the last compute started, whether a compute is
+        # running, a counter bumped by Clear so a compute that outlives its
+        # overlay is dropped, and a flag batched field writes set to hold off
+        # recomputes until they're done.
+        self._anatomy_dirty = False
+        self._anatomy_compute_running = False
+        self._anatomy_generation = 0
+        self._suppress_anatomy_recompute = False
 
         # Load initial data
         self.load_probe_data()
@@ -1050,7 +1054,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # Collect anatomy overlay data (if active)
         anatomy_bands = None
-        if getattr(self, "_anatomy_overlay_active", False):
+        if self._anatomy_overlay_active:
             band_src = self.region_band_source.data
             if band_src["x"]:
                 plot_centers = self._shank_plot_centers()
@@ -1315,13 +1319,11 @@ class ChannelmapGUI(param.Parameterized):
     def _request_anatomy_recompute(self):
         """Schedule an off-loop overlay recompute from a synchronous callback.
 
-        Coalesces: while a compute is in flight this only marks the overlay
-        dirty, and the running drain picks up the latest inputs when it
-        finishes, so a burst of edits costs one extra compute, not one each.
+        Coalesces: while a compute is in flight the new drain returns at once,
+        and the running one picks up the latest inputs when it finishes, so a
+        burst of edits costs one extra compute, not one each.
         """
         self._anatomy_dirty = True
-        if self._anatomy_compute_running:
-            return
         pn.state.execute(self._drain_anatomy_requests)
 
     @pn.io.with_lock
@@ -1347,7 +1349,7 @@ class ChannelmapGUI(param.Parameterized):
         try:
             while self._anatomy_dirty and self._anatomy_overlay_active:
                 self._anatomy_dirty = False
-                name = str(self.atlas_name_input.value).strip()
+                name = self._selected_atlas_name()
                 if not anatomy_atlas.is_downloaded(name):
                     self.compute_anatomy_button.name = _BUTTON_DOWNLOADING
                     self.compute_anatomy_button.disabled = True
@@ -1378,29 +1380,18 @@ class ChannelmapGUI(param.Parameterized):
             self.compute_anatomy_button.disabled = False
 
     def compute_anatomy_overlay(self):
-        """Compute region bands for the current pose and render them, inline.
+        """Compute and draw the overlay for the current pose (the Compute button).
 
-        Synchronous, so it blocks the calling thread for the whole compute (and
-        any download).  Fine for scripts, notebooks and tests; GUI callbacks go
-        through :meth:`_request_anatomy_recompute` instead, which keeps the work
-        off the event loop.
+        Runs the same off-loop drain as the GUI.  With no event loop running
+        (scripts, tests) Panel runs it to completion before returning; inside a
+        running loop (the served app, Jupyter) it is scheduled instead.
         """
         self._anatomy_overlay_active = True
-        name = str(self.atlas_name_input.value).strip()
-        if self._origin_spec(name)["status"] == "ac_pending":
-            try:
-                anatomy_atlas.derive_origin_from_ac(name)
-            except Exception as exc:  # noqa: BLE001 - AC not derivable: banner stays "pending"
-                print(f"Anterior-commissure lookup failed: {exc}")
-            else:
-                self._fill_reference_params()
-        request = self._anatomy_request()
-        self._apply_anatomy(request, self._compute_anatomy(request))
+        self._request_anatomy_recompute()
 
     def _anatomy_request(self) -> _AnatomyRequest:
         """Snapshot the overlay's inputs.  Event loop only; cheap, no atlas reads."""
-        atlas_name = str(self.atlas_name_input.value).strip()
-        width = self._shank_plot_width()
+        atlas_name = self._selected_atlas_name()
         # Bregma dot whenever an estimate exists or we're in bregma mode (using
         # the current, possibly-edited, values). DV-squish + tilt warp the brain
         # image only in bregma mode (where the squish/tilt inputs are live).
@@ -1429,25 +1420,20 @@ class ChannelmapGUI(param.Parameterized):
             pitch_deg=float(self.pitch_input.value),
             yaw_deg=float(self.yaw_input.value),
             shank_orientation_deg=float(self.shank_orientation_input.value),
-            width=width,
-            # Pull label text outside the shank outline so it doesn't overlap
-            # the electrode rects; the offset widens when a survey overlay is
-            # loaded so labels clear the survey sidebar bars.
-            label_offset=self._region_label_offset(width / 2),
             bregma_um=bregma_um,
             ap_squish=ap_squish,
             ml_squish=ml_squish,
             dv_squish=dv_squish,
             tilt_deg=tilt_deg,
             generation=self._anatomy_generation,
+            locator_fig=self._locator_fig,
         )
 
     def _compute_anatomy(self, req: _AnatomyRequest) -> _AnatomyResult:
         """Every atlas read an overlay needs.  Runs in a worker thread.
 
-        Must not touch widgets or Bokeh models — only ``req`` and the atlas.
-        The one piece of session state it uses, ``_locator_fig``, is only ever
-        touched by the single in-flight compute.
+        Must not touch widgets, Bokeh models or session state — only ``req``
+        and the atlas.
         """
         try:
             bands = compute_region_bands(
@@ -1463,7 +1449,7 @@ class ChannelmapGUI(param.Parameterized):
         except Exception as exc:  # noqa: BLE001 - any lookup failure is reported to the user
             return _AnatomyResult(error=exc)
 
-        result = _AnatomyResult(bands=bands)
+        result = _AnatomyResult(bands=bands, locator_fig=req.locator_fig)
         try:
             # Reuse this session's figure: building one per render cost 3.1 MB
             # of RSS per overlay compute, and the overlay recomputes on every
@@ -1481,9 +1467,9 @@ class ChannelmapGUI(param.Parameterized):
                 ml_squish=req.ml_squish,
                 dv_squish=req.dv_squish,
                 tilt_deg=req.tilt_deg,
-                fig=self._locator_fig,
+                fig=req.locator_fig,
             )
-            self._locator_fig = fig
+            result.locator_fig = fig
             result.locator_html = self._fig_to_locator_html(fig)
         except Exception as exc:  # noqa: BLE001 - a failed locator shouldn't sink the overlay
             print(f"Locator render failed: {exc}")
@@ -1499,17 +1485,24 @@ class ChannelmapGUI(param.Parameterized):
 
     def _apply_anatomy(self, req: _AnatomyRequest, result: _AnatomyResult):
         """Draw a finished compute.  Event loop only (writes Bokeh models)."""
-        if req.generation != self._anatomy_generation or not self._anatomy_overlay_active:
-            return  # cleared while computing: drop the stale result
+        if req.generation != self._anatomy_generation:
+            # Cleared while computing: drop the stale result.
+            if result.locator_fig is not self._locator_fig:
+                plt.close(result.locator_fig)
+            return
+        self._locator_fig = result.locator_fig
         self._refresh_compute_button()
         if result.error is not None:
             print(f"Anatomy lookup failed: {result.error}")
             return
 
         bands = result.bands
-        width = req.width
+        width = self._shank_plot_width()
         half_width = width / 2
-        label_offset = req.label_offset
+        # Pull label text outside the shank outline so it doesn't overlap the
+        # electrode rects; the offset widens when a survey overlay is loaded so
+        # labels clear the survey sidebar bars.
+        label_offset = self._region_label_offset(half_width)
         plot_centers = req.plot_centers
 
         band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
@@ -1642,7 +1635,7 @@ class ChannelmapGUI(param.Parameterized):
         native code as an FYI, but only when the atlas is already downloaded so
         switching atlases in the dropdown stays cheap.
         """
-        name = str(self.atlas_name_input.value).strip()
+        name = self._selected_atlas_name()
         native = None
         try:
             if anatomy_atlas.is_downloaded(name):
@@ -1688,10 +1681,10 @@ class ChannelmapGUI(param.Parameterized):
             self.bregma_estimate_header.object = self._bregma_header_html()
         # Reflect download state in the button label so users know before clicking.
         self._refresh_compute_button()
-        name = str(self.atlas_name_input.value).strip()
-        if getattr(self, "_anatomy_overlay_active", False):
+        name = self._selected_atlas_name()
+        if self._anatomy_overlay_active:
             # The recompute locates a pending AC origin on its way through.
-            self._recompute_anatomy_if_active()
+            self._request_anatomy_recompute()
         elif (self._origin_spec(name)["status"] == "ac_pending"
               and anatomy_atlas.is_downloaded(name)):
             # No overlay to do it, but the atlas is local, so the origin can be
@@ -1711,7 +1704,7 @@ class ChannelmapGUI(param.Parameterized):
         except Exception as exc:  # noqa: BLE001 - AC not derivable: banner stays "pending"
             print(f"Anterior-commissure lookup failed: {exc}")
             return
-        if str(self.atlas_name_input.value).strip() == name:  # still selected
+        if self._selected_atlas_name() == name:  # still selected
             self._fill_reference_params()
 
     def _fill_reference_params(self):
@@ -1722,7 +1715,7 @@ class ChannelmapGUI(param.Parameterized):
 
     def _refresh_compute_button(self):
         """Label the Compute button by whether the selected atlas is local."""
-        downloaded = anatomy_atlas.is_downloaded(str(self.atlas_name_input.value).strip())
+        downloaded = anatomy_atlas.is_downloaded(self._selected_atlas_name())
         self.compute_anatomy_button.name = _BUTTON_COMPUTE if downloaded else _BUTTON_DOWNLOAD
 
     @contextlib.contextmanager
@@ -1797,28 +1790,8 @@ class ChannelmapGUI(param.Parameterized):
         """Refresh the coordinate note when the atlas selection changes."""
         self.anatomy_coord_note.object = self._anatomy_coord_note_html()
 
-    def _atlas_is_downloaded(self) -> bool:
-        """True if the selected atlas is on disk, so reading it won't download."""
-        try:
-            return anatomy_atlas.is_downloaded(str(self.atlas_name_input.value).strip())
-        except Exception:  # noqa: BLE001 - unreadable atlas means not downloaded
-            return False
-
-    def _tip_depth_below_surface(self) -> float | None:
-        """Tip-to-brain-surface distance along the probe axis, in µm.
-
-        ``None`` when it can't be computed: the atlas isn't downloaded (we
-        never trigger a download just to refresh a readout), the tip is outside
-        the brain, or the atlas lookup failed.
-        """
-        if not self._atlas_is_downloaded():
-            return None
-        return _measure_tip_depth(
-            self._tip_atlas_um(),
-            float(self.pitch_input.value),
-            float(self.yaw_input.value),
-            str(self.atlas_name_input.value).strip(),
-        )
+    def _selected_atlas_name(self) -> str:
+        return str(self.atlas_name_input.value).strip()
 
     def _tip_depth_readout_html(self, depth: float | None) -> str:
         """Banner text for the depth-below-surface readout above the tip fields.
@@ -1831,17 +1804,11 @@ class ChannelmapGUI(param.Parameterized):
         ``depth`` is measured by the off-loop overlay compute; this never reads
         the atlas itself, so it is safe on the event loop.
         """
-        if not getattr(self, "_anatomy_overlay_active", False):
+        if not self._anatomy_overlay_active:
             value_html = (
                 '<span style="color:#777;">—</span>'
                 '<span style="color:#777; font-weight:normal;"> '
                 "(compute the overlay below)</span>"
-            )
-        elif not self._atlas_is_downloaded():
-            value_html = (
-                '<span style="color:#777;">—</span>'
-                '<span style="color:#777; font-weight:normal;"> '
-                "(available once the atlas is downloaded)</span>"
             )
         else:
             if depth is None:
@@ -1998,9 +1965,9 @@ class ChannelmapGUI(param.Parameterized):
 
     def _recompute_anatomy_if_active(self, *events):
         """Re-run the overlay on input changes, but only once one exists."""
-        if getattr(self, "_suppress_anatomy_recompute", False):
+        if self._suppress_anatomy_recompute:
             return
-        if getattr(self, "_anatomy_overlay_active", False):
+        if self._anatomy_overlay_active:
             self._request_anatomy_recompute()  # never inline: see _drain_anatomy_requests
 
     def _update_anatomy_legend(self, bands: list):
@@ -2872,19 +2839,6 @@ class ChannelmapGUI(param.Parameterized):
         self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
 
-        # Once an overlay is requested, live-update it (bands + slices) whenever
-        # any pose / bregma / squish / tilt input changes, so edits are visible
-        # immediately instead of only on the next Compute click.  Set on
-        # Compute, not on the first draw, so edits made while that first
-        # compute runs reach it too.
-        self._anatomy_overlay_active = False
-        # Off-loop compute bookkeeping (see _drain_anatomy_requests): whether
-        # inputs changed since the last compute started, whether a compute is
-        # running, and a counter bumped by Clear so a compute that outlives its
-        # overlay is dropped.
-        self._anatomy_dirty = False
-        self._anatomy_compute_running = False
-        self._anatomy_generation = 0
         # atlas_name + bregma toggle do their own batched recompute (via
         # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
         for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,

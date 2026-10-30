@@ -231,3 +231,37 @@ def test_lookups_much_faster_than_per_electrode_scan():
         backend.find_electrode_coordinates(sel, wiring_df),
     ))
     assert new * 5 < old, f"new {new * 1000:.0f} ms vs reference {old * 1000:.0f} ms"
+
+
+# --------------------------------------------------------------------------
+# Wiring-map rebuild
+# --------------------------------------------------------------------------
+
+def _copy_wiring_csvs(tmp_path):
+    for csv in WIRING_DIR.glob("*.csv"):
+        (tmp_path / csv.name).write_bytes(csv.read_bytes())
+    return tmp_path
+
+
+def test_rebuilt_wiring_maps_match_the_shipped_cache(tmp_path):
+    """No pickle: the maps are rebuilt from the CSVs, identical to the shipped ones."""
+    import pickle
+
+    rebuilt = backend._load_wiring_maps(str(_copy_wiring_csvs(tmp_path)))
+    with open(WIRING_DIR / "wiring_maps.pkl", "rb") as f:
+        shipped = pickle.load(f)
+    assert {k: dict(v) for k, v in rebuilt.items()} == {
+        k: {e: frozenset(c) for e, c in v.items()} for k, v in shipped.items()
+    }
+
+
+def test_rebuild_indexes_each_wiring_table_once(tmp_path, monkeypatch):
+    """Re-indexing per electrode made a cold rebuild take ~55 s, inside the
+    first session's GUI constructor on the event loop."""
+    calls = []
+    real = backend._wiring_index
+    monkeypatch.setattr(backend, "_wiring_index", lambda df: calls.append(1) or real(df))
+
+    backend._load_wiring_maps(str(_copy_wiring_csvs(tmp_path)))
+
+    assert len(calls) == len(WIRING_FILE_MAP)

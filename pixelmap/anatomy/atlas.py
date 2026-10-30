@@ -574,13 +574,10 @@ def landmark_policy(name: str) -> str | None:
     return None
 
 
-#: Memo for :func:`derive_origin_from_ac`, insertion-ordered so the oldest
-#: entry is evicted first.  Hand-rolled rather than ``lru_cache`` because
-#: :func:`peek_origin_from_ac` needs to ask "is this one known?" without
-#: computing it.  Values are three floats, so the bound is about entries, not RAM.
+#: Memo for :func:`derive_origin_from_ac`.  A plain dict rather than
+#: ``lru_cache`` because :func:`peek_origin_from_ac` needs to ask "is this one
+#: known?" without computing it.  Unbounded: one three-float entry per atlas.
 _ac_origin_memo: dict[str, tuple[float, float, float] | None] = {}
-_AC_ORIGIN_MEMO_SIZE = 8
-_MISSING = object()
 #: One lock per atlas name, so concurrent callers (several sessions, or a quick
 #: A→B→A switch) wait for the scan already running instead of starting another.
 _ac_origin_locks: dict[str, threading.Lock] = {}
@@ -600,20 +597,14 @@ def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     per atlas and single-flight per name; exceptions are not cached, so a
     failed lookup is retried.
     """
-    cached = _ac_origin_memo.get(name, _MISSING)
-    if cached is not _MISSING:
-        return cached
+    if name in _ac_origin_memo:
+        return _ac_origin_memo[name]
     with _ac_origin_locks_guard:
         lock = _ac_origin_locks.setdefault(name, threading.Lock())
     with lock:
-        cached = _ac_origin_memo.get(name, _MISSING)  # a concurrent caller's scan
-        if cached is not _MISSING:
-            return cached
-        origin = _derive_origin_from_ac(name)
-        _ac_origin_memo[name] = origin
-        while len(_ac_origin_memo) > _AC_ORIGIN_MEMO_SIZE:
-            _ac_origin_memo.pop(next(iter(_ac_origin_memo)))
-    return origin
+        if name not in _ac_origin_memo:  # else a concurrent caller's scan won
+            _ac_origin_memo[name] = _derive_origin_from_ac(name)
+        return _ac_origin_memo[name]
 
 
 derive_origin_from_ac.cache_clear = _ac_origin_memo.clear
@@ -625,10 +616,9 @@ def peek_origin_from_ac(name: str) -> tuple[bool, tuple[float, float, float] | N
     ``known`` is False until something has derived this atlas's origin.
     Instant and touches no atlas data, so it is safe on the event loop.
     """
-    cached = _ac_origin_memo.get(name, _MISSING)
-    if cached is _MISSING:
-        return False, None
-    return True, cached
+    if name in _ac_origin_memo:
+        return True, _ac_origin_memo[name]
+    return False, None
 
 
 def _derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:

@@ -215,15 +215,6 @@ class TestOrientation:
             atlas_module.derive_origin_from_ac("c")
         assert atlas_module.peek_origin_from_ac("c") == (False, None)
 
-    def test_origin_memo_is_bounded_and_evicts_oldest_first(self, monkeypatch):
-        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", lambda name: (0.0, 0.0, 0.0))
-        size = atlas_module._AC_ORIGIN_MEMO_SIZE
-        for i in range(size + 1):
-            atlas_module.derive_origin_from_ac(f"atlas{i}")
-        assert atlas_module.peek_origin_from_ac("atlas0") == (False, None)
-        assert atlas_module.peek_origin_from_ac(f"atlas{size}")[0] is True
-        assert len(atlas_module._ac_origin_memo) == size
-
     def test_concurrent_callers_share_one_scan(self, monkeypatch):
         """Several sessions picking the same human atlas pay for one scan."""
         import threading
