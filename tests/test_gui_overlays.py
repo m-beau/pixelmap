@@ -22,6 +22,7 @@ import pytest
 
 from pixelmap.anatomy import atlas as atlas_module
 from pixelmap.anatomy import regions as regions_module
+from pixelmap.gui import gui as gui_module
 from pixelmap.gui.gui import ChannelmapGUI
 from pixelmap.types import Electrode
 
@@ -812,6 +813,167 @@ class TestAtlasSwitchNeverDownloadsOnTheEventLoop:
 
         assert not [e for e in events if e[0] == "download"]
         assert len(gui.region_band_source.data["acronym"]) > 0
+
+
+class TestOverlayComputeRunsOffTheEventLoop:
+    """Regression tests: even a *cached* atlas froze the server on every edit.
+
+    Slicing the annotation and rendering the locator takes 0.7 s per overlay
+    compute on allen_mouse_25um and 3.3 s on allen_mouse_10um (measured), and
+    the overlay recomputes on every pose keystroke — all of it on the Bokeh
+    event loop that serves every session.  Locating an anterior-commissure
+    origin scans the whole volume (0.8–8 s), and ran on the loop on every
+    switch to a human or fish atlas.  All of these must happen in a worker.
+    """
+
+    @pytest.fixture
+    def threads(self, monkeypatch):
+        """Record which thread each atlas-reading step of the overlay runs on."""
+        seen: dict[str, list[threading.Thread]] = {}
+
+        def _tracing(label, fn):
+            def wrapper(*args, **kwargs):
+                seen.setdefault(label, []).append(threading.current_thread())
+                return fn(*args, **kwargs)
+            return wrapper
+
+        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+            monkeypatch.setattr(gui_module, label, _tracing(label, getattr(gui_module, label)))
+        return seen
+
+    @staticmethod
+    def _assert_off_loop(seen, *labels):
+        for label in labels:
+            assert seen.get(label), f"{label} never ran"
+            assert all(t is not threading.main_thread() for t in seen[label]), (
+                f"{label} ran on the event loop thread"
+            )
+
+    def test_a_live_pose_edit_computes_off_the_event_loop(self, posed_gui, threads):
+        posed_gui.compute_anatomy_overlay()
+        before = list(posed_gui.region_band_source.data["y"])
+        threads.clear()
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        self._assert_off_loop(threads, "compute_region_bands", "render_locator",
+                              "tip_depth_below_surface_um")
+        assert list(posed_gui.region_band_source.data["y"]) != before
+        # 2200 µm tip, surface at ≈ 987.5 µm → ≈ 1212 µm below it.
+        assert "1,2" in posed_gui.tip_depth_readout.object
+
+    def test_clicking_compute_on_a_cached_atlas_computes_off_the_loop(self, served, threads):
+        gui, session = served
+
+        asyncio.run(session.with_document_locked(gui._on_compute_anatomy_click, None))
+
+        self._assert_off_loop(threads, "compute_region_bands", "render_locator")
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+
+    def test_edits_during_a_compute_are_coalesced_into_one_more(self, posed_gui, monkeypatch):
+        """A burst of keystrokes must not queue one multi-second compute each."""
+        posed_gui.compute_anatomy_overlay()
+        real = gui_module.compute_region_bands
+        tips = []
+
+        def _slow_bands(**kwargs):
+            tips.append(kwargs["tip_atlas"][2])
+            if len(tips) == 1:  # the user keeps typing while this one runs
+                for dv in (2100.0, 2200.0, 2300.0):
+                    posed_gui.tip_dv_input.value = dv
+            return real(**kwargs)
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _slow_bands)
+
+        posed_gui.tip_dv_input.value = 2000.0
+
+        assert tips == [2000.0, 2300.0], "expected the first edit, then only the latest"
+        assert posed_gui._anatomy_compute_running is False
+
+    def test_clearing_mid_compute_discards_the_result(self, posed_gui, monkeypatch):
+        posed_gui.compute_anatomy_overlay()
+        real = gui_module.compute_region_bands
+
+        def _cleared_meanwhile(**kwargs):
+            bands = real(**kwargs)
+            posed_gui.clear_anatomy_overlay()  # the user clicks Clear
+            return bands
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _cleared_meanwhile)
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        assert posed_gui._anatomy_overlay_active is False
+        assert posed_gui.region_band_source.data["x"] == []
+        assert posed_gui.anatomy_locator.object == ""
+
+    def test_a_lookup_failure_leaves_the_button_usable(self, posed_gui, monkeypatch):
+        posed_gui.compute_anatomy_overlay()
+
+        def _boom(**kwargs):
+            raise ValueError("bad pose")
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _boom)
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        assert posed_gui._anatomy_compute_running is False
+        assert posed_gui.compute_anatomy_button.disabled is False
+        assert posed_gui.compute_anatomy_button.name == "Compute anatomical overlay 🧠"
+
+
+class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
+    """Human and fish atlases use the AC as origin; finding it scans every voxel."""
+
+    AC_ATLAS = "fake_zfish_atlas"  # "zfish" → anterior-commissure landmark
+    AC_ORIGIN = (100.0, 200.0, 300.0)  # (AP, ML, DV) µm
+
+    @pytest.fixture
+    def ac_threads(self, posed_gui, monkeypatch):
+        seen: list[threading.Thread] = []
+
+        def _derive(name):
+            seen.append(threading.current_thread())
+            return self.AC_ORIGIN
+
+        atlas_module.derive_origin_from_ac.cache_clear()
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", _derive)
+        yield posed_gui, seen
+        atlas_module.derive_origin_from_ac.cache_clear()
+
+    def _assert_origin_filled(self, gui):
+        assert (gui.bregma_ap_input.value, gui.bregma_ml_input.value,
+                gui.bregma_dv_input.value) == self.AC_ORIGIN
+        assert "anterior commissure (defined)" in gui.bregma_estimate_header.object
+
+    def test_switching_to_a_cached_ac_atlas_derives_it_off_the_loop(self, ac_threads):
+        gui, seen = ac_threads
+        assert gui._anatomy_overlay_active is False
+
+        gui.atlas_name_input.value = self.AC_ATLAS
+
+        assert seen, "the AC origin was never located"
+        assert all(t is not threading.main_thread() for t in seen), (
+            "the whole-volume AC scan ran on the event loop thread"
+        )
+        self._assert_origin_filled(gui)
+
+    def test_with_an_overlay_the_recompute_derives_it_off_the_loop(self, ac_threads):
+        gui, seen = ac_threads
+        gui.compute_anatomy_overlay()
+
+        gui.atlas_name_input.value = self.AC_ATLAS
+
+        assert seen and all(t is not threading.main_thread() for t in seen)
+        self._assert_origin_filled(gui)
+        assert len(gui.region_band_source.data["acronym"]) > 0
+
+    def test_origin_spec_never_scans_on_its_own(self, ac_threads):
+        """It runs on the loop several times per switch, so it may only peek."""
+        gui, seen = ac_threads
+        assert gui._origin_spec(self.AC_ATLAS)["status"] == "ac_pending"
+        assert seen == []
 
 
 def test_no_unlocked_async_gui_callbacks():

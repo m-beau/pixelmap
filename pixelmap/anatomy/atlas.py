@@ -574,14 +574,53 @@ def landmark_policy(name: str) -> str | None:
     return None
 
 
-@functools.lru_cache(maxsize=8)
+#: Memo for :func:`derive_origin_from_ac`, insertion-ordered so the oldest
+#: entry is evicted first.  Hand-rolled rather than ``lru_cache`` because
+#: :func:`peek_origin_from_ac` needs to ask "is this one known?" without
+#: computing it.  Values are three floats, so the bound is about entries, not RAM.
+_ac_origin_memo: dict[str, tuple[float, float, float] | None] = {}
+_AC_ORIGIN_MEMO_SIZE = 8
+_MISSING = object()
+
+
 def derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     """Origin at the anterior-commissure decussation, from the annotation.
 
     Returns canonical ``(AP, ML, DV)`` µm, or ``None`` if the atlas delineates
     no anterior commissure. Same recipe used (and validated) for the WHS rat:
     the AC's midline-crossing centroid. Requires the atlas (downloads if absent).
+
+    Slow the first time: it scans every voxel of the annotation (0.8 s for a
+    25 µm atlas, ~8 s at 10 µm), so the GUI only ever calls it from a worker
+    thread and uses :func:`peek_origin_from_ac` on the event loop.  Memoised
+    per atlas; exceptions are not cached, so a failed lookup is retried.
     """
+    cached = _ac_origin_memo.get(name, _MISSING)
+    if cached is not _MISSING:
+        return cached
+    origin = _derive_origin_from_ac(name)
+    _ac_origin_memo[name] = origin
+    while len(_ac_origin_memo) > _AC_ORIGIN_MEMO_SIZE:
+        _ac_origin_memo.pop(next(iter(_ac_origin_memo)))
+    return origin
+
+
+derive_origin_from_ac.cache_clear = _ac_origin_memo.clear
+
+
+def peek_origin_from_ac(name: str) -> tuple[bool, tuple[float, float, float] | None]:
+    """``(known, origin)`` for :func:`derive_origin_from_ac`, without computing it.
+
+    ``known`` is False until something has derived this atlas's origin.
+    Instant and touches no atlas data, so it is safe on the event loop.
+    """
+    cached = _ac_origin_memo.get(name, _MISSING)
+    if cached is _MISSING:
+        return False, None
+    return True, cached
+
+
+def _derive_origin_from_ac(name: str) -> tuple[float, float, float] | None:
     atlas = get_atlas(name)
     ac_ids = [int(s["id"]) for s in atlas.structures.values()
               if "anterior" in s["name"].lower() and "commis" in s["name"].lower()]
