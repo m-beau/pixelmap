@@ -2,10 +2,19 @@ name: Build and Push Docker Image
 
 on:
   push:
+    branches:
+      - dev   # Every commit/merge on dev publishes `dev` + `dev-<sha>`
     tags:
       - 'v*'  # Trigger on tags that start with 'v'
   release:
     types: [published]
+
+# Serialise builds per ref so an older dev build can never finish last and
+# overwrite the `dev` tag with stale code. Superseded dev builds are
+# cancelled; release builds always run to completion.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/dev' }}
 
 env:
   REGISTRY: ghcr.io
@@ -40,9 +49,13 @@ jobs:
         # Pre-releases (PEP 440 a/b/rc/dev, e.g. v1.4.1rc1) get only their
         # own tag, never `latest`: prod pulls `latest` via Watchtower, so an
         # RC must not roll out on its own. contains() is case-insensitive.
+        # Pushes to the dev branch get the moving `dev` tag plus an immutable
+        # `dev-<short sha>` tag, and never `latest`.
         tags: |
           type=ref,event=tag
-          type=raw,value=latest,enable=${{ !contains(github.ref_name, 'a') && !contains(github.ref_name, 'b') && !contains(github.ref_name, 'rc') && !contains(github.ref_name, 'dev') }}
+          type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, 'a') && !contains(github.ref_name, 'b') && !contains(github.ref_name, 'rc') && !contains(github.ref_name, 'dev') }}
+          type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+          type=sha,prefix=dev-,format=short,enable=${{ github.ref == 'refs/heads/dev' }}
 
     - name: Build and push Docker image
       id: build

@@ -46,6 +46,10 @@ docker run --rm \
 
 The application will be available at `http://localhost:5008`.
 
+To try unreleased changes, use `ghcr.io/m-beau/pixelmap:dev` instead. It is
+rebuilt on every commit to the `dev` branch, and each build is also pinned as
+`dev-<short commit sha>` (e.g. `dev-697dbdd`).
+
 :::{note}
 On Apple Silicon (M1/M2) or ARM Linux, add `--platform linux/amd64` to the Docker command.
 :::
