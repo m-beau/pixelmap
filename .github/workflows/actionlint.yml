@@ -1,0 +1,36 @@
+name: Lint workflows
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths:
+      - .github/workflows/**
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - .github/workflows/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: '1.7.12'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Script and binary are both pinned to the same release so a new
+    # actionlint version can't change the rules without a reviewed bump.
+    # shellcheck is preinstalled on the runner, so `run:` blocks are
+    # checked too.
+    - name: Download actionlint
+      id: get_actionlint
+      run: bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "${ACTIONLINT_VERSION}"
+
+    - name: Run actionlint
+      run: ${{ steps.get_actionlint.outputs.executable }} -color
