@@ -131,7 +131,7 @@ The order is invisible most of the time, because every electrode in the box ends
 The same first-come-first-served rule applies to textual selection (electrode IDs are consumed in the order you write them).
 
 :::{tip}
-The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere elese on the probe then use the regular selection box to select the remaining available electrodes (your target).
+The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere else on the probe then use the regular selection box to select the remaining available electrodes (your target).
 :::
 
 
