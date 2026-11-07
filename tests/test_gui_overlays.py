@@ -22,6 +22,7 @@ import pytest
 
 from pixelmap.anatomy import atlas as atlas_module
 from pixelmap.anatomy import regions as regions_module
+from pixelmap.gui import gui as gui_module
 from pixelmap.gui.gui import ChannelmapGUI
 from pixelmap.types import Electrode
 
@@ -89,6 +90,7 @@ def layered_atlas(monkeypatch):
     atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
     monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _FakeAtlas)
     # Pretend it's cached so the GUI treats it as a local atlas throughout.
@@ -97,6 +99,7 @@ def layered_atlas(monkeypatch):
     atlas_module.release_atlas_memory()
     atlas_module.get_atlas.cache_clear()
     atlas_module.canonical_annotation.cache_clear()
+    atlas_module.derive_origin_from_ac.cache_clear()
     atlas_module._region_info_from_id.cache_clear()
 
 
@@ -361,6 +364,16 @@ class TestAnatomyOverlayClearing:
         assert "No anatomical overlay computed yet" in posed_gui.anatomy_legend.object
 
 
+def _measured_depth(gui):
+    """The depth the overlay compute would measure for ``gui``'s current pose."""
+    return gui_module._measure_tip_depth(
+        gui._tip_atlas_um(),
+        float(gui.pitch_input.value),
+        float(gui.yaw_input.value),
+        gui._selected_atlas_name(),
+    )
+
+
 class TestTipDepthReadout:
     """The readout is tied to the overlay: blank until Compute, blank after Clear."""
 
@@ -393,38 +406,42 @@ class TestTipDepthReadout:
         posed_gui.compute_anatomy_overlay()
         posed_gui.tip_dv_input.value = 2000.0  # 1 mm below the fake surface
         assert "1,0" in posed_gui.tip_depth_readout.object
-        assert posed_gui._tip_depth_below_surface() == pytest.approx(1012.5, abs=25.0)
+        assert _measured_depth(posed_gui) == pytest.approx(1012.5, abs=25.0)
 
     def test_tilting_the_probe_lengthens_the_measured_path(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
-        vertical = posed_gui._tip_depth_below_surface()
+        vertical = _measured_depth(posed_gui)
         posed_gui.pitch_input.value = 30.0
-        tilted = posed_gui._tip_depth_below_surface()
+        tilted = _measured_depth(posed_gui)
         assert tilted > vertical
         assert tilted == pytest.approx(vertical / np.cos(np.deg2rad(30.0)), abs=30.0)
 
     def test_tip_above_the_brain_is_reported_as_outside(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
         posed_gui.tip_dv_input.value = 100.0
-        assert posed_gui._tip_depth_below_surface() is None
+        assert _measured_depth(posed_gui) is None
         assert "outside the brain" in posed_gui.tip_depth_readout.object
 
-    def test_undownloaded_atlas_is_reported_without_triggering_a_download(
-        self, posed_gui, monkeypatch
+    @pytest.mark.parametrize("depth", [None, 0.0, 1012.5])
+    def test_refreshing_the_readout_never_reads_the_atlas(
+        self, posed_gui, monkeypatch, depth
     ):
-        """Refreshing a readout must never kick off a tens-of-MB download."""
+        """The readout runs on the event loop, so it must only format a depth
+        the off-loop compute already measured — never touch the atlas, which
+        could mean a tens-of-MB download."""
         posed_gui.compute_anatomy_overlay()
 
-        def _boom(name):
-            raise AssertionError("must not read an atlas that isn't downloaded")
+        def _boom(*args, **kwargs):
+            raise AssertionError("the readout read the atlas")
 
-        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name: False)
+        monkeypatch.setattr(atlas_module, "is_downloaded", _boom)
         # regions.py imports the symbol directly, so patch it where it's used.
         monkeypatch.setattr(regions_module, "canonical_annotation", _boom)
 
-        posed_gui._update_tip_depth_readout()
+        posed_gui._update_tip_depth_readout(depth)
 
-        assert "once the atlas is downloaded" in posed_gui.tip_depth_readout.object
+        expected = "outside the brain" if depth is None else f"{depth:,.0f} µm"
+        assert expected in posed_gui.tip_depth_readout.object
 
 
 class TestBothOverlaysTogether:
@@ -681,6 +698,294 @@ class TestComputeButtonRunsUnderTheDocumentLock:
 
         assert gui.compute_anatomy_button.disabled is False
         assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
+
+
+class TestAtlasSwitchNeverDownloadsOnTheEventLoop:
+    """Regression tests for a server-wide freeze on atlas switch.
+
+    With an overlay on screen, picking a not-yet-cached atlas from the dropdown
+    live-recomputed the overlay *synchronously* — so the multi-second atlas
+    download ran on the Bokeh event loop, freezing every session and the
+    healthcheck (the watchdog logged 5–10 s stalls in
+    ``_on_atlas_change → _recompute_anatomy_if_active → compute_anatomy_overlay``).
+    The Compute button already pushed downloads to a worker thread; the live
+    update path has to do the same.
+    """
+
+    COLD = "cold_gui_atlas"
+    COLDER = "colder_gui_atlas"
+
+    @pytest.fixture
+    def traced(self, posed_gui, monkeypatch):
+        """Record every atlas construction and download, with its thread.
+
+        Atlases in ``cold`` count as not downloaded until ``ensure_downloaded``
+        has fetched them; constructing one before then is exactly the inline
+        network fetch that froze the server.
+        """
+        events: list[tuple[str, str, threading.Thread]] = []
+        cold = {self.COLD, self.COLDER}
+        fake_atlas = atlas_module.BrainGlobeAtlas
+
+        class _TracingAtlas(fake_atlas):
+            def __init__(self, name, **kwargs):
+                events.append(("construct", name, threading.current_thread()))
+                super().__init__(name, **kwargs)
+
+        def _fake_download(name):
+            events.append(("download", name, threading.current_thread()))
+            cold.discard(name)
+
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _TracingAtlas)
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=FAKE_ATLAS: name not in cold)
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _fake_download)
+        return posed_gui, events, cold
+
+    def _assert_downloaded_off_loop_before_use(self, events, name):
+        mine = [(kind, thread) for kind, n, thread in events if n == name]
+        assert mine, f"{name} was never downloaded or opened"
+        kind, thread = mine[0]
+        assert kind == "download", (
+            f"{name} was opened before being downloaded — on a cold cache that "
+            "is an inline network fetch"
+        )
+        assert thread is not threading.main_thread(), (
+            f"{name} was downloaded on the event loop thread"
+        )
+
+    def test_switching_to_a_cold_atlas_downloads_off_the_event_loop(self, traced):
+        gui, events, _cold = traced
+        gui.compute_anatomy_overlay()
+        assert gui._anatomy_overlay_active is True
+
+        gui.atlas_name_input.value = self.COLD
+
+        self._assert_downloaded_off_loop_before_use(events, self.COLD)
+        # And the overlay is redrawn for the new atlas once it has arrived.
+        assert gui._anatomy_overlay_active is True
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+        assert gui.compute_anatomy_button.name == "Compute anatomical overlay 🧠"
+
+    def test_switching_again_mid_download_fetches_the_latest_off_the_loop(self, traced, monkeypatch):
+        """The atlas can change while the first download is still running.
+
+        The draw that follows a download reads the *current* dropdown value, so
+        it must not assume that is the atlas it just fetched.
+        """
+        gui, events, cold = traced
+        gui.compute_anatomy_overlay()
+
+        def _download_then_switch(name):
+            events.append(("download", name, threading.current_thread()))
+            cold.discard(name)
+            if name == self.COLD:
+                gui.atlas_name_input.value = self.COLDER  # user picks again
+
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _download_then_switch)
+
+        gui.atlas_name_input.value = self.COLD
+
+        downloads = [n for kind, n, _t in events if kind == "download"]
+        assert downloads == [self.COLD, self.COLDER], (
+            "each atlas should be fetched exactly once, the second by the "
+            "in-flight download rather than a parallel or inline one"
+        )
+        self._assert_downloaded_off_loop_before_use(events, self.COLDER)
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+
+    def test_a_failed_download_on_switch_leaves_the_button_usable(self, traced, monkeypatch):
+        gui, events, _cold = traced
+        gui.compute_anatomy_overlay()
+
+        def _boom(name):
+            raise ConnectionError("atlas host unreachable")
+
+        monkeypatch.setattr(atlas_module, "ensure_downloaded", _boom)
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[1] == self.COLD and e[2] is threading.main_thread()]
+        assert gui.compute_anatomy_button.disabled is False
+        assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
+
+    def test_switching_to_a_cold_atlas_without_an_overlay_downloads_nothing(self, traced):
+        gui, events, _cold = traced
+        assert gui._anatomy_overlay_active is False
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[1] == self.COLD]
+        assert gui.compute_anatomy_button.name == "Download & compute atlas 🧠 ⏳"
+
+    def test_switching_to_a_warm_atlas_still_recomputes_immediately(self, traced):
+        gui, events, cold = traced
+        gui.compute_anatomy_overlay()
+        cold.discard(self.COLD)  # already on disk
+        gui.region_band_source.data = {k: [] for k in gui.region_band_source.data}
+
+        gui.atlas_name_input.value = self.COLD
+
+        assert not [e for e in events if e[0] == "download"]
+        assert len(gui.region_band_source.data["acronym"]) > 0
+
+
+def _assert_off_loop(threads, what: str):
+    """``what`` ran, and never on the main (event loop) thread."""
+    assert threads, f"{what} never ran"
+    assert all(t is not threading.main_thread() for t in threads), (
+        f"{what} ran on the event loop thread"
+    )
+
+
+class TestOverlayComputeRunsOffTheEventLoop:
+    """Regression tests: even a *cached* atlas froze the server on every edit.
+
+    Slicing the annotation and rendering the locator takes 0.7 s per overlay
+    compute on allen_mouse_25um and 3.3 s on allen_mouse_10um (measured), and
+    the overlay recomputes on every pose keystroke — all of it on the Bokeh
+    event loop that serves every session.  Locating an anterior-commissure
+    origin scans the whole volume (0.8–8 s), and ran on the loop on every
+    switch to a human or fish atlas.  All of these must happen in a worker.
+    """
+
+    @pytest.fixture
+    def threads(self, monkeypatch):
+        """Record which thread each atlas-reading step of the overlay runs on."""
+        seen: dict[str, list[threading.Thread]] = {}
+
+        def _tracing(label, fn):
+            def wrapper(*args, **kwargs):
+                seen.setdefault(label, []).append(threading.current_thread())
+                return fn(*args, **kwargs)
+            return wrapper
+
+        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+            monkeypatch.setattr(gui_module, label, _tracing(label, getattr(gui_module, label)))
+        return seen
+
+    def test_a_live_pose_edit_computes_off_the_event_loop(self, posed_gui, threads):
+        posed_gui.compute_anatomy_overlay()
+        before = list(posed_gui.region_band_source.data["y"])
+        threads.clear()
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+            _assert_off_loop(threads.get(label), label)
+        assert list(posed_gui.region_band_source.data["y"]) != before
+        # 2200 µm tip, surface at ≈ 987.5 µm → ≈ 1212 µm below it.
+        assert "1,2" in posed_gui.tip_depth_readout.object
+
+    def test_clicking_compute_on_a_cached_atlas_computes_off_the_loop(self, served, threads):
+        gui, session = served
+
+        asyncio.run(session.with_document_locked(gui._on_compute_anatomy_click, None))
+
+        for label in ("compute_region_bands", "render_locator"):
+            _assert_off_loop(threads.get(label), label)
+        assert len(gui.region_band_source.data["acronym"]) > 0
+        assert gui.compute_anatomy_button.disabled is False
+
+    def test_edits_during_a_compute_are_coalesced_into_one_more(self, posed_gui, monkeypatch):
+        """A burst of keystrokes must not queue one multi-second compute each."""
+        posed_gui.compute_anatomy_overlay()
+        real = gui_module.compute_region_bands
+        tips = []
+
+        def _slow_bands(**kwargs):
+            tips.append(kwargs["tip_atlas"][2])
+            if len(tips) == 1:  # the user keeps typing while this one runs
+                for dv in (2100.0, 2200.0, 2300.0):
+                    posed_gui.tip_dv_input.value = dv
+            return real(**kwargs)
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _slow_bands)
+
+        posed_gui.tip_dv_input.value = 2000.0
+
+        assert tips == [2000.0, 2300.0], "expected the first edit, then only the latest"
+        assert posed_gui._anatomy_compute_running is False
+
+    def test_clearing_mid_compute_discards_the_result(self, posed_gui, monkeypatch):
+        posed_gui.compute_anatomy_overlay()
+        real = gui_module.compute_region_bands
+
+        def _cleared_meanwhile(**kwargs):
+            bands = real(**kwargs)
+            posed_gui.clear_anatomy_overlay()  # the user clicks Clear
+            return bands
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _cleared_meanwhile)
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        assert posed_gui._anatomy_overlay_active is False
+        assert posed_gui.region_band_source.data["x"] == []
+        assert posed_gui.anatomy_locator.object == ""
+
+    def test_a_lookup_failure_leaves_the_button_usable(self, posed_gui, monkeypatch):
+        posed_gui.compute_anatomy_overlay()
+
+        def _boom(**kwargs):
+            raise ValueError("bad pose")
+
+        monkeypatch.setattr(gui_module, "compute_region_bands", _boom)
+
+        posed_gui.tip_dv_input.value = 2200.0
+
+        assert posed_gui._anatomy_compute_running is False
+        assert posed_gui.compute_anatomy_button.disabled is False
+        assert posed_gui.compute_anatomy_button.name == "Compute anatomical overlay 🧠"
+
+
+class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
+    """Human and fish atlases use the AC as origin; finding it scans every voxel."""
+
+    AC_ATLAS = "fake_zfish_atlas"  # "zfish" → anterior-commissure landmark
+    AC_ORIGIN = (100.0, 200.0, 300.0)  # (AP, ML, DV) µm
+
+    @pytest.fixture
+    def ac_threads(self, posed_gui, monkeypatch):
+        seen: list[threading.Thread] = []
+
+        def _derive(name):
+            seen.append(threading.current_thread())
+            return self.AC_ORIGIN
+
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", _derive)
+        return posed_gui, seen
+
+    def _assert_origin_filled(self, gui):
+        assert (gui.bregma_ap_input.value, gui.bregma_ml_input.value,
+                gui.bregma_dv_input.value) == self.AC_ORIGIN
+        assert "anterior commissure (defined)" in gui.bregma_estimate_header.object
+
+    def test_switching_to_a_cached_ac_atlas_derives_it_off_the_loop(self, ac_threads):
+        gui, seen = ac_threads
+        assert gui._anatomy_overlay_active is False
+
+        gui.atlas_name_input.value = self.AC_ATLAS
+
+        _assert_off_loop(seen, "the whole-volume AC scan")
+        self._assert_origin_filled(gui)
+
+    def test_with_an_overlay_the_recompute_derives_it_off_the_loop(self, ac_threads):
+        gui, seen = ac_threads
+        gui.compute_anatomy_overlay()
+
+        gui.atlas_name_input.value = self.AC_ATLAS
+
+        _assert_off_loop(seen, "the whole-volume AC scan")
+        self._assert_origin_filled(gui)
+        assert len(gui.region_band_source.data["acronym"]) > 0
+
+    def test_origin_spec_never_scans_on_its_own(self, ac_threads):
+        """It runs on the loop several times per switch, so it may only peek."""
+        gui, seen = ac_threads
+        assert gui._origin_spec(self.AC_ATLAS)["status"] == "ac_pending"
+        assert seen == []
 
 
 def test_no_unlocked_async_gui_callbacks():

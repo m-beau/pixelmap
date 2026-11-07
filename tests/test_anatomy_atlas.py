@@ -187,6 +187,63 @@ class TestOrientation:
         atlas_module.derive_origin_from_ac.cache_clear()
         assert atlas_module.derive_origin_from_ac("y") is None
 
+    def test_peek_reports_unknown_until_derived(self, monkeypatch):
+        """The event loop asks ``peek``; only a worker thread pays for the scan."""
+        calls = []
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac",
+                            lambda name: calls.append(name) or (1.0, 2.0, 3.0))
+
+        assert atlas_module.peek_origin_from_ac("a") == (False, None)
+        assert calls == [], "peeking must never compute"
+        assert atlas_module.derive_origin_from_ac("a") == (1.0, 2.0, 3.0)
+        assert atlas_module.peek_origin_from_ac("a") == (True, (1.0, 2.0, 3.0))
+        assert atlas_module.derive_origin_from_ac("a") == (1.0, 2.0, 3.0)
+        assert calls == ["a"], "a derived origin is memoised"
+
+    def test_peek_distinguishes_no_ac_from_not_yet_derived(self, monkeypatch):
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", lambda name: None)
+        assert atlas_module.peek_origin_from_ac("b") == (False, None)
+        assert atlas_module.derive_origin_from_ac("b") is None
+        assert atlas_module.peek_origin_from_ac("b") == (True, None)
+
+    def test_a_failed_derivation_is_not_memoised(self, monkeypatch):
+        def _boom(name):
+            raise OSError("annotation unreadable")
+
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", _boom)
+        with pytest.raises(OSError):
+            atlas_module.derive_origin_from_ac("c")
+        assert atlas_module.peek_origin_from_ac("c") == (False, None)
+
+    def test_concurrent_callers_share_one_scan(self, monkeypatch):
+        """Several sessions picking the same human atlas pay for one scan."""
+        import threading
+        import time
+
+        calls = []
+
+        def _slow(name):
+            calls.append(name)
+            time.sleep(0.05)
+            return (1.0, 2.0, 3.0)
+
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", _slow)
+        results = []
+        workers = [threading.Thread(target=lambda: results.append(
+            atlas_module.derive_origin_from_ac("e"))) for _ in range(4)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+        assert calls == ["e"]
+        assert results == [(1.0, 2.0, 3.0)] * 4
+
+    def test_cache_clear_forgets_derived_origins(self, monkeypatch):
+        monkeypatch.setattr(atlas_module, "_derive_origin_from_ac", lambda name: (0.0, 0.0, 0.0))
+        atlas_module.derive_origin_from_ac("d")
+        atlas_module.derive_origin_from_ac.cache_clear()
+        assert atlas_module.peek_origin_from_ac("d") == (False, None)
+
     def test_lookup_resolves_through_ap_flip(self, monkeypatch):
         # "psr" reverses AP: a marker at the native posterior pole (index 0) must
         # be read at large canonical AP, not at AP=0 (the anterior pole).
