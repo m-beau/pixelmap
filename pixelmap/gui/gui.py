@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,6 +24,7 @@ import pandas as pd
 import panel as pn
 import param
 from bokeh import events
+from bokeh.core.properties import validate
 from bokeh.models import (
     BoxSelectTool,
     ColorBar,
@@ -270,6 +271,55 @@ class Electrodes:
 #### GUI app ####
 #################
 
+class ShankOutlineGeometry(NamedTuple):
+    """What a probe's outline draws, ready for one renderer per style."""
+
+    x_limits: tuple[float, float]
+    outline_xs: list[list[float]]
+    outline_ys: list[list[float]]
+    bank_lines_xs: list[list[float]]
+    bank_lines_ys: list[list[float]]
+    shank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+    bank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+
+
+def shank_outline_geometry(positions: np.ndarray, single_shank: bool) -> ShankOutlineGeometry:
+    """Compute outlines, bank lines and labels from ``(shank, electrode, x, y)`` rows."""
+    half_width = 50
+    if single_shank:
+        centers = [0]
+        tip_fraction = 0.1
+        x_limits = (-half_width - 150, half_width + 150)
+    else:
+        centers = [shank_id * 250 for shank_id in range(4)]
+        tip_fraction = 0.08
+        x_limits = (-half_width - 100, centers[-1] + half_width + 100)
+
+    geometry = ShankOutlineGeometry(x_limits, [], [], [], [], ([], [], []), ([], [], []))
+    for shank_id, center in enumerate(centers):
+        ys = positions[positions[:, 0] == shank_id, -1]
+        max_y, min_y = float(np.max(ys)), float(np.min(ys))
+        tip_y = min_y - (max_y - min_y) * tip_fraction
+        left, right = center - half_width, center + half_width
+
+        geometry.outline_xs.append([left, right, right, center, left, left])
+        geometry.outline_ys.append([max_y + 100, max_y + 100, min_y, tip_y, min_y, max_y + 100])
+
+        if not single_shank:
+            geometry.shank_labels[0].append(center)
+            geometry.shank_labels[1].append(tip_y - 250)
+            geometry.shank_labels[2].append(f"Shank {shank_id}")
+
+        for bank, bank_y in enumerate(ys[::384].tolist()):
+            geometry.bank_lines_xs.append([left, right])
+            geometry.bank_lines_ys.append([bank_y, bank_y])
+            if center == centers[-1]:  # bank labels only beside the rightmost shank
+                geometry.bank_labels[0].append(right + 17)
+                geometry.bank_labels[1].append(bank_y)
+                geometry.bank_labels[2].append(f"Bank {bank}")
+    return geometry
+
+
 class ChannelmapGUI(param.Parameterized):
     """Main GUI class for interactive channelmap generation using Bokeh"""
 
@@ -441,98 +491,77 @@ class ChannelmapGUI(param.Parameterized):
     def create_electrode_data(self):
         """Create the electrode data for Bokeh visualization"""
         positions = self.positions_df.values
-
-        # Calculate electrode positions and colors
-        electrode_data = {
-            "x": [],
-            "y": [],
-            "width": [],
-            "height": [],
-            "shank_id": [],
-            "electrode_id": [],
-            "color": [],
-            "alpha": [],
-            "line_color": [],
-            "line_width": [],
-            "status": [],
-            "val": [],
-            "bar_x": [],
-            "bar_height": [],
-            "bar_color": [],
-            "bar_alpha": [],
-        }
+        shank_ids, electrode_ids, orig_x, y = positions.T
 
         # Parameters for visualization
         BAR_WIDTH = 16
         BAR_GAP = 4  # gap between shank outline and survey bar
+        shank_width = 100
+        half_span = shank_width * 0.7 / 2
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank
-            shank_width = 100
-            electrode_width = 15
-            electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
-            shank_spacing = None
-        else:
-            # Multi-shank
-            shank_width = 100
-            shank_spacing = 250
-            electrode_width = 12
-            electrode_height = 8
+        # Map each electrode's x position to the drawn shank's width.
+        if self.probe_type == "1.0":
+            electrode_width, electrode_height = 15, 14
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 35) / 24 * half_span
+        elif self.probe_type == "2.0-1shank":
+            electrode_width, electrode_height = 15, 9
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 16) / 16 * half_span
+        else:  # 4-shanks 2.0 or NXT
+            electrode_width, electrode_height = 12, 8
+            x_center_shank = shank_ids * 250
+            x = x_center_shank + (orig_x - x_center_shank - 16) / 16 * half_span
 
         # Bars sit just outside the shank outline, mirroring the column the
         # electrode lives in: left-column contacts → bar on the left of the
         # outline, right-column contacts → bar on the right.
         bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+        bar_x = x_center_shank + np.where(x >= x_center_shank, 1, -1) * bar_offset
 
-        for shank_id, electrode_id, orig_x, y in positions:
+        # Numeric columns are arrays: Bokeh sends those as binary instead of
+        # encoding each of the thousands of values separately.
+        electrode_data = {
+            "x": x,
+            "y": y,
+            "width": np.full(len(positions), electrode_width),
+            "height": np.full(len(positions), electrode_height),
+            "shank_id": shank_ids,
+            "electrode_id": electrode_ids,
+            "bar_x": bar_x,
+            "bar_height": np.full(len(positions), electrode_height * 1.5),
+            **self._electrode_appearance_columns(shank_ids.tolist(), electrode_ids.tolist()),
+        }
 
-            # Map x position to shank width
-            if self.probe_type == "1.0":
-                x_norm = (orig_x - 35) / 24
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            elif self.probe_type == "2.0-1shank":
-                x_norm = (orig_x - 16) / 16
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            else: # 4-shanks 2.0 or NXT
-                # Calculate shank center
-                x_center_shank = shank_id * shank_spacing
-                # Map electrode position within shank
-                x_norm = (orig_x - x_center_shank - 16) / 16
-                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
+        # Skip Bokeh's check of every cell, which took half of this method and
+        # runs on the event loop for each session: the shape is fixed right here.
+        with validate(False):
+            self.electrode_source = ColumnDataSource(data=electrode_data)
 
-            # Bar x: just outside the shank outline, on the side matching
-            # the electrode's column relative to the shank center.
-            side = 1 if (x - x_center_shank) >= 0 else -1
-            bar_x = x_center_shank + side * bar_offset
+    def _electrode_appearance_columns(self, shank_ids, electrode_ids) -> dict[str, Any]:
+        """Selection- and survey-dependent columns, one value per electrode."""
+        n_electrodes = len(shank_ids)
+        colors = [""] * n_electrodes
+        alphas = np.empty(n_electrodes, dtype=np.float64)
+        line_colors = [""] * n_electrodes
+        line_widths = np.empty(n_electrodes, dtype=np.int32)
+        statuses = [""] * n_electrodes
+        vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = [""] * n_electrodes
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
 
-            # Determine electrode status and color
+        for i, (shank_id, electrode_id) in enumerate(zip(shank_ids, electrode_ids, strict=True)):
             electrode = Electrode(shank_id, electrode_id)
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-            val = self._get_survey_val(electrode)
-            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
+            statuses[i], colors[i], alphas[i], line_colors[i], line_widths[i] = (
+                self.get_electrode_plotting_params(electrode)
+            )
+            vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
 
-            electrode_data["x"].append(x)
-            electrode_data["y"].append(y)
-            electrode_data["width"].append(electrode_width)
-            electrode_data["height"].append(electrode_height)
-            electrode_data["shank_id"].append(shank_id)
-            electrode_data["electrode_id"].append(electrode_id)
-            electrode_data["color"].append(color)
-            electrode_data["alpha"].append(alpha)
-            electrode_data["line_color"].append(line_color)
-            electrode_data["line_width"].append(line_width)
-            electrode_data["status"].append(status)
-            electrode_data["val"].append(val)
-            electrode_data["bar_x"].append(bar_x)
-            electrode_data["bar_height"].append(electrode_height * 1.5)
-            electrode_data["bar_color"].append(bar_color)
-            electrode_data["bar_alpha"].append(bar_alpha)
-
-        # Create ColumnDataSource
-        self.electrode_source = ColumnDataSource(data=electrode_data)
-
+        return {
+            "color": colors, "alpha": alphas, "line_color": line_colors, "line_width": line_widths,
+            "status": statuses, "val": vals, "bar_color": bar_colors, "bar_alpha": bar_alphas,
+        }
 
     def get_electrode_plotting_params(self, electrode: Electrode):
         """Get electrode fill/border appearance based on selection state."""
@@ -610,96 +639,28 @@ class ChannelmapGUI(param.Parameterized):
 
 
     def add_shank_outlines(self):
-        """Add shank outlines and bank labels"""
-        positions = self.positions_df.values
+        """Add shank outlines and bank labels.
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank outline
-            shank_width = 100
-            xlim = [-shank_width / 2 - 150, shank_width / 2 + 150]
-            max_y = np.max(positions[:, -1])
-            min_y = np.min(positions[:, -1])
-            tip_height = (max_y - min_y) * 0.1
+        One renderer per style, not one per shape: each renderer brings about
+        ten Bokeh models, which every session then builds, validates,
+        serialises and sends on the event loop.
+        """
+        geometry = shank_outline_geometry(
+            self.positions_df.values,
+            single_shank=self.probe_type in ["1.0", "2.0-1shank"],
+        )
+        self.plot.x_range = Range1d(*geometry.x_limits)
+        self.plot.multi_line(geometry.outline_xs, geometry.outline_ys, line_width=3, color="black", alpha=1)
+        self.plot.multi_line(geometry.bank_lines_xs, geometry.bank_lines_ys, line_width=2, color="gray", alpha=0.7)
 
-            # Shank outline
-            shank_x = [-shank_width / 2, shank_width / 2, shank_width / 2, 0, -shank_width / 2, -shank_width / 2]
-            shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-            self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-            self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-            # Bank labels
-            for bank_i in np.arange(0, len(positions), 384):
-                if bank_i < len(positions):
-                    bank_y = positions[bank_i, -1]
-                    self.plot.line(
-                        [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
-                    )
-                    self.plot.text(
-                        [shank_width / 2 + 17],
-                        [bank_y],
-                        text=[f"Bank {bank_i // 384}"],
-                        text_font_size="10pt",
-                        text_color="gray",
-                    )
-
-        else:
-            # Multi-shank outlines
-            shank_width = 100
-            shank_spacing = 250
-            xlim = [-shank_width / 2 - 100, 3 * shank_spacing + shank_width / 2 + 100]
-
-            for shank_id in range(4):
-                shank_mask = positions[:, 0] == shank_id
-                x_center = shank_id * shank_spacing
-
-                max_y = np.max(positions[shank_mask, -1])
-                min_y = np.min(positions[shank_mask, -1])
-                tip_height = (max_y - min_y) * 0.08
-
-                # Shank outline
-                shank_x = [
-                    x_center - shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center,
-                    x_center - shank_width / 2,
-                    x_center - shank_width / 2,
-                ]
-                shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-                self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-                self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-                # Shank label
-                self.plot.text(
-                    [x_center],
-                    [min_y - tip_height - 250],
-                    text=[f"Shank {shank_id}"],
-                    text_font_size="12pt",
-                    text_color="black",
-                    text_align="center",
-                )
-
-                # Bank lines and labels
-                for bank_i in np.arange(0, len(positions[shank_mask]), 384):
-                    if bank_i < len(positions[shank_mask]):
-                        bank_y = positions[shank_mask][bank_i, -1]
-                        self.plot.line(
-                            [x_center - shank_width / 2, x_center + shank_width / 2],
-                            [bank_y, bank_y],
-                            line_width=2,
-                            color="gray",
-                            alpha=0.7,
-                        )
-                        if shank_id == 3:  # Bank labels (only on rightmost shank)
-                            self.plot.text(
-                                [x_center + shank_width / 2 + 17],
-                                [bank_y],
-                                text=[f"Bank {bank_i // 384}"],
-                                text_font_size="10pt",
-                                text_color="gray",
-                            )
+        label_xs, label_ys, labels = geometry.shank_labels
+        if labels:
+            self.plot.text(
+                label_xs, label_ys, text=labels,
+                text_font_size="12pt", text_color="black", text_align="center",
+            )
+        label_xs, label_ys, labels = geometry.bank_labels
+        self.plot.text(label_xs, label_ys, text=labels, text_font_size="10pt", text_color="gray")
 
         # Set appropriate axis limits
         self.plot.axis.visible = False
@@ -708,39 +669,9 @@ class ChannelmapGUI(param.Parameterized):
 
     def update_electrode_colors(self):
         """Update electrode colors in the Bokeh plot"""
-        n_electrodes = len(self.electrode_source.data["shank_id"])
-
-        # Pre-allocate numpy arrays for better memory efficiency
-        colors = np.empty(n_electrodes, dtype=object)
-        alphas = np.empty(n_electrodes, dtype=np.float64)
-        line_colors = np.empty(n_electrodes, dtype=object)
-        line_widths = np.empty(n_electrodes, dtype=np.int32)
-        statuses = np.empty(n_electrodes, dtype=object)
-        vals = np.empty(n_electrodes, dtype=np.float64)
-        bar_colors = np.empty(n_electrodes, dtype=object)
-        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
-
-        for i in range(n_electrodes):
-            shank_id = self.electrode_source.data["shank_id"][i]
-            electrode_id = self.electrode_source.data["electrode_id"][i]
-            electrode = Electrode(shank_id, electrode_id)
-
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-
-            colors[i] = color
-            alphas[i] = alpha
-            line_colors[i] = line_color
-            line_widths[i] = line_width
-            statuses[i] = status
-            vals[i] = self._get_survey_val(electrode)
-            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
-
-        # Update the data source with new data, replacing old arrays
+        data = self.electrode_source.data
         self.electrode_source.data.update(
-            {"color": colors.tolist(), "alpha": alphas.tolist(),
-             "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist(), "val": vals.tolist(),
-             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
+            self._electrode_appearance_columns(data["shank_id"].tolist(), data["electrode_id"].tolist())
         )
 
 
@@ -2239,27 +2170,27 @@ class ChannelmapGUI(param.Parameterized):
         dependentdeselect_box_string = "Deselect Dependents"
         zigzagdependentdeselect_box_string = "Zigzag-deselect Dependents"
 
-        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
+        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=_asset_data_uri("selector.png"))
 
         self.box_deselect_tool = BoxSelectTool(
-            description=deselect_box_string, icon=GUI_ASSETS_DIR / "deselector.png"
+            description=deselect_box_string, icon=_asset_data_uri("deselector.png")
         )
 
         self.box_zigzagselect_tool = BoxSelectTool(
-            description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
+            description=zigzagselect_box_string, icon=_asset_data_uri("zigzag_selector.png")
         )
 
         self.box_interleavedselect_tool = BoxSelectTool(
-            description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
+            description=interleavedselect_box_string, icon=_asset_data_uri("interleaved_selector.png")
         )
 
         self.box_dependent_deselect_tool = BoxSelectTool(
-            description=dependentdeselect_box_string, icon=GUI_ASSETS_DIR / "dependent_deselector.png"
+            description=dependentdeselect_box_string, icon=_asset_data_uri("dependent_deselector.png")
         )
 
         self.box_zigzag_dependent_deselect_tool = BoxSelectTool(
             description=zigzagdependentdeselect_box_string,
-            icon=GUI_ASSETS_DIR / "zigzag_dependent_deselector.png",
+            icon=_asset_data_uri("zigzag_dependent_deselector.png"),
         )
 
         # Always-on gesture tools — hidden from toolbar (visible=False).
@@ -2316,6 +2247,12 @@ class ChannelmapGUI(param.Parameterized):
         self.setup_electrode_visualization()
         # Restrict hover tool to electrode rectangles only (prevents ??? on overlay glyphs)
         hover_tool.renderers = [self.electrode_renderer]
+        # Selection tools hit only what shares the electrode data. Left on "auto",
+        # a tap on a shared outline renderer selects that one outline and Bokeh
+        # dims all the others.
+        electrode_renderers = [self.electrode_renderer, self.survey_bar_renderer]
+        for tool in self.plot.select({"type": (TapTool, BoxSelectTool)}):
+            tool.renderers = electrode_renderers
 
         # Set initial y_range so only the bottom third of the probe is visible:
         # probe tips pinned at the bottom, top two-thirds hidden above the frame.
