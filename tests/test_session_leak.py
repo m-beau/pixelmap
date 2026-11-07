@@ -17,11 +17,13 @@ import gc
 import socket
 import time
 import types
+import weakref
 
 import panel as pn
 import pytest
 from bokeh.client import pull_session
 from bokeh.document import Document
+from bokeh.events import DocumentReady
 from panel.io.state import state
 
 from pixelmap.gui import gui as gui_module
@@ -97,6 +99,45 @@ def test_closed_sessions_release_their_gui(server, n_sessions):
     assert _dead_doc_views() == []
 
 
+def _fire_document_ready(bokeh_server, session) -> None:
+    """Sessions build once a browser reports ``document_ready``; ``pull_session`` never does."""
+    doc = session.document
+    bokeh_server.io_loop.add_callback(
+        session.with_document_locked,
+        lambda: doc.callbacks.trigger_event(DocumentReady()),
+    )
+
+
+@pytest.mark.parametrize("n_sessions", [1, 3])
+def test_closed_sessions_that_built_a_gui_release_it(server, n_sessions):
+    url, bokeh_server = server
+    baseline = _live_guis()
+
+    clients = [pull_session(url=url) for _ in range(n_sessions)]
+    for session in _sessions(bokeh_server):
+        _fire_document_ready(bokeh_server, session)
+    _wait_for(lambda: _live_guis() == baseline + n_sessions, 60, "every session to build its GUI")
+    # The swap follows the build on the loop; a close racing it is covered too.
+    for client in clients:
+        client.close()
+
+    _wait_for(lambda: not _sessions(bokeh_server), 30, "server sessions to be discarded")
+    _wait_for(lambda: _live_guis() <= baseline, 15, "dead sessions' GUIs to be collected")
+    assert _dead_doc_views() == []
+
+
+def test_closed_sessions_leave_no_queued_load_behind(server):
+    """A queued onload reaches its document, so Panel's weak mapping would pin it forever."""
+    url, bokeh_server = server
+    client = pull_session(url=url)
+    doc = _sessions(bokeh_server)[0].document
+    assert doc in state._onload  # never loaded: no browser sent document_ready
+
+    client.close()
+    _wait_for(lambda: not _sessions(bokeh_server), 30, "server session to be discarded")
+    _wait_for(lambda: doc not in state._onload, 15, "the queued load to be dropped")
+
+
 # --------------------------------------------------------------------------
 # The hook itself
 # --------------------------------------------------------------------------
@@ -143,6 +184,14 @@ def test_hook_with_no_views_for_doc_is_noop(views):
     views["c"] = (_FakeView(), "root-c", other, None)
     _release_dead_session_views(_ctx(Document()))
     assert set(views) == {"c"}
+
+
+def test_hook_drops_only_the_dead_documents_queued_load(views, monkeypatch):
+    dead, alive = Document(), Document()
+    onload = weakref.WeakKeyDictionary({dead: [("load", False)], alive: [("load", False)]})
+    monkeypatch.setattr(state, "_onload", onload)
+    _release_dead_session_views(_ctx(dead))
+    assert list(onload) == [alive]
 
 
 def test_hook_with_empty_views(views):

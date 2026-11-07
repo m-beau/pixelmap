@@ -6,6 +6,7 @@ Using Bokeh for better interactivity with hover, click, and rectangular selectio
 import asyncio
 import base64
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -13,10 +14,11 @@ import re
 import threading
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -270,6 +272,55 @@ class Electrodes:
 #### GUI app ####
 #################
 
+class ShankOutlineGeometry(NamedTuple):
+    """What a probe's outline draws, ready for one renderer per style."""
+
+    x_limits: tuple[float, float]
+    outline_xs: list[list[float]]
+    outline_ys: list[list[float]]
+    bank_lines_xs: list[list[float]]
+    bank_lines_ys: list[list[float]]
+    shank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+    bank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+
+
+def shank_outline_geometry(positions: np.ndarray, single_shank: bool) -> ShankOutlineGeometry:
+    """Compute outlines, bank lines and labels from ``(shank, electrode, x, y)`` rows."""
+    half_width = 50
+    if single_shank:
+        centers = [0]
+        tip_fraction = 0.1
+        x_limits = (-half_width - 150, half_width + 150)
+    else:
+        centers = [shank_id * 250 for shank_id in range(4)]
+        tip_fraction = 0.08
+        x_limits = (-half_width - 100, centers[-1] + half_width + 100)
+
+    geometry = ShankOutlineGeometry(x_limits, [], [], [], [], ([], [], []), ([], [], []))
+    for shank_id, center in enumerate(centers):
+        ys = positions[positions[:, 0] == shank_id, -1]
+        max_y, min_y = float(np.max(ys)), float(np.min(ys))
+        tip_y = min_y - (max_y - min_y) * tip_fraction
+        left, right = center - half_width, center + half_width
+
+        geometry.outline_xs.append([left, right, right, center, left, left])
+        geometry.outline_ys.append([max_y + 100, max_y + 100, min_y, tip_y, min_y, max_y + 100])
+
+        if not single_shank:
+            geometry.shank_labels[0].append(center)
+            geometry.shank_labels[1].append(tip_y - 250)
+            geometry.shank_labels[2].append(f"Shank {shank_id}")
+
+        for bank, bank_y in enumerate(ys[::384].tolist()):
+            geometry.bank_lines_xs.append([left, right])
+            geometry.bank_lines_ys.append([bank_y, bank_y])
+            if center == centers[-1]:  # bank labels only beside the rightmost shank
+                geometry.bank_labels[0].append(right + 17)
+                geometry.bank_labels[1].append(bank_y)
+                geometry.bank_labels[2].append(f"Bank {bank}")
+    return geometry
+
+
 class ChannelmapGUI(param.Parameterized):
     """Main GUI class for interactive channelmap generation using Bokeh"""
 
@@ -370,10 +421,6 @@ class ChannelmapGUI(param.Parameterized):
         # Create widgets
         self.create_widgets()
 
-        # Register cleanup on session destroy
-        if pn.state.curdoc:
-            pn.state.curdoc.on_session_destroyed(self._cleanup_session)
-
     def _cleanup_session(self, session_context):
         """Clean up resources when session ends"""
 
@@ -441,98 +488,78 @@ class ChannelmapGUI(param.Parameterized):
     def create_electrode_data(self):
         """Create the electrode data for Bokeh visualization"""
         positions = self.positions_df.values
-
-        # Calculate electrode positions and colors
-        electrode_data = {
-            "x": [],
-            "y": [],
-            "width": [],
-            "height": [],
-            "shank_id": [],
-            "electrode_id": [],
-            "color": [],
-            "alpha": [],
-            "line_color": [],
-            "line_width": [],
-            "status": [],
-            "val": [],
-            "bar_x": [],
-            "bar_height": [],
-            "bar_color": [],
-            "bar_alpha": [],
-        }
+        shank_ids, electrode_ids, orig_x, y = positions.T
 
         # Parameters for visualization
         BAR_WIDTH = 16
         BAR_GAP = 4  # gap between shank outline and survey bar
+        shank_width = 100
+        half_span = shank_width * 0.7 / 2
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank
-            shank_width = 100
-            electrode_width = 15
-            electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
-            shank_spacing = None
-        else:
-            # Multi-shank
-            shank_width = 100
-            shank_spacing = 250
-            electrode_width = 12
-            electrode_height = 8
+        # Map each electrode's x position to the drawn shank's width.
+        if self.probe_type == "1.0":
+            electrode_width, electrode_height = 15, 14
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 35) / 24 * half_span
+        elif self.probe_type == "2.0-1shank":
+            electrode_width, electrode_height = 15, 9
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 16) / 16 * half_span
+        else:  # 4-shanks 2.0 or NXT
+            electrode_width, electrode_height = 12, 8
+            x_center_shank = shank_ids * 250
+            x = x_center_shank + (orig_x - x_center_shank - 16) / 16 * half_span
 
         # Bars sit just outside the shank outline, mirroring the column the
         # electrode lives in: left-column contacts → bar on the left of the
         # outline, right-column contacts → bar on the right.
         bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+        bar_x = x_center_shank + np.where(x >= x_center_shank, 1, -1) * bar_offset
 
-        for shank_id, electrode_id, orig_x, y in positions:
+        # Numeric columns are arrays: Bokeh sends those as binary instead of
+        # encoding each of the thousands of values separately.
+        electrode_data = {
+            "x": x,
+            "y": y,
+            "width": np.full(len(positions), electrode_width),
+            "height": np.full(len(positions), electrode_height),
+            "shank_id": shank_ids,
+            "electrode_id": electrode_ids,
+            "bar_x": bar_x,
+            "bar_height": np.full(len(positions), electrode_height * 1.5),
+            **self._electrode_appearance_columns(shank_ids.tolist(), electrode_ids.tolist()),
+        }
 
-            # Map x position to shank width
-            if self.probe_type == "1.0":
-                x_norm = (orig_x - 35) / 24
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            elif self.probe_type == "2.0-1shank":
-                x_norm = (orig_x - 16) / 16
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            else: # 4-shanks 2.0 or NXT
-                # Calculate shank center
-                x_center_shank = shank_id * shank_spacing
-                # Map electrode position within shank
-                x_norm = (orig_x - x_center_shank - 16) / 16
-                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
-
-            # Bar x: just outside the shank outline, on the side matching
-            # the electrode's column relative to the shank center.
-            side = 1 if (x - x_center_shank) >= 0 else -1
-            bar_x = x_center_shank + side * bar_offset
-
-            # Determine electrode status and color
-            electrode = Electrode(shank_id, electrode_id)
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-            val = self._get_survey_val(electrode)
-            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
-
-            electrode_data["x"].append(x)
-            electrode_data["y"].append(y)
-            electrode_data["width"].append(electrode_width)
-            electrode_data["height"].append(electrode_height)
-            electrode_data["shank_id"].append(shank_id)
-            electrode_data["electrode_id"].append(electrode_id)
-            electrode_data["color"].append(color)
-            electrode_data["alpha"].append(alpha)
-            electrode_data["line_color"].append(line_color)
-            electrode_data["line_width"].append(line_width)
-            electrode_data["status"].append(status)
-            electrode_data["val"].append(val)
-            electrode_data["bar_x"].append(bar_x)
-            electrode_data["bar_height"].append(electrode_height * 1.5)
-            electrode_data["bar_color"].append(bar_color)
-            electrode_data["bar_alpha"].append(bar_alpha)
-
-        # Create ColumnDataSource
+        # Not under Bokeh's `validate(False)`, tempting as this is its slowest
+        # step: that toggles a process-global flag, and sessions build on a
+        # worker while `on_probe_type_change` runs here on the loop.  Overlapping
+        # saves and restores would leave validation off for the whole server.
         self.electrode_source = ColumnDataSource(data=electrode_data)
 
+    def _electrode_appearance_columns(self, shank_ids, electrode_ids) -> dict[str, Any]:
+        """Selection- and survey-dependent columns, one value per electrode."""
+        n_electrodes = len(shank_ids)
+        colors = [""] * n_electrodes
+        alphas = np.empty(n_electrodes, dtype=np.float64)
+        line_colors = [""] * n_electrodes
+        line_widths = np.empty(n_electrodes, dtype=np.int32)
+        statuses = [""] * n_electrodes
+        vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = [""] * n_electrodes
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
+
+        for i, (shank_id, electrode_id) in enumerate(zip(shank_ids, electrode_ids, strict=True)):
+            electrode = Electrode(shank_id, electrode_id)
+            statuses[i], colors[i], alphas[i], line_colors[i], line_widths[i] = (
+                self.get_electrode_plotting_params(electrode)
+            )
+            vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
+
+        return {
+            "color": colors, "alpha": alphas, "line_color": line_colors, "line_width": line_widths,
+            "status": statuses, "val": vals, "bar_color": bar_colors, "bar_alpha": bar_alphas,
+        }
 
     def get_electrode_plotting_params(self, electrode: Electrode):
         """Get electrode fill/border appearance based on selection state."""
@@ -610,96 +637,28 @@ class ChannelmapGUI(param.Parameterized):
 
 
     def add_shank_outlines(self):
-        """Add shank outlines and bank labels"""
-        positions = self.positions_df.values
+        """Add shank outlines and bank labels.
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank outline
-            shank_width = 100
-            xlim = [-shank_width / 2 - 150, shank_width / 2 + 150]
-            max_y = np.max(positions[:, -1])
-            min_y = np.min(positions[:, -1])
-            tip_height = (max_y - min_y) * 0.1
+        One renderer per style, not one per shape: each renderer brings about
+        ten Bokeh models, which every session then builds, validates,
+        serialises and sends on the event loop.
+        """
+        geometry = shank_outline_geometry(
+            self.positions_df.values,
+            single_shank=self.probe_type in ["1.0", "2.0-1shank"],
+        )
+        self.plot.x_range = Range1d(*geometry.x_limits)
+        self.plot.multi_line(geometry.outline_xs, geometry.outline_ys, line_width=3, color="black", alpha=1)
+        self.plot.multi_line(geometry.bank_lines_xs, geometry.bank_lines_ys, line_width=2, color="gray", alpha=0.7)
 
-            # Shank outline
-            shank_x = [-shank_width / 2, shank_width / 2, shank_width / 2, 0, -shank_width / 2, -shank_width / 2]
-            shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-            self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-            self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-            # Bank labels
-            for bank_i in np.arange(0, len(positions), 384):
-                if bank_i < len(positions):
-                    bank_y = positions[bank_i, -1]
-                    self.plot.line(
-                        [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
-                    )
-                    self.plot.text(
-                        [shank_width / 2 + 17],
-                        [bank_y],
-                        text=[f"Bank {bank_i // 384}"],
-                        text_font_size="10pt",
-                        text_color="gray",
-                    )
-
-        else:
-            # Multi-shank outlines
-            shank_width = 100
-            shank_spacing = 250
-            xlim = [-shank_width / 2 - 100, 3 * shank_spacing + shank_width / 2 + 100]
-
-            for shank_id in range(4):
-                shank_mask = positions[:, 0] == shank_id
-                x_center = shank_id * shank_spacing
-
-                max_y = np.max(positions[shank_mask, -1])
-                min_y = np.min(positions[shank_mask, -1])
-                tip_height = (max_y - min_y) * 0.08
-
-                # Shank outline
-                shank_x = [
-                    x_center - shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center,
-                    x_center - shank_width / 2,
-                    x_center - shank_width / 2,
-                ]
-                shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-                self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-                self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-                # Shank label
-                self.plot.text(
-                    [x_center],
-                    [min_y - tip_height - 250],
-                    text=[f"Shank {shank_id}"],
-                    text_font_size="12pt",
-                    text_color="black",
-                    text_align="center",
-                )
-
-                # Bank lines and labels
-                for bank_i in np.arange(0, len(positions[shank_mask]), 384):
-                    if bank_i < len(positions[shank_mask]):
-                        bank_y = positions[shank_mask][bank_i, -1]
-                        self.plot.line(
-                            [x_center - shank_width / 2, x_center + shank_width / 2],
-                            [bank_y, bank_y],
-                            line_width=2,
-                            color="gray",
-                            alpha=0.7,
-                        )
-                        if shank_id == 3:  # Bank labels (only on rightmost shank)
-                            self.plot.text(
-                                [x_center + shank_width / 2 + 17],
-                                [bank_y],
-                                text=[f"Bank {bank_i // 384}"],
-                                text_font_size="10pt",
-                                text_color="gray",
-                            )
+        label_xs, label_ys, labels = geometry.shank_labels
+        if labels:
+            self.plot.text(
+                label_xs, label_ys, text=labels,
+                text_font_size="12pt", text_color="black", text_align="center",
+            )
+        label_xs, label_ys, labels = geometry.bank_labels
+        self.plot.text(label_xs, label_ys, text=labels, text_font_size="10pt", text_color="gray")
 
         # Set appropriate axis limits
         self.plot.axis.visible = False
@@ -708,39 +667,9 @@ class ChannelmapGUI(param.Parameterized):
 
     def update_electrode_colors(self):
         """Update electrode colors in the Bokeh plot"""
-        n_electrodes = len(self.electrode_source.data["shank_id"])
-
-        # Pre-allocate numpy arrays for better memory efficiency
-        colors = np.empty(n_electrodes, dtype=object)
-        alphas = np.empty(n_electrodes, dtype=np.float64)
-        line_colors = np.empty(n_electrodes, dtype=object)
-        line_widths = np.empty(n_electrodes, dtype=np.int32)
-        statuses = np.empty(n_electrodes, dtype=object)
-        vals = np.empty(n_electrodes, dtype=np.float64)
-        bar_colors = np.empty(n_electrodes, dtype=object)
-        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
-
-        for i in range(n_electrodes):
-            shank_id = self.electrode_source.data["shank_id"][i]
-            electrode_id = self.electrode_source.data["electrode_id"][i]
-            electrode = Electrode(shank_id, electrode_id)
-
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-
-            colors[i] = color
-            alphas[i] = alpha
-            line_colors[i] = line_color
-            line_widths[i] = line_width
-            statuses[i] = status
-            vals[i] = self._get_survey_val(electrode)
-            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
-
-        # Update the data source with new data, replacing old arrays
+        data = self.electrode_source.data
         self.electrode_source.data.update(
-            {"color": colors.tolist(), "alpha": alphas.tolist(),
-             "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist(), "val": vals.tolist(),
-             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
+            self._electrode_appearance_columns(data["shank_id"].tolist(), data["electrode_id"].tolist())
         )
 
 
@@ -2239,27 +2168,27 @@ class ChannelmapGUI(param.Parameterized):
         dependentdeselect_box_string = "Deselect Dependents"
         zigzagdependentdeselect_box_string = "Zigzag-deselect Dependents"
 
-        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
+        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=_asset_data_uri("selector.png"))
 
         self.box_deselect_tool = BoxSelectTool(
-            description=deselect_box_string, icon=GUI_ASSETS_DIR / "deselector.png"
+            description=deselect_box_string, icon=_asset_data_uri("deselector.png")
         )
 
         self.box_zigzagselect_tool = BoxSelectTool(
-            description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
+            description=zigzagselect_box_string, icon=_asset_data_uri("zigzag_selector.png")
         )
 
         self.box_interleavedselect_tool = BoxSelectTool(
-            description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
+            description=interleavedselect_box_string, icon=_asset_data_uri("interleaved_selector.png")
         )
 
         self.box_dependent_deselect_tool = BoxSelectTool(
-            description=dependentdeselect_box_string, icon=GUI_ASSETS_DIR / "dependent_deselector.png"
+            description=dependentdeselect_box_string, icon=_asset_data_uri("dependent_deselector.png")
         )
 
         self.box_zigzag_dependent_deselect_tool = BoxSelectTool(
             description=zigzagdependentdeselect_box_string,
-            icon=GUI_ASSETS_DIR / "zigzag_dependent_deselector.png",
+            icon=_asset_data_uri("zigzag_dependent_deselector.png"),
         )
 
         # Always-on gesture tools — hidden from toolbar (visible=False).
@@ -2316,6 +2245,12 @@ class ChannelmapGUI(param.Parameterized):
         self.setup_electrode_visualization()
         # Restrict hover tool to electrode rectangles only (prevents ??? on overlay glyphs)
         hover_tool.renderers = [self.electrode_renderer]
+        # Selection tools hit only what shares the electrode data. Left on "auto",
+        # a tap on a shared outline renderer selects that one outline and Bokeh
+        # dims all the others.
+        electrode_renderers = [self.electrode_renderer, self.survey_bar_renderer]
+        for tool in self.plot.select({"type": (TapTool, BoxSelectTool)}):
+            tool.renderers = electrode_renderers
 
         # Set initial y_range so only the bottom third of the probe is visible:
         # probe tips pinned at the bottom, top two-thirds hidden above the frame.
@@ -3386,6 +3321,108 @@ def _release_dead_session_views(session_context):
         except Exception as exc:  # noqa: BLE001 - a failed cleanup must not keep the session pinned
             print(f"View cleanup failed for {type(view).__name__}: {exc}")
         pn.state._views.pop(ref, None)
+    # A session that never loaded still has its build queued here, and that
+    # callback reaches the document, so the WeakKeyDictionary would never let go.
+    pn.state._onload.pop(doc, None)
+
+
+# Session builds run here, one at a time: a burst of visitors then queues rather
+# than fighting the loop for the GIL, at the price of the last one waiting longest.
+_SESSION_BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pixelmap-session-build")
+
+
+class _SessionContent(NamedTuple):
+    gui: ChannelmapGUI
+    analytics_tracker: AnalyticsSessionTracker
+    children: list
+
+
+def _build_session_content(cfg: str | None) -> _SessionContent:
+    """Construct a session's GUI.  Runs on a worker under a server: no document access.
+
+    Nothing here is attached to a document yet, so changing these objects has no
+    effect on one.  Whatever needs the document or the request belongs in
+    `create_app` or `_fill_session`, which run on the loop.
+    """
+    gui = ChannelmapGUI()
+    if cfg:
+        try:
+            applied = gui.apply_url_state(cfg)
+            if not applied:
+                print("Ignored invalid or unsupported ?cfg= share link.")
+        except Exception as e:  # noqa: BLE001 - a bad share link must not break app start
+            print(f"Failed to apply shared layout from URL: {e}")
+
+    analytics_tracker = AnalyticsSessionTracker()
+    layout = gui.create_layout()
+
+    # Update status initially
+    gui.update_electrode_counter()
+    return _SessionContent(gui, analytics_tracker, [analytics_tracker.cookie_bridge, layout])
+
+
+def _register_session_hooks(doc, content: _SessionContent) -> None:
+    doc.on_session_destroyed(content.gui._cleanup_session)
+    doc.on_session_destroyed(content.analytics_tracker.handle_session_destroyed)
+
+
+def _report_startup_failure(exc: Exception) -> pn.pane.Alert:
+    """Report a failed session build; returns what to show the visitor instead of a blank page."""
+    error_reporting.report_error(exc, context="session startup", notify_user=False)
+    return pn.pane.Alert(
+        "PixelMap failed to start. Please reload the page; if this keeps "
+        "happening, report it at https://github.com/m-beau/pixelmap/issues.",
+        alert_type="danger",
+    )
+
+
+async def _fill_session(app_layout: pn.Column, cfg: str | None) -> None:
+    """Build the GUI on the worker, then swap it into ``app_layout`` on the loop.
+
+    Deliberately not ``with_lock``: Bokeh holds the lock across an ``await``, and
+    a locked session can't be discarded, so a closed tab would pin its session
+    until its turn in the queue.  Only the swap takes the lock.  The session can
+    therefore die during either ``await`` -- the checks below are on the loop, as
+    is the discard, so nothing can change between a check and what follows it.
+    """
+    doc = pn.state.curdoc
+    session_context = doc.session_context
+
+    def build() -> _SessionContent | None:
+        if session_context.destroyed:  # closed while queued
+            return None
+        return _build_session_content(cfg)
+
+    def show(children: list) -> None:
+        # Bokeh drops every pending write if a locked callback raises, so a
+        # failed swap must end here, with the alert, not in Panel's handler.
+        try:
+            app_layout[:] = children
+        except Exception as exc:  # noqa: BLE001 - any failure gets the error page
+            app_layout[:] = [_report_startup_failure(exc)]
+
+    try:
+        # The copied context is what makes `pn.state.curdoc` this session's in
+        # the worker.  Without it Panel falls back to Bokeh's process-global
+        # curdoc, which is whichever session the loop is serving at that moment.
+        content = await asyncio.get_running_loop().run_in_executor(
+            _SESSION_BUILD_EXECUTOR, contextvars.copy_context().run, build
+        )
+    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
+        alert = _report_startup_failure(exc)
+        if not session_context.destroyed:
+            pn.state.execute(functools.partial(show, [alert]), schedule=True)
+        return
+
+    if content is None:
+        return
+    if session_context.destroyed:
+        content.gui._cleanup_session(session_context)
+        return
+    # Before the swap, which waits for the lock: from here a closing tab cleans up.
+    _register_session_hooks(doc, content)
+    app_layout._analytics_tracker = content.analytics_tracker
+    pn.state.execute(functools.partial(show, content.children), schedule=True)
 
 
 def create_app():
@@ -3404,36 +3441,27 @@ def create_app():
     )
     error_reporting.install_loop_handler()
 
-    try:
-        gui = ChannelmapGUI()
-    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
-        # Show the visitor something instead of a blank page.
-        error_reporting.report_error(exc, context="session startup", notify_user=False)
-        return pn.pane.Alert(
-            "PixelMap failed to start. Please reload the page; if this keeps "
-            "happening, report it at https://github.com/m-beau/pixelmap/issues.",
-            alert_type="danger",
-        )
-
+    # Read on the loop: a worker can't be trusted with the current request.
     cfg = _extract_cfg_from_session_args()
-    if cfg:
-        try:
-            applied = gui.apply_url_state(cfg)
-            if not applied:
-                print("Ignored invalid or unsupported ?cfg= share link.")
-        except Exception as e:  # noqa: BLE001 - a bad share link must not break app start
-            print(f"Failed to apply shared layout from URL: {e}")
+    doc = pn.state.curdoc
 
-    analytics_tracker = AnalyticsSessionTracker()
-    layout = gui.create_layout()
+    if doc is not None and doc.session_context is not None:
+        # Served: answer right away and build once the page has connected.
+        doc.on_session_destroyed(_release_dead_session_views)
+        app_layout = pn.Column(pn.pane.HTML("Loading PixelMap…"), margin=0)
+        pn.state.onload(functools.partial(_fill_session, app_layout, cfg))
+        return app_layout
 
-    # Update status initially
-    gui.update_electrode_counter()
+    # No session (scripts, tests): nothing else is waiting on this thread.
+    try:
+        content = _build_session_content(cfg)
+    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
+        return _report_startup_failure(exc)
 
-    if pn.state.curdoc:
-        pn.state.curdoc.on_session_destroyed(analytics_tracker.handle_session_destroyed)
-        pn.state.curdoc.on_session_destroyed(_release_dead_session_views)
+    if doc is not None:
+        doc.on_session_destroyed(_release_dead_session_views)
+        _register_session_hooks(doc, content)
 
-    app_layout = pn.Column(analytics_tracker.cookie_bridge, layout, margin=0)
-    app_layout._analytics_tracker = analytics_tracker
+    app_layout = pn.Column(*content.children, margin=0)
+    app_layout._analytics_tracker = content.analytics_tracker
     return app_layout
