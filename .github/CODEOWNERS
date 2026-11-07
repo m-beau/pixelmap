@@ -1,0 +1,43 @@
+# GitHub uses the last matching rule for each file.
+# Deployment, operations, and anything not assigned below.
+* @tabedzki
+
+# Backend: public API, channel-map generation, probe definitions, and wiring.
+/pixelmap/__init__.py @m-beau
+/pixelmap/backend.py @m-beau
+/pixelmap/constants.py @m-beau
+/pixelmap/types.py @m-beau
+/pixelmap/wiring_maps/ @m-beau
+/pixelmap/utils/imro.py @m-beau
+/pixelmap/utils/probe_features.py @m-beau
+/pixelmap/utils/survey.py @m-beau
+/pixelmap/anatomy/ @m-beau
+/scripts/refresh_registry_snapshot.py @m-beau
+/generate_channel_maps.ipynb @m-beau
+
+# Tests and reference data for backend behavior.
+/tests/test_backend.py @m-beau
+/tests/test_core_functionality.py @m-beau
+/tests/test_public_api.py @m-beau
+/tests/test_imro*.py @m-beau
+/tests/test_wiring*.py @m-beau
+/tests/test_survey.py @m-beau
+/tests/test_anatomy*.py @m-beau
+/tests/generate_imro_reference.py @m-beau
+/tests/fixtures/ @m-beau
+
+# Documentation, paper, and example layouts.
+*.md @m-beau
+*.rst @m-beau
+/docs/ @m-beau
+/paper/ @m-beau
+/example*/ @m-beau
+/CITATION.cff @m-beau
+
+# GUI changes request review from both maintainers.
+/pixelmap/gui/ @tabedzki @m-beau
+/tests/test_gui*.py @tabedzki @m-beau
+
+# Documentation build infrastructure remains part of deployment.
+/docs/conf.py @tabedzki
+/.readthedocs.yaml @tabedzki
