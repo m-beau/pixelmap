@@ -77,12 +77,12 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions.
 #
-# This module-level call only covers notebook/library use and the *first*
-# session of a server. `pn.config.notifications` is stored per-session
-# (keyed on `pn.state.curdoc`), and under `panel serve` this module is
-# imported inside the first session's document context, so every later
-# session would inherit the default of False. `create_app` therefore
-# repeats the call per session -- see the note there.
+# This module-level call only covers notebook/library use.
+# `pn.config.notifications` is stored per-session (keyed on `pn.state.curdoc`),
+# and under `panel serve` this module is imported once, by the startup warmup
+# or by whichever session comes first, so later sessions wouldn't be
+# configured by it. `create_app` therefore repeats the call per session -- see
+# the note there.
 PANEL_EXTENSIONS = ("tabulator",)
 pn.extension(*PANEL_EXTENSIONS, notifications=True)
 
@@ -3392,9 +3392,9 @@ def create_app():
     """Create and configure the Panel app"""
     # Re-arm the extensions for *this* session. Panel keys `config` on the
     # current document, so the module-level `pn.extension` above only ever
-    # configured whichever session happened to trigger the import -- under
-    # `panel serve` that is session #1, and everyone after it got
-    # `pn.state.notifications is None`. Must stay inside the app factory.
+    # configured whatever happened to trigger the import, and without this
+    # sessions get `pn.state.notifications is None`. Must stay inside the app
+    # factory.
     # `exception_handler` is per-session for the same reason: it turns any
     # callback error into a toast + webhook report instead of a re-raise.
     pn.extension(
