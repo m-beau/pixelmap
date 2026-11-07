@@ -6,6 +6,7 @@ Using Bokeh for better interactivity with hover, click, and rectangular selectio
 import asyncio
 import base64
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -13,6 +14,7 @@ import re
 import threading
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -24,7 +26,6 @@ import pandas as pd
 import panel as pn
 import param
 from bokeh import events
-from bokeh.core.properties import validate
 from bokeh.models import (
     BoxSelectTool,
     ColorBar,
@@ -420,10 +421,6 @@ class ChannelmapGUI(param.Parameterized):
         # Create widgets
         self.create_widgets()
 
-        # Register cleanup on session destroy
-        if pn.state.curdoc:
-            pn.state.curdoc.on_session_destroyed(self._cleanup_session)
-
     def _cleanup_session(self, session_context):
         """Clean up resources when session ends"""
 
@@ -533,10 +530,11 @@ class ChannelmapGUI(param.Parameterized):
             **self._electrode_appearance_columns(shank_ids.tolist(), electrode_ids.tolist()),
         }
 
-        # Skip Bokeh's check of every cell, which took half of this method and
-        # runs on the event loop for each session: the shape is fixed right here.
-        with validate(False):
-            self.electrode_source = ColumnDataSource(data=electrode_data)
+        # Not under Bokeh's `validate(False)`, tempting as this is its slowest
+        # step: that toggles a process-global flag, and sessions build on a
+        # worker while `on_probe_type_change` runs here on the loop.  Overlapping
+        # saves and restores would leave validation off for the whole server.
+        self.electrode_source = ColumnDataSource(data=electrode_data)
 
     def _electrode_appearance_columns(self, shank_ids, electrode_ids) -> dict[str, Any]:
         """Selection- and survey-dependent columns, one value per electrode."""
@@ -3323,6 +3321,108 @@ def _release_dead_session_views(session_context):
         except Exception as exc:  # noqa: BLE001 - a failed cleanup must not keep the session pinned
             print(f"View cleanup failed for {type(view).__name__}: {exc}")
         pn.state._views.pop(ref, None)
+    # A session that never loaded still has its build queued here, and that
+    # callback reaches the document, so the WeakKeyDictionary would never let go.
+    pn.state._onload.pop(doc, None)
+
+
+# Session builds run here, one at a time: a burst of visitors then queues rather
+# than fighting the loop for the GIL, at the price of the last one waiting longest.
+_SESSION_BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pixelmap-session-build")
+
+
+class _SessionContent(NamedTuple):
+    gui: ChannelmapGUI
+    analytics_tracker: AnalyticsSessionTracker
+    children: list
+
+
+def _build_session_content(cfg: str | None) -> _SessionContent:
+    """Construct a session's GUI.  Runs on a worker under a server: no document access.
+
+    Nothing here is attached to a document yet, so changing these objects has no
+    effect on one.  Whatever needs the document or the request belongs in
+    `create_app` or `_fill_session`, which run on the loop.
+    """
+    gui = ChannelmapGUI()
+    if cfg:
+        try:
+            applied = gui.apply_url_state(cfg)
+            if not applied:
+                print("Ignored invalid or unsupported ?cfg= share link.")
+        except Exception as e:  # noqa: BLE001 - a bad share link must not break app start
+            print(f"Failed to apply shared layout from URL: {e}")
+
+    analytics_tracker = AnalyticsSessionTracker()
+    layout = gui.create_layout()
+
+    # Update status initially
+    gui.update_electrode_counter()
+    return _SessionContent(gui, analytics_tracker, [analytics_tracker.cookie_bridge, layout])
+
+
+def _register_session_hooks(doc, content: _SessionContent) -> None:
+    doc.on_session_destroyed(content.gui._cleanup_session)
+    doc.on_session_destroyed(content.analytics_tracker.handle_session_destroyed)
+
+
+def _report_startup_failure(exc: Exception) -> pn.pane.Alert:
+    """Report a failed session build; returns what to show the visitor instead of a blank page."""
+    error_reporting.report_error(exc, context="session startup", notify_user=False)
+    return pn.pane.Alert(
+        "PixelMap failed to start. Please reload the page; if this keeps "
+        "happening, report it at https://github.com/m-beau/pixelmap/issues.",
+        alert_type="danger",
+    )
+
+
+async def _fill_session(app_layout: pn.Column, cfg: str | None) -> None:
+    """Build the GUI on the worker, then swap it into ``app_layout`` on the loop.
+
+    Deliberately not ``with_lock``: Bokeh holds the lock across an ``await``, and
+    a locked session can't be discarded, so a closed tab would pin its session
+    until its turn in the queue.  Only the swap takes the lock.  The session can
+    therefore die during either ``await`` -- the checks below are on the loop, as
+    is the discard, so nothing can change between a check and what follows it.
+    """
+    doc = pn.state.curdoc
+    session_context = doc.session_context
+
+    def build() -> _SessionContent | None:
+        if session_context.destroyed:  # closed while queued
+            return None
+        return _build_session_content(cfg)
+
+    def show(children: list) -> None:
+        # Bokeh drops every pending write if a locked callback raises, so a
+        # failed swap must end here, with the alert, not in Panel's handler.
+        try:
+            app_layout[:] = children
+        except Exception as exc:  # noqa: BLE001 - any failure gets the error page
+            app_layout[:] = [_report_startup_failure(exc)]
+
+    try:
+        # The copied context is what makes `pn.state.curdoc` this session's in
+        # the worker.  Without it Panel falls back to Bokeh's process-global
+        # curdoc, which is whichever session the loop is serving at that moment.
+        content = await asyncio.get_running_loop().run_in_executor(
+            _SESSION_BUILD_EXECUTOR, contextvars.copy_context().run, build
+        )
+    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
+        alert = _report_startup_failure(exc)
+        if not session_context.destroyed:
+            pn.state.execute(functools.partial(show, [alert]), schedule=True)
+        return
+
+    if content is None:
+        return
+    if session_context.destroyed:
+        content.gui._cleanup_session(session_context)
+        return
+    # Before the swap, which waits for the lock: from here a closing tab cleans up.
+    _register_session_hooks(doc, content)
+    app_layout._analytics_tracker = content.analytics_tracker
+    pn.state.execute(functools.partial(show, content.children), schedule=True)
 
 
 def create_app():
@@ -3341,36 +3441,27 @@ def create_app():
     )
     error_reporting.install_loop_handler()
 
-    try:
-        gui = ChannelmapGUI()
-    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
-        # Show the visitor something instead of a blank page.
-        error_reporting.report_error(exc, context="session startup", notify_user=False)
-        return pn.pane.Alert(
-            "PixelMap failed to start. Please reload the page; if this keeps "
-            "happening, report it at https://github.com/m-beau/pixelmap/issues.",
-            alert_type="danger",
-        )
-
+    # Read on the loop: a worker can't be trusted with the current request.
     cfg = _extract_cfg_from_session_args()
-    if cfg:
-        try:
-            applied = gui.apply_url_state(cfg)
-            if not applied:
-                print("Ignored invalid or unsupported ?cfg= share link.")
-        except Exception as e:  # noqa: BLE001 - a bad share link must not break app start
-            print(f"Failed to apply shared layout from URL: {e}")
+    doc = pn.state.curdoc
 
-    analytics_tracker = AnalyticsSessionTracker()
-    layout = gui.create_layout()
+    if doc is not None and doc.session_context is not None:
+        # Served: answer right away and build once the page has connected.
+        doc.on_session_destroyed(_release_dead_session_views)
+        app_layout = pn.Column(pn.pane.HTML("Loading PixelMap…"), margin=0)
+        pn.state.onload(functools.partial(_fill_session, app_layout, cfg))
+        return app_layout
 
-    # Update status initially
-    gui.update_electrode_counter()
+    # No session (scripts, tests): nothing else is waiting on this thread.
+    try:
+        content = _build_session_content(cfg)
+    except Exception as exc:  # noqa: BLE001 - any startup failure gets an error page
+        return _report_startup_failure(exc)
 
-    if pn.state.curdoc:
-        pn.state.curdoc.on_session_destroyed(analytics_tracker.handle_session_destroyed)
-        pn.state.curdoc.on_session_destroyed(_release_dead_session_views)
+    if doc is not None:
+        doc.on_session_destroyed(_release_dead_session_views)
+        _register_session_hooks(doc, content)
 
-    app_layout = pn.Column(analytics_tracker.cookie_bridge, layout, margin=0)
-    app_layout._analytics_tracker = analytics_tracker
+    app_layout = pn.Column(*content.children, margin=0)
+    app_layout._analytics_tracker = content.analytics_tracker
     return app_layout
