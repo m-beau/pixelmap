@@ -95,7 +95,7 @@ Type electrode ranges directly, e.g. `1-10,20-25`, to add them to the current se
 
 You can hover over any electrode to see its ID, shank, depth (Z position), and current status in a tooltip. Clicking a single electrode (de)selects it.
 
-You can also drag boxes to (de)select ranges of electrodes with one of five box tools (select the active tool from the toolbar on the right of the probe plot):
+You can also drag boxes to (de)select ranges of electrodes with one of six box tools (select the active tool from the toolbar on the right of the probe plot):
 
 ```{list-table}
 :widths: 12 88
@@ -120,6 +120,10 @@ You can also drag boxes to (de)select ranges of electrodes with one of five box 
     :height: 40px
     :::
   - **Deselect dependents** — drag over unavailable (black) electrodes to find the selected (red) electrodes that blocked them due to shared lines or ADCs, and deselect those selected electrodes, freeing the blocked electrodes and all their other dependents.
+* - :::{image} _static/zigzag_dependent_deselector.png
+    :height: 40px
+    :::
+  - **Zigzag-deselect dependents** — drag over blocked electrodes to free only the fixed zigzag-pattern sites by deselecting the red electrodes blocking them, wherever they sit (inside or outside the box). Only zigzag-pattern red electrodes can be blockers, so the complementary non-zigzag sites stay selected. This tool selects nothing.
 ```
 
 ##### In which order are electrodes selected inside a box?
@@ -131,7 +135,7 @@ The order is invisible most of the time, because every electrode in the box ends
 The same first-come-first-served rule applies to textual selection (electrode IDs are consumed in the order you write them).
 
 :::{tip}
-The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere elese on the probe then use the regular selection box to select the remaining available electrodes (your target).
+The zigzag and interleaved selector always select the same preset of electrodes independently from where you start dragging the box (e.g. the interleaved selector will always select sites 1-2, 5-6, 9-10, never 3-4, 7-8, 11-12...). If you want to select the complementary channels of a range (e.g. not 1-2, 5-6, 9-10 but instead 3-4, 7-8, 11-12...), you can either use the textual selection box, or you can first make (1-2, 5-6, 9-10) unavailable through zigzag/interleaved-selecting associated electrodes somewhere else on the probe then use the regular selection box to select the remaining available electrodes (your target).
 :::
 
 

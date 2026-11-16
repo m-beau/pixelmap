@@ -67,6 +67,7 @@ INCIDENTAL_NAMES = [
     "pickle",
     "Path",
     "PatchCollection",
+    "PolyCollection",
     "pn",
 ]
 
@@ -202,3 +203,13 @@ def test_documented_workflow_round_trips(tmp_path, probe_type, preset):
     assert parsed_probe_type == probe_type
     assert len(selected) == 384
     assert len(np.unique(selected, axis=0)) == 384
+
+
+def test_importing_the_package_does_not_load_the_gui_stack():
+    """Script/API users shouldn't pay ~0.7 s to import Panel and Bokeh."""
+    import subprocess
+    import sys
+
+    code = "import sys, pixelmap; print(sorted({'panel', 'bokeh'} & set(sys.modules)))"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"

@@ -68,7 +68,11 @@ log "NUM_PROCS $NUM_PROCS"
 #
 # --mem-log-frequency periodically logs RSS (via psutil) so an OOM kill
 # (SIGKILL, exit 137) leaves a trail in the logs instead of nothing.
+#
+# --setup warms what the first session would otherwise load on the event loop,
+# freezing every session and /liveness (see scripts/warm_first_session.py).
 exec "$PYTHON_BIN" -m panel serve ./app.py \
+    --setup ./scripts/warm_first_session.py \
     --address "$ADDRESS" \
     --port "$INTERNAL_PORT" \
     --allow-websocket-origin "$ALLOW_WEBSOCKET_ORIGIN" \

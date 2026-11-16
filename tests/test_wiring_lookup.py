@@ -51,7 +51,7 @@ def _reference_forbidden(selected_electrodes, wiring_df):
             for se in table_ids[table_row]
             if (~np.any(np.isnan(se))) & ~((shank_id == se[0]) & (electrode_id == se[1]))
         ]
-    return np.array(forbidden_electrodes).astype(int)
+    return np.array(forbidden_electrodes).astype(int).reshape(-1, 2)
 
 
 def _reference_coordinates(electrodes, wiring_df):
@@ -163,8 +163,8 @@ def test_empty_selection(probe):
     empty = np.zeros((0, 2), dtype=int)
     got = backend.find_forbidden_electrodes(empty, wiring_df)
     want = _reference_forbidden(empty, wiring_df)
-    # The original returns a 1-D empty array; callers depend on that shape.
-    assert got.shape == want.shape == (0,)
+    # (0, 2), not 1-D: callers index columns (plot_probe_layout crashed on 1-D).
+    assert got.shape == want.shape == (0, 2)
     assert backend.find_electrode_coordinates(empty, wiring_df) == []
 
 
@@ -231,3 +231,37 @@ def test_lookups_much_faster_than_per_electrode_scan():
         backend.find_electrode_coordinates(sel, wiring_df),
     ))
     assert new * 5 < old, f"new {new * 1000:.0f} ms vs reference {old * 1000:.0f} ms"
+
+
+# --------------------------------------------------------------------------
+# Wiring-map rebuild
+# --------------------------------------------------------------------------
+
+def _copy_wiring_csvs(tmp_path):
+    for csv in WIRING_DIR.glob("*.csv"):
+        (tmp_path / csv.name).write_bytes(csv.read_bytes())
+    return tmp_path
+
+
+def test_rebuilt_wiring_maps_match_the_shipped_cache(tmp_path):
+    """No pickle: the maps are rebuilt from the CSVs, identical to the shipped ones."""
+    import pickle
+
+    rebuilt = backend._load_wiring_maps(str(_copy_wiring_csvs(tmp_path)))
+    with open(WIRING_DIR / "wiring_maps.pkl", "rb") as f:
+        shipped = pickle.load(f)
+    assert {k: dict(v) for k, v in rebuilt.items()} == {
+        k: {e: frozenset(c) for e, c in v.items()} for k, v in shipped.items()
+    }
+
+
+def test_rebuild_indexes_each_wiring_table_once(tmp_path, monkeypatch):
+    """Re-indexing per electrode made a cold rebuild take ~55 s, inside the
+    first session's GUI constructor on the event loop."""
+    calls = []
+    real = backend._wiring_index
+    monkeypatch.setattr(backend, "_wiring_index", lambda df: calls.append(1) or real(df))
+
+    backend._load_wiring_maps(str(_copy_wiring_csvs(tmp_path)))
+
+    assert len(calls) == len(WIRING_FILE_MAP)

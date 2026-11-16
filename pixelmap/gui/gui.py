@@ -5,6 +5,7 @@ Using Bokeh for better interactivity with hover, click, and rectangular selectio
 
 import asyncio
 import base64
+import contextlib
 import functools
 import json
 import logging
@@ -15,6 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import Path
+from typing import Any, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +24,7 @@ import pandas as pd
 import panel as pn
 import param
 from bokeh import events
+from bokeh.core.properties import validate
 from bokeh.models import (
     BoxSelectTool,
     ColorBar,
@@ -58,6 +61,7 @@ from pixelmap.constants import (
     SUPPORTED_QuadBase_PRESETS,
 )
 from pixelmap.error_reporting import guarded
+from pixelmap.error_reporting import notify as _notify
 from pixelmap.types import Electrode
 from pixelmap.utils import imro, survey, url_share
 from pixelmap.utils.survey import default_survey_range
@@ -74,29 +78,12 @@ DEFAULT_PORT = 5007
 
 # Enable Panel extensions.
 #
-# This module-level call only covers notebook/library use and the *first*
-# session of a server. `pn.config.notifications` is stored per-session
-# (keyed on `pn.state.curdoc`), and under `panel serve` this module is
-# imported inside the first session's document context, so every later
-# session would inherit the default of False. `create_app` therefore
-# repeats the call per session -- see the note there.
+# This module-level call is for notebook/library use. `create_app` repeats it
+# per session -- see the note there.
 PANEL_EXTENSIONS = ("tabulator",)
 pn.extension(*PANEL_EXTENSIONS, notifications=True)
 
 
-def _notify(level: str, message: str, **kwargs) -> None:
-    """Emit a Panel notification, or do nothing if the session has no area.
-
-    `pn.state.notifications` is None outside a served session (tests, scripts).
-    Reaching through it unguarded raises inside a Bokeh callback, and Bokeh
-    discards every pending document write when a locked callback raises -- so
-    one missing notification silently loses all the plot updates the callback
-    had already made. Swallowing the notification is always the lesser evil.
-    """
-    notifications = pn.state.notifications
-    if notifications is None:
-        return
-    getattr(notifications, level)(message, **kwargs)
 
 
 @functools.lru_cache(maxsize=16)
@@ -122,6 +109,60 @@ def _darken_hex(hex_color: str, factor: float = 0.6) -> str:
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _measure_tip_depth(tip, pitch_deg, yaw_deg, atlas_name) -> float | None:
+    """Tip-to-surface depth in µm, or ``None`` if outside or the lookup fails."""
+    try:
+        return tip_depth_below_surface_um(
+            tip, pitch_deg=pitch_deg, yaw_deg=yaw_deg, atlas_name=atlas_name
+        )
+    except Exception as exc:  # noqa: BLE001 - a readout must never sink the GUI
+        print(f"Tip depth lookup failed: {exc}")
+        return None
+
+
+_BUTTON_COMPUTE = "Compute anatomical overlay 🧠"
+_BUTTON_DOWNLOAD = "Download & compute atlas 🧠 ⏳"
+_BUTTON_DOWNLOADING = "Downloading atlas… (first use only)"
+
+
+@dataclass(frozen=True)
+class _AnatomyRequest:
+    """Every input an overlay compute reads, snapshotted on the event loop.
+
+    The compute itself runs in a worker thread, which must not touch widgets:
+    Panel/Bokeh models are only safe to read and write under the document lock.
+    Capturing everything up front also pins the atlas, so a dropdown change
+    mid-compute can't make one render mix two atlases.
+    """
+
+    atlas_name: str
+    probe_xs: dict
+    plot_centers: dict
+    y_max: float
+    tip: tuple
+    pitch_deg: float
+    yaw_deg: float
+    shank_orientation_deg: float
+    bregma_um: tuple | None
+    ap_squish: float
+    ml_squish: float
+    dv_squish: float
+    tilt_deg: float
+    generation: int
+    locator_fig: Any = None  # reused across renders; see _compute_anatomy
+
+
+@dataclass
+class _AnatomyResult:
+    """What a worker-thread compute hands back for the loop to draw."""
+
+    bands: list | None = None
+    error: Exception | None = None
+    locator_html: str | None = None
+    tip_depth: float | None = None
+    locator_fig: Any = None
 
 
 ###################################
@@ -226,6 +267,55 @@ class Electrodes:
 #### GUI app ####
 #################
 
+class ShankOutlineGeometry(NamedTuple):
+    """What a probe's outline draws, ready for one renderer per style."""
+
+    x_limits: tuple[float, float]
+    outline_xs: list[list[float]]
+    outline_ys: list[list[float]]
+    bank_lines_xs: list[list[float]]
+    bank_lines_ys: list[list[float]]
+    shank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+    bank_labels: tuple[list[float], list[float], list[str]]  # xs, ys, texts
+
+
+def shank_outline_geometry(positions: np.ndarray, single_shank: bool) -> ShankOutlineGeometry:
+    """Compute outlines, bank lines and labels from ``(shank, electrode, x, y)`` rows."""
+    half_width = 50
+    if single_shank:
+        centers = [0]
+        tip_fraction = 0.1
+        x_limits = (-half_width - 150, half_width + 150)
+    else:
+        centers = [shank_id * 250 for shank_id in range(4)]
+        tip_fraction = 0.08
+        x_limits = (-half_width - 100, centers[-1] + half_width + 100)
+
+    geometry = ShankOutlineGeometry(x_limits, [], [], [], [], ([], [], []), ([], [], []))
+    for shank_id, center in enumerate(centers):
+        ys = positions[positions[:, 0] == shank_id, -1]
+        max_y, min_y = float(np.max(ys)), float(np.min(ys))
+        tip_y = min_y - (max_y - min_y) * tip_fraction
+        left, right = center - half_width, center + half_width
+
+        geometry.outline_xs.append([left, right, right, center, left, left])
+        geometry.outline_ys.append([max_y + 100, max_y + 100, min_y, tip_y, min_y, max_y + 100])
+
+        if not single_shank:
+            geometry.shank_labels[0].append(center)
+            geometry.shank_labels[1].append(tip_y - 250)
+            geometry.shank_labels[2].append(f"Shank {shank_id}")
+
+        for bank, bank_y in enumerate(ys[::384].tolist()):
+            geometry.bank_lines_xs.append([left, right])
+            geometry.bank_lines_ys.append([bank_y, bank_y])
+            if center == centers[-1]:  # bank labels only beside the rightmost shank
+                geometry.bank_labels[0].append(right + 17)
+                geometry.bank_labels[1].append(bank_y)
+                geometry.bank_labels[2].append(f"Bank {bank}")
+    return geometry
+
+
 class ChannelmapGUI(param.Parameterized):
     """Main GUI class for interactive channelmap generation using Bokeh"""
 
@@ -301,6 +391,21 @@ class ChannelmapGUI(param.Parameterized):
         self.survey_color_bar = None
         self.survey_color_bar_title = None
         self._survey_range_suspend = False
+
+        # Anatomy overlay state.  Once an overlay is requested, live-update it
+        # whenever any pose / bregma / squish / tilt input changes; set on
+        # Compute, not on the first draw, so edits made while that first
+        # compute runs reach it too.
+        self._anatomy_overlay_active = False
+        # Off-loop compute bookkeeping (see _drain_anatomy_requests): whether
+        # inputs changed since the last compute started, whether a compute is
+        # running, a counter bumped by Clear so a compute that outlives its
+        # overlay is dropped, and a flag batched field writes set to hold off
+        # recomputes until they're done.
+        self._anatomy_dirty = False
+        self._anatomy_compute_running = False
+        self._anatomy_generation = 0
+        self._suppress_anatomy_recompute = False
 
         # Load initial data
         self.load_probe_data()
@@ -382,98 +487,77 @@ class ChannelmapGUI(param.Parameterized):
     def create_electrode_data(self):
         """Create the electrode data for Bokeh visualization"""
         positions = self.positions_df.values
-
-        # Calculate electrode positions and colors
-        electrode_data = {
-            "x": [],
-            "y": [],
-            "width": [],
-            "height": [],
-            "shank_id": [],
-            "electrode_id": [],
-            "color": [],
-            "alpha": [],
-            "line_color": [],
-            "line_width": [],
-            "status": [],
-            "val": [],
-            "bar_x": [],
-            "bar_height": [],
-            "bar_color": [],
-            "bar_alpha": [],
-        }
+        shank_ids, electrode_ids, orig_x, y = positions.T
 
         # Parameters for visualization
         BAR_WIDTH = 16
         BAR_GAP = 4  # gap between shank outline and survey bar
+        shank_width = 100
+        half_span = shank_width * 0.7 / 2
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank
-            shank_width = 100
-            electrode_width = 15
-            electrode_height = 9 if self.probe_type == "2.0-1shank" else 14
-            shank_spacing = None
-        else:
-            # Multi-shank
-            shank_width = 100
-            shank_spacing = 250
-            electrode_width = 12
-            electrode_height = 8
+        # Map each electrode's x position to the drawn shank's width.
+        if self.probe_type == "1.0":
+            electrode_width, electrode_height = 15, 14
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 35) / 24 * half_span
+        elif self.probe_type == "2.0-1shank":
+            electrode_width, electrode_height = 15, 9
+            x_center_shank = np.zeros(len(positions))
+            x = (orig_x - 16) / 16 * half_span
+        else:  # 4-shanks 2.0 or NXT
+            electrode_width, electrode_height = 12, 8
+            x_center_shank = shank_ids * 250
+            x = x_center_shank + (orig_x - x_center_shank - 16) / 16 * half_span
 
         # Bars sit just outside the shank outline, mirroring the column the
         # electrode lives in: left-column contacts → bar on the left of the
         # outline, right-column contacts → bar on the right.
         bar_offset = shank_width / 2 + BAR_GAP + BAR_WIDTH / 2
+        bar_x = x_center_shank + np.where(x >= x_center_shank, 1, -1) * bar_offset
 
-        for shank_id, electrode_id, orig_x, y in positions:
+        # Numeric columns are arrays: Bokeh sends those as binary instead of
+        # encoding each of the thousands of values separately.
+        electrode_data = {
+            "x": x,
+            "y": y,
+            "width": np.full(len(positions), electrode_width),
+            "height": np.full(len(positions), electrode_height),
+            "shank_id": shank_ids,
+            "electrode_id": electrode_ids,
+            "bar_x": bar_x,
+            "bar_height": np.full(len(positions), electrode_height * 1.5),
+            **self._electrode_appearance_columns(shank_ids.tolist(), electrode_ids.tolist()),
+        }
 
-            # Map x position to shank width
-            if self.probe_type == "1.0":
-                x_norm = (orig_x - 35) / 24
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            elif self.probe_type == "2.0-1shank":
-                x_norm = (orig_x - 16) / 16
-                x = x_norm * (shank_width * 0.7) / 2
-                x_center_shank = 0.0
-            else: # 4-shanks 2.0 or NXT
-                # Calculate shank center
-                x_center_shank = shank_id * shank_spacing
-                # Map electrode position within shank
-                x_norm = (orig_x - x_center_shank - 16) / 16
-                x = x_center_shank + x_norm * (shank_width * 0.7) / 2
+        # Skip Bokeh's check of every cell, which took half of this method and
+        # runs on the event loop for each session: the shape is fixed right here.
+        with validate(False):
+            self.electrode_source = ColumnDataSource(data=electrode_data)
 
-            # Bar x: just outside the shank outline, on the side matching
-            # the electrode's column relative to the shank center.
-            side = 1 if (x - x_center_shank) >= 0 else -1
-            bar_x = x_center_shank + side * bar_offset
+    def _electrode_appearance_columns(self, shank_ids, electrode_ids) -> dict[str, Any]:
+        """Selection- and survey-dependent columns, one value per electrode."""
+        n_electrodes = len(shank_ids)
+        colors = [""] * n_electrodes
+        alphas = np.empty(n_electrodes, dtype=np.float64)
+        line_colors = [""] * n_electrodes
+        line_widths = np.empty(n_electrodes, dtype=np.int32)
+        statuses = [""] * n_electrodes
+        vals = np.empty(n_electrodes, dtype=np.float64)
+        bar_colors = [""] * n_electrodes
+        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
 
-            # Determine electrode status and color
+        for i, (shank_id, electrode_id) in enumerate(zip(shank_ids, electrode_ids, strict=True)):
             electrode = Electrode(shank_id, electrode_id)
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-            val = self._get_survey_val(electrode)
-            bar_color, bar_alpha = self._get_bar_color_alpha(electrode)
+            statuses[i], colors[i], alphas[i], line_colors[i], line_widths[i] = (
+                self.get_electrode_plotting_params(electrode)
+            )
+            vals[i] = self._get_survey_val(electrode)
+            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
 
-            electrode_data["x"].append(x)
-            electrode_data["y"].append(y)
-            electrode_data["width"].append(electrode_width)
-            electrode_data["height"].append(electrode_height)
-            electrode_data["shank_id"].append(shank_id)
-            electrode_data["electrode_id"].append(electrode_id)
-            electrode_data["color"].append(color)
-            electrode_data["alpha"].append(alpha)
-            electrode_data["line_color"].append(line_color)
-            electrode_data["line_width"].append(line_width)
-            electrode_data["status"].append(status)
-            electrode_data["val"].append(val)
-            electrode_data["bar_x"].append(bar_x)
-            electrode_data["bar_height"].append(electrode_height * 1.5)
-            electrode_data["bar_color"].append(bar_color)
-            electrode_data["bar_alpha"].append(bar_alpha)
-
-        # Create ColumnDataSource
-        self.electrode_source = ColumnDataSource(data=electrode_data)
-
+        return {
+            "color": colors, "alpha": alphas, "line_color": line_colors, "line_width": line_widths,
+            "status": statuses, "val": vals, "bar_color": bar_colors, "bar_alpha": bar_alphas,
+        }
 
     def get_electrode_plotting_params(self, electrode: Electrode):
         """Get electrode fill/border appearance based on selection state."""
@@ -551,96 +635,28 @@ class ChannelmapGUI(param.Parameterized):
 
 
     def add_shank_outlines(self):
-        """Add shank outlines and bank labels"""
-        positions = self.positions_df.values
+        """Add shank outlines and bank labels.
 
-        if self.probe_type in ["1.0", "2.0-1shank"]:
-            # Single shank outline
-            shank_width = 100
-            xlim = [-shank_width / 2 - 150, shank_width / 2 + 150]
-            max_y = np.max(positions[:, -1])
-            min_y = np.min(positions[:, -1])
-            tip_height = (max_y - min_y) * 0.1
+        One renderer per style, not one per shape: each renderer brings about
+        ten Bokeh models, which every session then builds, validates,
+        serialises and sends on the event loop.
+        """
+        geometry = shank_outline_geometry(
+            self.positions_df.values,
+            single_shank=self.probe_type in ["1.0", "2.0-1shank"],
+        )
+        self.plot.x_range = Range1d(*geometry.x_limits)
+        self.plot.multi_line(geometry.outline_xs, geometry.outline_ys, line_width=3, color="black", alpha=1)
+        self.plot.multi_line(geometry.bank_lines_xs, geometry.bank_lines_ys, line_width=2, color="gray", alpha=0.7)
 
-            # Shank outline
-            shank_x = [-shank_width / 2, shank_width / 2, shank_width / 2, 0, -shank_width / 2, -shank_width / 2]
-            shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-            self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-            self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-            # Bank labels
-            for bank_i in np.arange(0, len(positions), 384):
-                if bank_i < len(positions):
-                    bank_y = positions[bank_i, -1]
-                    self.plot.line(
-                        [-shank_width / 2, shank_width / 2], [bank_y, bank_y], line_width=2, color="gray", alpha=0.7
-                    )
-                    self.plot.text(
-                        [shank_width / 2 + 17],
-                        [bank_y],
-                        text=[f"Bank {bank_i // 384}"],
-                        text_font_size="10pt",
-                        text_color="gray",
-                    )
-
-        else:
-            # Multi-shank outlines
-            shank_width = 100
-            shank_spacing = 250
-            xlim = [-shank_width / 2 - 100, 3 * shank_spacing + shank_width / 2 + 100]
-
-            for shank_id in range(4):
-                shank_mask = positions[:, 0] == shank_id
-                x_center = shank_id * shank_spacing
-
-                max_y = np.max(positions[shank_mask, -1])
-                min_y = np.min(positions[shank_mask, -1])
-                tip_height = (max_y - min_y) * 0.08
-
-                # Shank outline
-                shank_x = [
-                    x_center - shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center + shank_width / 2,
-                    x_center,
-                    x_center - shank_width / 2,
-                    x_center - shank_width / 2,
-                ]
-                shank_y = [max_y + 100, max_y + 100, min_y, min_y - tip_height, min_y, max_y + 100]
-
-                self.plot.line(shank_x, shank_y, line_width=3, color="black", alpha=1)
-                self.plot.x_range = Range1d(xlim[0], xlim[1])
-
-                # Shank label
-                self.plot.text(
-                    [x_center],
-                    [min_y - tip_height - 250],
-                    text=[f"Shank {shank_id}"],
-                    text_font_size="12pt",
-                    text_color="black",
-                    text_align="center",
-                )
-
-                # Bank lines and labels
-                for bank_i in np.arange(0, len(positions[shank_mask]), 384):
-                    if bank_i < len(positions[shank_mask]):
-                        bank_y = positions[shank_mask][bank_i, -1]
-                        self.plot.line(
-                            [x_center - shank_width / 2, x_center + shank_width / 2],
-                            [bank_y, bank_y],
-                            line_width=2,
-                            color="gray",
-                            alpha=0.7,
-                        )
-                        if shank_id == 3:  # Bank labels (only on rightmost shank)
-                            self.plot.text(
-                                [x_center + shank_width / 2 + 17],
-                                [bank_y],
-                                text=[f"Bank {bank_i // 384}"],
-                                text_font_size="10pt",
-                                text_color="gray",
-                            )
+        label_xs, label_ys, labels = geometry.shank_labels
+        if labels:
+            self.plot.text(
+                label_xs, label_ys, text=labels,
+                text_font_size="12pt", text_color="black", text_align="center",
+            )
+        label_xs, label_ys, labels = geometry.bank_labels
+        self.plot.text(label_xs, label_ys, text=labels, text_font_size="10pt", text_color="gray")
 
         # Set appropriate axis limits
         self.plot.axis.visible = False
@@ -649,39 +665,9 @@ class ChannelmapGUI(param.Parameterized):
 
     def update_electrode_colors(self):
         """Update electrode colors in the Bokeh plot"""
-        n_electrodes = len(self.electrode_source.data["shank_id"])
-
-        # Pre-allocate numpy arrays for better memory efficiency
-        colors = np.empty(n_electrodes, dtype=object)
-        alphas = np.empty(n_electrodes, dtype=np.float64)
-        line_colors = np.empty(n_electrodes, dtype=object)
-        line_widths = np.empty(n_electrodes, dtype=np.int32)
-        statuses = np.empty(n_electrodes, dtype=object)
-        vals = np.empty(n_electrodes, dtype=np.float64)
-        bar_colors = np.empty(n_electrodes, dtype=object)
-        bar_alphas = np.empty(n_electrodes, dtype=np.float64)
-
-        for i in range(n_electrodes):
-            shank_id = self.electrode_source.data["shank_id"][i]
-            electrode_id = self.electrode_source.data["electrode_id"][i]
-            electrode = Electrode(shank_id, electrode_id)
-
-            status, color, alpha, line_color, line_width = self.get_electrode_plotting_params(electrode)
-
-            colors[i] = color
-            alphas[i] = alpha
-            line_colors[i] = line_color
-            line_widths[i] = line_width
-            statuses[i] = status
-            vals[i] = self._get_survey_val(electrode)
-            bar_colors[i], bar_alphas[i] = self._get_bar_color_alpha(electrode)
-
-        # Update the data source with new data, replacing old arrays
+        data = self.electrode_source.data
         self.electrode_source.data.update(
-            {"color": colors.tolist(), "alpha": alphas.tolist(),
-             "line_color": line_colors.tolist(), "line_width": line_widths.tolist(),
-             "status": statuses.tolist(), "val": vals.tolist(),
-             "bar_color": bar_colors.tolist(), "bar_alpha": bar_alphas.tolist()}
+            self._electrode_appearance_columns(data["shank_id"].tolist(), data["electrode_id"].tolist())
         )
 
 
@@ -749,28 +735,10 @@ class ChannelmapGUI(param.Parameterized):
                         self.electrodes.select(Electrode(shank_id, electrode_id))
 
             elif self.select_mode == "dependent_deselect":
-                # Find unavailable (black) electrodes in the box span, then deselect
-                # all selected electrodes whose wiring conflicts caused them to be unavailable.
-                print(f"Box deselect-dependents: {len(new)} electrodes in span")
-                unavailable_in_span = set()
-                for idx in new:
-                    shank_id = self.electrode_source.data["shank_id"][idx]
-                    electrode_id = self.electrode_source.data["electrode_id"][idx]
-                    electrode = Electrode(shank_id, electrode_id)
-                    if electrode in self.electrodes.unavailable:
-                        unavailable_in_span.add(electrode)
+                self._deselect_dependents(new)
 
-                # For each unavailable electrode in the span, find which selected
-                # electrode(s) caused it to be unavailable (i.e. it is in their wiring map).
-                to_deselect = set()
-                for u in unavailable_in_span:
-                    for s in self.electrodes.selected:
-                        if u in self.electrodes.wiring_map[s]:
-                            to_deselect.add(s)
-
-                print(f"  → deselecting {len(to_deselect)} responsible selected electrode(s)")
-                for s in to_deselect:
-                    self.electrodes.deselect(s)
+            elif self.select_mode == "zigzag_dependent_deselect":
+                self._deselect_dependents(new, subset=self.get_zigzag_subset())
 
         # Update electrode visualization
         self.update_electrode_colors()
@@ -786,6 +754,33 @@ class ChannelmapGUI(param.Parameterized):
         # users' websockets dropped by the proxy.
         self.electrode_source.selected.indices = []
 
+
+    def _deselect_dependents(self, indices, subset=None):
+        """Free blocked sites in the box, optionally restricted to electrode IDs.
+
+        Collect blockers before mutating selection. Selected sites in the box
+        are not targets, and this operation never selects the freed sites.
+        The caller owns the gesture's undo snapshot and visualization refresh.
+        """
+        subset = None if subset is None else set(subset)
+        unavailable_in_span = set()
+        for idx in indices:
+            shank_id = self.electrode_source.data["shank_id"][idx]
+            electrode_id = self.electrode_source.data["electrode_id"][idx]
+            if subset is not None and electrode_id not in subset:
+                continue
+            electrode = Electrode(shank_id, electrode_id)
+            if electrode in self.electrodes.unavailable:
+                unavailable_in_span.add(electrode)
+
+        to_deselect = set()
+        for u in unavailable_in_span:
+            for s in self.electrodes.selected:
+                if u in self.electrodes.wiring_map[s]:
+                    to_deselect.add(s)
+
+        for s in to_deselect:
+            self.electrodes.deselect(s)
 
     def get_zigzag_subset(self):
         N_per_shank = PROBE_FEATURES[self.probe_subtype]["n_sites_per_shank"]
@@ -986,7 +981,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # Collect anatomy overlay data (if active)
         anatomy_bands = None
-        if getattr(self, "_anatomy_overlay_active", False):
+        if self._anatomy_overlay_active:
             band_src = self.region_band_source.data
             if band_src["x"]:
                 plot_centers = self._shank_plot_centers()
@@ -1225,17 +1220,13 @@ class ChannelmapGUI(param.Parameterized):
 
     @pn.io.with_lock
     async def _on_compute_anatomy_click(self, event):
-        """Compute button: download off-thread if needed, then draw.
+        """Compute button: (re)draw the overlay off the event loop.
 
-        The download is the only part of the overlay that can block for
-        seconds, and on the deployed server this callback runs on the Bokeh
-        event loop — the same one serving every other session and the
-        container healthcheck.  So a cold atlas is fetched in a worker thread
-        and only the (fast, in-memory) drawing happens back on the loop.
+        See :meth:`_drain_anatomy_requests` for why the work runs in a thread.
 
         ``with_lock`` is not optional.  Panel schedules async callbacks with
         ``nolock`` set unless the function carries ``lock = True``
-        (``panel.io.server.async_execute``), and this method writes to Bokeh
+        (``panel.io.server.async_execute``), and the drawing writes to Bokeh
         ``ColumnDataSource`` models directly.  Without the document lock every
         such write raises "_pending_writes should be non-None ...", which
         Bokeh turns into a *silently* dead overlay: the exception surfaces in
@@ -1246,71 +1237,200 @@ class ChannelmapGUI(param.Parameterized):
         Bokeh holds the lock across the ``await`` rather than around each
         statement (``ServerSession._needs_document_lock``), so this stays a
         per-session lock: the event loop is free to serve other users while
-        the download runs, and the session cannot be reaped mid-download.
+        the work runs, and the session cannot be reaped mid-compute.
         """
-        name = str(self.atlas_name_input.value).strip()
-        if anatomy_atlas.is_downloaded(name):
-            self.compute_anatomy_overlay()
-            return
+        self._anatomy_overlay_active = True
+        self._anatomy_dirty = True
+        await self._drain_anatomy_requests()
 
-        self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
-        self.compute_anatomy_button.disabled = True
-        try:
-            await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
-        except Exception as exc:  # noqa: BLE001 - any download failure is reported to the user
-            print(f"Atlas download failed: {exc}")
-            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
-            _notify(
-                "error",
-                f"Could not download '{name}'. Check your connection and retry.",
-            )
+    def _request_anatomy_recompute(self):
+        """Schedule an off-loop overlay recompute from a synchronous callback.
+
+        Coalesces: while a compute is in flight the new drain returns at once,
+        and the running one picks up the latest inputs when it finishes, so a
+        burst of edits costs one extra compute, not one each.
+        """
+        self._anatomy_dirty = True
+        pn.state.execute(self._drain_anatomy_requests)
+
+    @pn.io.with_lock
+    async def _drain_anatomy_requests(self):
+        """Run overlay computes in a worker thread until the inputs stop changing.
+
+        On the server, GUI callbacks run on the Bokeh event loop that serves
+        every session and the healthcheck, and every part of an overlay is slow
+        there: a cold atlas takes seconds to download, a cached one 0.7–3.3 s
+        to slice and render (allen_mouse_25um → 10um), and an AC origin up to
+        ~8 s to locate.  So all of that happens in worker threads, and only the
+        snapshot and the drawing touch the loop.
+
+        One drain per session at a time (``_anatomy_compute_running``); a
+        request arriving mid-compute sets ``_anatomy_dirty`` and is served by
+        the next lap.  Each lap snapshots the widgets only after its downloads
+        and origin lookup, so it always draws the *current* pose and atlas —
+        including an atlas picked while the previous one was still downloading.
+        """
+        if self._anatomy_compute_running:
             return
+        self._anatomy_compute_running = True
+        try:
+            while self._anatomy_dirty and self._anatomy_overlay_active:
+                self._anatomy_dirty = False
+                name = self._selected_atlas_name()
+                if not anatomy_atlas.is_downloaded(name):
+                    self.compute_anatomy_button.name = _BUTTON_DOWNLOADING
+                    self.compute_anatomy_button.disabled = True
+                    try:
+                        await asyncio.to_thread(anatomy_atlas.ensure_downloaded, name)
+                    except Exception as exc:  # noqa: BLE001 - any download failure is reported to the user
+                        print(f"Atlas download failed: {exc}")
+                        # Whatever is on screen is for another atlas now, and
+                        # leaving the overlay live would retry the download on
+                        # every later edit.  Clicking Compute retries.
+                        self.clear_anatomy_overlay()
+                        self._refresh_compute_button()
+                        _notify(
+                            "error",
+                            f"Could not download '{name}'. Check your connection and retry.",
+                        )
+                        return
+                if self._origin_spec(name)["status"] == "ac_pending":
+                    # Before the snapshot, so this lap draws with the origin.
+                    await self._locate_ac_origin(name)
+                if self._anatomy_dirty:
+                    continue  # inputs moved while we waited: re-snapshot
+                request = self._anatomy_request()
+                result = await asyncio.to_thread(self._compute_anatomy, request)
+                self._apply_anatomy(request, result)
         finally:
+            self._anatomy_compute_running = False
             self.compute_anatomy_button.disabled = False
-        self.compute_anatomy_overlay()
 
     def compute_anatomy_overlay(self):
-        """Compute region bands for the current pose and render them."""
-        atlas_name = str(self.atlas_name_input.value).strip()
-        if not anatomy_atlas.is_downloaded(atlas_name):
-            self.compute_anatomy_button.name = "Downloading atlas… (first use only)"
-            self.compute_anatomy_button.disabled = True
+        """Compute and draw the overlay for the current pose (the Compute button).
 
-        probe_xs = self._shank_probe_xs()
-        plot_centers = self._shank_plot_centers()
-        y_max = float(self.positions_df["y"].max())
+        Runs the same off-loop drain as the GUI.  With no event loop running
+        (scripts, tests) Panel runs it to completion before returning; inside a
+        running loop (the served app, Jupyter) it is scheduled instead.
+        """
+        self._anatomy_overlay_active = True
+        self._request_anatomy_recompute()
 
-        # If the origin landmark was "pending" (AC of a not-yet-downloaded
-        # atlas), computing below downloads it — remember to fill it in after.
-        origin_was_pending = (
-            self._origin_spec(self.atlas_name_input.value)["status"] == "ac_pending"
+    def _anatomy_request(self) -> _AnatomyRequest:
+        """Snapshot the overlay's inputs.  Event loop only; cheap, no atlas reads."""
+        atlas_name = self._selected_atlas_name()
+        # Bregma dot whenever an estimate exists or we're in bregma mode (using
+        # the current, possibly-edited, values). DV-squish + tilt warp the brain
+        # image only in bregma mode (where the squish/tilt inputs are live).
+        bregma_mode = bool(self.bregma_relative_toggle.value)
+        status = self._origin_spec(atlas_name)["status"]
+        bregma_um = None
+        ap_squish = ml_squish = dv_squish = 1.0
+        tilt_deg = 0.0
+        if bregma_mode or status in ("defined", "estimate"):
+            bregma_um = (
+                float(self.bregma_ap_input.value),
+                float(self.bregma_ml_input.value),
+                float(self.bregma_dv_input.value),
+            )
+        if bregma_mode:
+            ap_squish = float(self.ap_squish_input.value) or 1.0
+            ml_squish = float(self.ml_squish_input.value) or 1.0
+            dv_squish = float(self.dv_squish_input.value) or 1.0
+            tilt_deg = float(self.tilt_input.value)
+        return _AnatomyRequest(
+            atlas_name=atlas_name,
+            probe_xs=self._shank_probe_xs(),
+            plot_centers=self._shank_plot_centers(),
+            y_max=float(self.positions_df["y"].max()),
+            tip=self._tip_atlas_um(),
+            pitch_deg=float(self.pitch_input.value),
+            yaw_deg=float(self.yaw_input.value),
+            shank_orientation_deg=float(self.shank_orientation_input.value),
+            bregma_um=bregma_um,
+            ap_squish=ap_squish,
+            ml_squish=ml_squish,
+            dv_squish=dv_squish,
+            tilt_deg=tilt_deg,
+            generation=self._anatomy_generation,
+            locator_fig=self._locator_fig,
         )
 
-        tip = self._tip_atlas_um()
+    def _compute_anatomy(self, req: _AnatomyRequest) -> _AnatomyResult:
+        """Every atlas read an overlay needs.  Runs in a worker thread.
 
+        Must not touch widgets, Bokeh models or session state — only ``req``
+        and the atlas.
+        """
         try:
             bands = compute_region_bands(
-                shank_positions=probe_xs,
-                y_range=(0.0, y_max),
-                tip_atlas=tip,
-                pitch_deg=float(self.pitch_input.value),
-                yaw_deg=float(self.yaw_input.value),
-                shank_orientation_deg=float(self.shank_orientation_input.value),
-                atlas_name=atlas_name,
+                shank_positions=req.probe_xs,
+                y_range=(0.0, req.y_max),
+                tip_atlas=req.tip,
+                pitch_deg=req.pitch_deg,
+                yaw_deg=req.yaw_deg,
+                shank_orientation_deg=req.shank_orientation_deg,
+                atlas_name=req.atlas_name,
                 step_um=25.0,
             )
         except Exception as exc:  # noqa: BLE001 - any lookup failure is reported to the user
-            print(f"Anatomy lookup failed: {exc}")
-            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
-            self.compute_anatomy_button.disabled = False
+            return _AnatomyResult(error=exc)
+
+        result = _AnatomyResult(bands=bands, locator_fig=req.locator_fig)
+        try:
+            # Reuse this session's figure: building one per render cost 3.1 MB
+            # of RSS per overlay compute, and the overlay recomputes on every
+            # pose edit.
+            fig = render_locator(
+                req.atlas_name,
+                tip_atlas=req.tip,
+                pitch_deg=req.pitch_deg,
+                yaw_deg=req.yaw_deg,
+                shank_orientation_deg=req.shank_orientation_deg,
+                shank_positions=req.probe_xs,
+                y_range=(0.0, req.y_max),
+                bregma_um=req.bregma_um,
+                ap_squish=req.ap_squish,
+                ml_squish=req.ml_squish,
+                dv_squish=req.dv_squish,
+                tilt_deg=req.tilt_deg,
+                fig=req.locator_fig,
+            )
+            result.locator_fig = fig
+            result.locator_html = self._fig_to_locator_html(fig)
+        except Exception as exc:  # noqa: BLE001 - a failed locator shouldn't sink the overlay
+            print(f"Locator render failed: {exc}")
+        result.tip_depth = _measure_tip_depth(
+            req.tip, req.pitch_deg, req.yaw_deg, req.atlas_name
+        )
+
+        # Hand back the chunk buffers this render churned through.  They are
+        # already freed; this is what unmaps them, so repeated overlay computes
+        # don't ratchet RSS upward for the life of the process.
+        anatomy_atlas.reclaim_free_memory()
+        return result
+
+    def _apply_anatomy(self, req: _AnatomyRequest, result: _AnatomyResult):
+        """Draw a finished compute.  Event loop only (writes Bokeh models)."""
+        if req.generation != self._anatomy_generation:
+            # Cleared while computing: drop the stale result.
+            if result.locator_fig is not self._locator_fig:
+                plt.close(result.locator_fig)
+            return
+        self._locator_fig = result.locator_fig
+        self._refresh_compute_button()
+        if result.error is not None:
+            print(f"Anatomy lookup failed: {result.error}")
             return
 
+        bands = result.bands
         width = self._shank_plot_width()
         half_width = width / 2
         # Pull label text outside the shank outline so it doesn't overlap the
         # electrode rects; the offset widens when a survey overlay is loaded so
-        # labels clear the survey sidebar bars (see _region_label_offset).
+        # labels clear the survey sidebar bars.
         label_offset = self._region_label_offset(half_width)
+        plot_centers = req.plot_centers
 
         band_data = {"x": [], "y": [], "width": [], "height": [], "color": [], "acronym": []}
         label_data = {"x": [], "y": [], "text": [], "color": [], "center": []}
@@ -1357,74 +1477,20 @@ class ChannelmapGUI(param.Parameterized):
         self._update_anatomy_legend(bands)
         # The atlas is now downloaded, so the origin corner can be shown.
         self._update_anatomy_origin_note()
+        if result.locator_html is not None:
+            self.anatomy_locator.object = result.locator_html
 
-        # Bregma dot whenever an estimate exists or we're in bregma mode (using
-        # the current, possibly-edited, values). DV-squish + tilt warp the brain
-        # image only in bregma mode (where the squish/tilt inputs are live).
-        bregma_mode = bool(self.bregma_relative_toggle.value)
-        # The atlas is downloaded now (bands were computed), so a previously
-        # "pending" AC landmark can be filled in (without clobbering user edits).
-        if origin_was_pending:
-            self._update_reference_params()
-            self.bregma_estimate_header.object = self._bregma_header_html()
-        has_origin = self._origin_spec(atlas_name)["status"] in ("defined", "estimate")
-        bregma_um = None
-        ap_squish = ml_squish = dv_squish = 1.0
-        tilt_deg = 0.0
-        if bregma_mode or has_origin:
-            bregma_um = (
-                float(self.bregma_ap_input.value),
-                float(self.bregma_ml_input.value),
-                float(self.bregma_dv_input.value),
-            )
-        if bregma_mode:
-            ap_squish = float(self.ap_squish_input.value) or 1.0
-            ml_squish = float(self.ml_squish_input.value) or 1.0
-            dv_squish = float(self.dv_squish_input.value) or 1.0
-            tilt_deg = float(self.tilt_input.value)
-
-        try:
-            # Reuse this session's figure: building one per render cost 3.1 MB
-            # of RSS per overlay compute, and the overlay recomputes on every
-            # pose edit.
-            _fig = render_locator(
-                atlas_name,
-                tip_atlas=tip,
-                pitch_deg=float(self.pitch_input.value),
-                yaw_deg=float(self.yaw_input.value),
-                shank_orientation_deg=float(self.shank_orientation_input.value),
-                shank_positions=probe_xs,
-                y_range=(0.0, y_max),
-                bregma_um=bregma_um,
-                ap_squish=ap_squish,
-                ml_squish=ml_squish,
-                dv_squish=dv_squish,
-                tilt_deg=tilt_deg,
-                fig=self._locator_fig,
-            )
-            self._locator_fig = _fig
-            self.anatomy_locator.object = self._fig_to_locator_html(_fig)
-        except Exception as exc:  # noqa: BLE001 - a failed locator shouldn't sink the overlay
-            print(f"Locator render failed: {exc}")
-
-        # Hand back the chunk buffers this render churned through.  They are
-        # already freed; this is what unmaps them, so repeated overlay computes
-        # don't ratchet RSS upward for the life of the process.
-        anatomy_atlas.reclaim_free_memory()
-
-        # Overlay now exists → later input edits live-update it.
-        self._anatomy_overlay_active = True
         self.anatomy_locator_section.visible = True
         # Only now can the depth readout show a value: the overlay is up, and
-        # computing it downloaded the atlas if it wasn't already cached (the
-        # readout refuses to trigger a download itself).
-        self._update_tip_depth_readout()
-        self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
-        self.compute_anatomy_button.disabled = False
+        # computing it downloaded the atlas if it wasn't already cached.
+        self._update_tip_depth_readout(result.tip_depth)
 
     def clear_anatomy_overlay(self):
         """Wipe the region bands, labels, boundaries and reset the legend."""
         self._anatomy_overlay_active = False  # stop live-updating
+        # Any compute still in flight finishes in its worker thread, but its
+        # result is for an overlay the user just dismissed: drop it.
+        self._anatomy_generation += 1
         self.region_band_source.data = {
             "x": [], "y": [], "width": [], "height": [], "color": [], "acronym": [],
         }
@@ -1496,7 +1562,7 @@ class ChannelmapGUI(param.Parameterized):
         native code as an FYI, but only when the atlas is already downloaded so
         switching atlases in the dropdown stays cheap.
         """
-        name = str(self.atlas_name_input.value).strip()
+        name = self._selected_atlas_name()
         native = None
         try:
             if anatomy_atlas.is_downloaded(name):
@@ -1534,22 +1600,59 @@ class ChannelmapGUI(param.Parameterized):
         The field updates are batched under a recompute guard so a single atlas
         switch triggers one overlay refresh, not one per field changed.
         """
-        self._suppress_anatomy_recompute = True
-        try:
+        with self._anatomy_recompute_suppressed():
             self._update_reference_params(*events)
             self._update_tip_to_atlas_center(*events)
             self._update_anatomy_origin_note(*events)
             self._update_landmark_labels()
             self.bregma_estimate_header.object = self._bregma_header_html()
+        # Reflect download state in the button label so users know before clicking.
+        self._refresh_compute_button()
+        name = self._selected_atlas_name()
+        if self._anatomy_overlay_active:
+            # The recompute locates a pending AC origin on its way through.
+            self._request_anatomy_recompute()
+        elif (self._origin_spec(name)["status"] == "ac_pending"
+              and anatomy_atlas.is_downloaded(name)):
+            # No overlay to do it, but the atlas is local, so the origin can be
+            # shown now — once a worker thread has scanned for it.
+            pn.state.execute(functools.partial(self._locate_ac_origin, name))
+
+    @pn.io.with_lock
+    async def _locate_ac_origin(self, name: str):
+        """Derive an atlas's AC origin in a worker thread, then fill the fields.
+
+        The derivation reads every voxel of the annotation (~8 s on a 10 µm
+        atlas), so it must not run on the event loop the way it used to on
+        every switch to a human or fish atlas.
+        """
+        try:
+            await asyncio.to_thread(anatomy_atlas.derive_origin_from_ac, name)
+        except Exception as exc:  # noqa: BLE001 - AC not derivable: banner stays "pending"
+            print(f"Anterior-commissure lookup failed: {exc}")
+            return
+        if self._selected_atlas_name() == name:  # still selected
+            self._fill_reference_params()
+
+    def _fill_reference_params(self):
+        """Refill the origin fields and banner without triggering a recompute."""
+        with self._anatomy_recompute_suppressed():
+            self._update_reference_params()
+        self.bregma_estimate_header.object = self._bregma_header_html()
+
+    def _refresh_compute_button(self):
+        """Label the Compute button by whether the selected atlas is local."""
+        downloaded = anatomy_atlas.is_downloaded(self._selected_atlas_name())
+        self.compute_anatomy_button.name = _BUTTON_COMPUTE if downloaded else _BUTTON_DOWNLOAD
+
+    @contextlib.contextmanager
+    def _anatomy_recompute_suppressed(self):
+        """Batch field writes so they don't each request an overlay recompute."""
+        self._suppress_anatomy_recompute = True
+        try:
+            yield
         finally:
             self._suppress_anatomy_recompute = False
-        # Reflect download state in the button label so users know before clicking.
-        name = str(self.atlas_name_input.value).strip()
-        if anatomy_atlas.is_downloaded(name):
-            self.compute_anatomy_button.name = "Compute anatomical overlay 🧠"
-        else:
-            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
-        self._recompute_anatomy_if_active()
 
     def _update_landmark_labels(self):
         """Rename the toggle + coordinate fields to the atlas's landmark.
@@ -1614,55 +1717,27 @@ class ChannelmapGUI(param.Parameterized):
         """Refresh the coordinate note when the atlas selection changes."""
         self.anatomy_coord_note.object = self._anatomy_coord_note_html()
 
-    def _atlas_is_downloaded(self) -> bool:
-        """True if the selected atlas is on disk, so reading it won't download."""
-        try:
-            return anatomy_atlas.is_downloaded(str(self.atlas_name_input.value).strip())
-        except Exception:  # noqa: BLE001 - unreadable atlas means not downloaded
-            return False
+    def _selected_atlas_name(self) -> str:
+        return str(self.atlas_name_input.value).strip()
 
-    def _tip_depth_below_surface(self) -> float | None:
-        """Tip-to-brain-surface distance along the probe axis, in µm.
-
-        ``None`` when it can't be computed: the atlas isn't downloaded (we
-        never trigger a download just to refresh a readout), the tip is outside
-        the brain, or the atlas lookup failed.
-        """
-        if not self._atlas_is_downloaded():
-            return None
-        try:
-            return tip_depth_below_surface_um(
-                self._tip_atlas_um(),
-                pitch_deg=float(self.pitch_input.value),
-                yaw_deg=float(self.yaw_input.value),
-                atlas_name=str(self.atlas_name_input.value).strip(),
-            )
-        except Exception as exc:  # noqa: BLE001 - a readout must never sink the GUI
-            print(f"Tip depth lookup failed: {exc}")
-            return None
-
-    def _tip_depth_readout_html(self) -> str:
+    def _tip_depth_readout_html(self, depth: float | None) -> str:
         """Banner text for the depth-below-surface readout above the tip fields.
 
         Blank until an overlay exists: before Compute (or after Clear) there is
         no anatomy on screen for a depth to refer to, and a number sitting there
         would look like a live measurement of a pose nothing has been checked
         against.
+
+        ``depth`` is measured by the off-loop overlay compute; this never reads
+        the atlas itself, so it is safe on the event loop.
         """
-        if not getattr(self, "_anatomy_overlay_active", False):
+        if not self._anatomy_overlay_active:
             value_html = (
                 '<span style="color:#777;">—</span>'
                 '<span style="color:#777; font-weight:normal;"> '
                 "(compute the overlay below)</span>"
             )
-        elif not self._atlas_is_downloaded():
-            value_html = (
-                '<span style="color:#777;">—</span>'
-                '<span style="color:#777; font-weight:normal;"> '
-                "(available once the atlas is downloaded)</span>"
-            )
         else:
-            depth = self._tip_depth_below_surface()
             if depth is None:
                 value_html = (
                     '<span style="color:#b00;">—</span>'
@@ -1688,11 +1763,11 @@ class ChannelmapGUI(param.Parameterized):
             "</div></div>"
         )
 
-    def _update_tip_depth_readout(self, *events):
+    def _update_tip_depth_readout(self, depth: float | None = None):
         """Refresh the depth readout (cheap; skipped if the widget isn't built)."""
         if not hasattr(self, "tip_depth_readout"):
             return
-        self.tip_depth_readout.object = self._tip_depth_readout_html()
+        self.tip_depth_readout.object = self._tip_depth_readout_html(depth)
 
     def _atlas_tip_center(self, name: str):
         """Atlas center as ``(AP, ML, DV)`` µm, or ``None`` if not readable cheaply.
@@ -1764,14 +1839,14 @@ class ChannelmapGUI(param.Parameterized):
             return spec  # no skull landmark for this species → user defines origin
         spec["landmark"] = landmark
         if landmark == "anterior commissure":
-            # Human (AC-PC): derive it from the annotation when downloaded.
-            if not anatomy_atlas.is_downloaded(name):
+            # Human (AC-PC): derived from the annotation, but only ever off the
+            # event loop — it scans the whole volume (up to ~8 s).  Until that
+            # has happened (see _locate_ac_origin and the overlay
+            # compute) report it as pending.
+            known, ac = anatomy_atlas.peek_origin_from_ac(name)
+            if not known:
                 spec["status"] = "ac_pending"
                 return spec
-            try:
-                ac = anatomy_atlas.derive_origin_from_ac(name)
-            except Exception:  # noqa: BLE001 - AC not derivable: handled as ac is None below
-                ac = None
             if ac is None:
                 # AC is the convention but this atlas doesn't delineate it
                 # (e.g. the coarse human atlas) → keep the name, user sets it.
@@ -1805,8 +1880,7 @@ class ChannelmapGUI(param.Parameterized):
         for w in (self.dv_squish_input, self.ap_squish_input,
                   self.ml_squish_input, self.tilt_input):
             w.disabled = not on
-        self._suppress_anatomy_recompute = True
-        try:
+        with self._anatomy_recompute_suppressed():
             if on:
                 # Sensible bregma-relative default: at bregma, 4 mm deep.
                 self.tip_ap_input.value = 0.0
@@ -1814,17 +1888,14 @@ class ChannelmapGUI(param.Parameterized):
                 self.tip_dv_input.value = 4000.0
             else:
                 self._update_tip_to_atlas_center()
-        finally:
-            self._suppress_anatomy_recompute = False
         self._recompute_anatomy_if_active()
 
     def _recompute_anatomy_if_active(self, *events):
         """Re-run the overlay on input changes, but only once one exists."""
-        if getattr(self, "_suppress_anatomy_recompute", False):
+        if self._suppress_anatomy_recompute:
             return
-        if getattr(self, "_anatomy_overlay_active", False):
-            # compute_anatomy_overlay refreshes the depth readout on its way out.
-            self.compute_anatomy_overlay()
+        if self._anatomy_overlay_active:
+            self._request_anatomy_recompute()  # never inline: see _drain_anatomy_requests
 
     def _update_anatomy_legend(self, bands: list):
         """Render a deduplicated region legend on the right-side panel."""
@@ -2093,23 +2164,29 @@ class ChannelmapGUI(param.Parameterized):
         zigzagselect_box_string = "Zigzag-select Electrodes"
         interleavedselect_box_string = "Interleaved-select Electrodes"
         dependentdeselect_box_string = "Deselect Dependents"
+        zigzagdependentdeselect_box_string = "Zigzag-deselect Dependents"
 
-        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=GUI_ASSETS_DIR / "selector.png")
+        self.box_select_tool = BoxSelectTool(description=select_box_string, icon=_asset_data_uri("selector.png"))
 
         self.box_deselect_tool = BoxSelectTool(
-            description=deselect_box_string, icon=GUI_ASSETS_DIR / "deselector.png"
+            description=deselect_box_string, icon=_asset_data_uri("deselector.png")
         )
 
         self.box_zigzagselect_tool = BoxSelectTool(
-            description=zigzagselect_box_string, icon=GUI_ASSETS_DIR / "zigzag_selector.png"
+            description=zigzagselect_box_string, icon=_asset_data_uri("zigzag_selector.png")
         )
 
         self.box_interleavedselect_tool = BoxSelectTool(
-            description=interleavedselect_box_string, icon=GUI_ASSETS_DIR / "interleaved_selector.png"
+            description=interleavedselect_box_string, icon=_asset_data_uri("interleaved_selector.png")
         )
 
         self.box_dependent_deselect_tool = BoxSelectTool(
-            description=dependentdeselect_box_string, icon=GUI_ASSETS_DIR / "dependent_deselector.png"
+            description=dependentdeselect_box_string, icon=_asset_data_uri("dependent_deselector.png")
+        )
+
+        self.box_zigzag_dependent_deselect_tool = BoxSelectTool(
+            description=zigzagdependentdeselect_box_string,
+            icon=_asset_data_uri("zigzag_dependent_deselector.png"),
         )
 
         # Always-on gesture tools — hidden from toolbar (visible=False).
@@ -2143,6 +2220,7 @@ class ChannelmapGUI(param.Parameterized):
             self.box_zigzagselect_tool,
             self.box_interleavedselect_tool,
             self.box_dependent_deselect_tool,
+            self.box_zigzag_dependent_deselect_tool,
         ]
 
         self.plot = figure(
@@ -2165,6 +2243,12 @@ class ChannelmapGUI(param.Parameterized):
         self.setup_electrode_visualization()
         # Restrict hover tool to electrode rectangles only (prevents ??? on overlay glyphs)
         hover_tool.renderers = [self.electrode_renderer]
+        # Selection tools hit only what shares the electrode data. Left on "auto",
+        # a tap on a shared outline renderer selects that one outline and Bokeh
+        # dims all the others.
+        electrode_renderers = [self.electrode_renderer, self.survey_bar_renderer]
+        for tool in self.plot.select({"type": (TapTool, BoxSelectTool)}):
+            tool.renderers = electrode_renderers
 
         # Set initial y_range so only the bottom third of the probe is visible:
         # probe tips pinned at the bottom, top two-thirds hidden above the frame.
@@ -2204,7 +2288,11 @@ class ChannelmapGUI(param.Parameterized):
 
         # Hidden data source for tool state communication and CustomJS to monitor tool changes
         self.tool_state_source = ColumnDataSource(data={"active_tool": [""]})
-        self.setup_tool_monitoring(select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string)
+        self.setup_tool_monitoring(
+            select_box_string, deselect_box_string, zigzagselect_box_string,
+            interleavedselect_box_string, dependentdeselect_box_string,
+            zigzagdependentdeselect_box_string,
+        )
 
     def setup_interactions(self):
         """Setup click and selection interactions"""
@@ -2225,7 +2313,11 @@ class ChannelmapGUI(param.Parameterized):
             "indices", guarded("electrode selection")(self.on_electrode_selection)
         )
 
-    def setup_tool_monitoring(self, select_box_string, deselect_box_string, zigzagselect_box_string, interleavedselect_box_string, dependentdeselect_box_string):
+    def setup_tool_monitoring(
+        self, select_box_string, deselect_box_string, zigzagselect_box_string,
+        interleavedselect_box_string, dependentdeselect_box_string,
+        zigzagdependentdeselect_box_string,
+    ):
         """JS callback to expose active tools in toolbar"""
         # workaround https://stackoverflow.com/questions/58210752/how-to-get-currently-active-tool-in-bokeh-figure
 
@@ -2240,26 +2332,30 @@ class ChannelmapGUI(param.Parameterized):
             let zigzagselect_tool = null;
             let interleavedselect_tool = null;
             let dependentdeselect_tool = null;
+            let zigzagdependentdeselect_tool = null;
 
             tools.forEach((tool, index) => {
-                if (tool.description === 'select_box_string') {
+                if (tool.description === select_box_string) {
                     select_tool = tool;
                 }
-                if (tool.description === 'deselect_box_string') {
+                if (tool.description === deselect_box_string) {
                     deselect_tool = tool;
                 }
-                if (tool.description === 'zigzagselect_box_string') {
+                if (tool.description === zigzagselect_box_string) {
                     zigzagselect_tool = tool;
                 }
-                if (tool.description === 'interleavedselect_box_string') {
+                if (tool.description === interleavedselect_box_string) {
                     interleavedselect_tool = tool;
                 }
-                if (tool.description === 'dependentdeselect_box_string') {
+                if (tool.description === dependentdeselect_box_string) {
                     dependentdeselect_tool = tool;
+                }
+                if (tool.description === zigzagdependentdeselect_box_string) {
+                    zigzagdependentdeselect_tool = tool;
                 }
             });
 
-            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool && dependentdeselect_tool) {
+            if (select_tool && deselect_tool && zigzagselect_tool && interleavedselect_tool && dependentdeselect_tool && zigzagdependentdeselect_tool) {
                 if (select_tool.active) {
                     tools_info = 'select';
                 } else if (deselect_tool.active) {
@@ -2270,6 +2366,8 @@ class ChannelmapGUI(param.Parameterized):
                     tools_info = 'interleaved_select';
                 } else if (dependentdeselect_tool.active) {
                     tools_info = 'dependent_deselect';
+                } else if (zigzagdependentdeselect_tool.active) {
+                    tools_info = 'zigzag_dependent_deselect';
                 } else {
                     tools_info = 'neither_active';
                 }
@@ -2280,13 +2378,17 @@ class ChannelmapGUI(param.Parameterized):
 
         tool_state.data = {active_tool: [tools_info]};
         """
-        js_code = js_code.replace("dependentdeselect_box_string", dependentdeselect_box_string)
-        js_code = js_code.replace("interleavedselect_box_string", interleavedselect_box_string)
-        js_code = js_code.replace("zigzagselect_box_string", zigzagselect_box_string)
-        js_code = js_code.replace("deselect_box_string", deselect_box_string)
-        js_code = js_code.replace("select_box_string", select_box_string)
-
-        JS_selection_monitor = CustomJS(args={"tool_state": self.tool_state_source}, code=js_code)
+        # Pass descriptions as values so overlapping names cannot corrupt
+        # each other through order-dependent placeholder replacement.
+        JS_selection_monitor = CustomJS(args={
+            "tool_state": self.tool_state_source,
+            "select_box_string": select_box_string,
+            "deselect_box_string": deselect_box_string,
+            "zigzagselect_box_string": zigzagselect_box_string,
+            "interleavedselect_box_string": interleavedselect_box_string,
+            "dependentdeselect_box_string": dependentdeselect_box_string,
+            "zigzagdependentdeselect_box_string": zigzagdependentdeselect_box_string,
+        }, code=js_code)
 
         # Hack - monitor random GUI events to trigger javascript fetch of selection box type
         self.plot.js_on_event("selectiongeometry", JS_selection_monitor)  # Selection events
@@ -2317,6 +2419,9 @@ class ChannelmapGUI(param.Parameterized):
             elif active_tool == "dependent_deselect":
                 self.select_mode = "dependent_deselect"
                 print("→ DESELECT-DEPENDENTS box activated")
+            elif active_tool == "zigzag_dependent_deselect":
+                self.select_mode = "zigzag_dependent_deselect"
+                print("→ ZIGZAG-DESELECT-DEPENDENTS box activated")
             else:
                 self.select_mode = "select"
                 print(f"→ Unexpected result: {active_tool}, defaulting to SELECT box")
@@ -2667,10 +2772,6 @@ class ChannelmapGUI(param.Parameterized):
         self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
 
-        # Once an overlay exists, live-update it (bands + slices) whenever any
-        # pose / bregma / squish / tilt input changes, so edits are visible
-        # immediately instead of only on the next Compute click.
-        self._anatomy_overlay_active = False
         # atlas_name + bregma toggle do their own batched recompute (via
         # _on_atlas_change / _on_bregma_toggle), so they're not in this list.
         for _w in (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input,
@@ -2694,7 +2795,7 @@ class ChannelmapGUI(param.Parameterized):
             margin=(0, 0),
         )
         self.compute_anatomy_button = pn.widgets.Button(
-            name="Compute anatomical overlay 🧠", button_type="primary",
+            name=_BUTTON_COMPUTE, button_type="primary",
             sizing_mode="stretch_width", margin=(0, 0, 0, 0),
         )
         self.clear_anatomy_button = pn.widgets.Button(
@@ -2704,7 +2805,7 @@ class ChannelmapGUI(param.Parameterized):
         self.clear_anatomy_button.on_click(lambda event: self.clear_anatomy_overlay())
         self.anatomy_legend = pn.pane.HTML(self._empty_legend_html(), sizing_mode="stretch_width")
         self.anatomy_locator = pn.pane.HTML("", sizing_mode="stretch_width")
-        # Reused across renders (see compute_anatomy_overlay); dropped when the
+        # Reused across renders (see _compute_anatomy); dropped when the
         # overlay is cleared so an idle session doesn't sit on a canvas.
         self._locator_fig = None
         # Hidden until the first overlay is computed; cleared by "Clear overlay".
@@ -2714,8 +2815,7 @@ class ChannelmapGUI(param.Parameterized):
         )
 
         # Set initial button label based on whether the default atlas is already cached.
-        if not anatomy_atlas.is_downloaded(atlas_default):
-            self.compute_anatomy_button.name = "Download & compute atlas 🧠 ⏳"
+        self._refresh_compute_button()
 
         # IMRO file dropper
         self.imro_file_loader = pn.widgets.FileInput(width=300)
@@ -2824,10 +2924,20 @@ class ChannelmapGUI(param.Parameterized):
              "The black electrodes inside your box turn grey and become "
              "selectable."),
         ),
+        (
+            "zigzag_dependent_deselector.png",
+            "Zigzag-deselect dependents",
+            ("Frees only the fixed zigzag-pattern black electrodes inside the box "
+             "by deselecting the red electrodes blocking them, wherever they "
+             "sit (inside or outside the box). Only zigzag-pattern red "
+             "electrodes can be blockers, so the complementary non-zigzag "
+             "sites stay selected. Selects nothing; use Zigzag-select next "
+             "to select the freed sites."),
+        ),
     )
 
     def _selection_tools_help_html(self) -> str:
-        """In-GUI reference for the five drag-box tools in the plot toolbar.
+        """In-GUI reference for the six drag-box tools in the plot toolbar.
 
         Most users never open the online docs, so the tools — "deselect
         dependents" above all, whose target is *outside* the box you drag —
@@ -2848,7 +2958,7 @@ class ChannelmapGUI(param.Parameterized):
         return (
             '<div style="font-size: 13px; line-height: 1.4; text-align: justify;">'
             "Click any electrode to toggle it on or off. To edit many at once, "
-            "pick one of the five drag-box tools in the toolbar to the right of "
+            "pick one of the six drag-box tools in the toolbar to the right of "
             "the probe plot (only one is active at a time) and drag a rectangle "
             "over the probe:<br>"
             '<table style="border-collapse: collapse; margin: 6px 0;">'
@@ -2902,7 +3012,7 @@ class ChannelmapGUI(param.Parameterized):
             <b>You can mix and match four selection methods:</b><br>
             • <b>Presets:</b> Pre-configured channelmaps that respect wiring constraints<br>
             • <b>Textual selection:</b> Type electrode ranges (e.g., "1-10,20-25") to add to the current selection<br>
-            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, zigzag/interleaved selection, or "deselect dependents") to manually select multiple sites<br>
+            • <b>Interactive:</b> Click electrodes directly or drag boxes (selection, deselection, zigzag/interleaved selection, "deselect dependents", or "zigzag-deselect dependents") to manually select multiple sites<br>
             • <b>Selection from pre-existing IMRO file</b>: you can pre-load an IMRO file as a starting point before doing any of the above.<br><br>
 
             Once you reach the <b>target number of electrodes</b> for the selected probe type (384 or 1536), you can <b>download your channelmap</b> as an IMRO file alongside a PDF rendering to easily remember what your channelmap looks like. Use this IMRO file in SpikeGLX to record from the selected channels, and then use the Kilosort .json file to spikesort your data accordingly.<br><br>
@@ -3215,9 +3325,8 @@ def create_app():
     """Create and configure the Panel app"""
     # Re-arm the extensions for *this* session. Panel keys `config` on the
     # current document, so the module-level `pn.extension` above only ever
-    # configured whichever session happened to trigger the import -- under
-    # `panel serve` that is session #1, and everyone after it got
-    # `pn.state.notifications is None`. Must stay inside the app factory.
+    # configured whatever happened to trigger the import, so each session arms
+    # its own. Must stay inside the app factory.
     # `exception_handler` is per-session for the same reason: it turns any
     # callback error into a toast + webhook report instead of a re-raise.
     pn.extension(

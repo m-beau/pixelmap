@@ -93,6 +93,56 @@ def test_region_fill_uses_atlas_colors(fake_brainglobe):
     assert rgba[0, 1, 3] > 0 and rgba[0, 2, 3] > 0
 
 
+def _region_fill_rgba_reference(label_img, atlas):
+    """The original one-mask-per-region implementation, kept as an oracle."""
+    rgba = np.zeros((*label_img.shape, 4), dtype=float)
+    for region_id in np.unique(label_img):
+        if region_id == 0:
+            continue
+        r, g, b = schematic_module._region_rgb(atlas, int(region_id))
+        mask = label_img == region_id
+        rgba[mask, :3] = (r / 255.0, g / 255.0, b / 255.0)
+        rgba[mask, 3] = schematic_module._REGION_ALPHA
+    return rgba
+
+
+class TestRegionFillMatchesThePerRegionLoop:
+    """The fill is vectorised: it used to build one full-slice mask per region,
+    which was 2.4 s of every 3.5 s live update on allen_mouse_10um."""
+
+    def test_unknown_region_ids_fall_back_to_gray(self, fake_brainglobe):
+        atlas = _FakeAtlas("fake")
+        rgba = schematic_module._region_fill_rgba(np.array([[0, 99]], dtype=np.int32), atlas)
+        np.testing.assert_allclose(rgba[0, 1, :3], (200 / 255,) * 3)
+        assert rgba[0, 1, 3] == schematic_module._REGION_ALPHA
+
+    def test_an_all_outside_slice_is_fully_transparent(self, fake_brainglobe):
+        rgba = schematic_module._region_fill_rgba(np.zeros((3, 4), dtype=np.int32),
+                                                  _FakeAtlas("fake"))
+        assert rgba.shape == (3, 4, 4)
+        assert not rgba.any()
+
+    def test_an_empty_slice_gives_an_empty_image(self, fake_brainglobe):
+        rgba = schematic_module._region_fill_rgba(np.zeros((0, 5), dtype=np.int32),
+                                                  _FakeAtlas("fake"))
+        assert rgba.shape == (0, 5, 4)
+
+    @pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint16])
+    def test_many_regions_match_the_reference(self, fake_brainglobe, dtype):
+        atlas = _FakeAtlas("fake")
+        rng = np.random.default_rng(0)
+        ids = np.array([0, 1, 2, 7, 500, 60_000], dtype=dtype)  # 7, 500, 60k: unknown
+        label_img = rng.choice(ids, size=(40, 30)).astype(dtype)
+        atlas.structures = {
+            **atlas.structures,
+            500: {"acronym": "X", "name": "X", "rgb_triplet": [10, 20, 30]},
+        }
+        np.testing.assert_array_equal(
+            schematic_module._region_fill_rgba(label_img, atlas),
+            _region_fill_rgba_reference(label_img, atlas),
+        )
+
+
 def test_outline_marks_region_boundaries(fake_brainglobe):
     label_img = np.array([[1, 1, 2, 2]], dtype=np.int32)
     outline = schematic_module._outline_rgba(label_img)
