@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from pixelmap.anatomy import atlas as atlas_module
-from pixelmap.anatomy.regions import tip_depth_below_surface_um
+from pixelmap.anatomy.regions import surface_point_um, tip_depth_below_surface_um
 from pixelmap.anatomy.transform import probe_axis_up
 
 ATLAS = "fake_surface"
@@ -181,3 +181,102 @@ class TestProbeAxisUp:
         )[0]
         expected = np.asarray(tip) + 500.0 * probe_axis_up(15.0, -10.0)
         np.testing.assert_allclose(up_the_shank, expected, atol=1e-9)
+
+
+class TestSurfacePoint:
+    """Where a trajectory crosses the surface, from any point on it.
+
+    The slab's surface sits at DV ≈ 87.5 µm (see ``slab_atlas``).
+    """
+
+    def test_vertical_trajectory_from_above_the_brain(self, slab_atlas):
+        out = surface_point_um((250.0, 250.0, 25.0), atlas_name=ATLAS)
+        assert out is not None
+        assert out[0] == pytest.approx(250.0)
+        assert out[1] == pytest.approx(250.0)
+        assert out[2] == pytest.approx(87.5, abs=RES_UM / 2)
+
+    def test_works_from_outside_the_volume(self, slab_atlas):
+        """An insertion point is routinely above the volume altogether."""
+        out = surface_point_um((250.0, 250.0, -3000.0), atlas_name=ATLAS)
+        assert out is not None
+        assert out[2] == pytest.approx(87.5, abs=RES_UM / 2)
+
+    @pytest.mark.parametrize("pitch, yaw", [(0, 0), (30, 25), (-20, 10)])
+    def test_result_depends_only_on_the_line(self, slab_atlas, pitch, yaw):
+        """Casting from the tip or from far up the shank must agree exactly —
+        what lets snap find the same surface in both entry modes."""
+        tip = np.array([250.0, 250.0, 300.0])
+        from_tip = surface_point_um(tuple(tip), pitch_deg=pitch, yaw_deg=yaw, atlas_name=ATLAS)
+        # Not a multiple of the 25 µm step, or a grid anchored on the passed
+        # point would line up with the box-anchored one by coincidence.
+        far = tuple(tip + 4013.0 * probe_axis_up(pitch, yaw))
+        from_far = surface_point_um(far, pitch_deg=pitch, yaw_deg=yaw, atlas_name=ATLAS)
+        assert from_tip is not None and from_far is not None
+        np.testing.assert_allclose(from_tip, from_far, atol=1e-6)
+
+    @pytest.mark.parametrize("pitch, yaw", [(0, 0), (15, 0), (0, -20), (25, 10)])
+    def test_agrees_with_the_depth_readout(self, slab_atlas, pitch, yaw):
+        """Same outermost-crossing rule: the two may differ only by sampling."""
+        tip = np.array([250.0, 250.0, 300.0])
+        depth = tip_depth_below_surface_um(
+            tuple(tip), pitch_deg=pitch, yaw_deg=yaw, atlas_name=ATLAS)
+        surface = surface_point_um(
+            tuple(tip), pitch_deg=pitch, yaw_deg=yaw, atlas_name=ATLAS)
+        assert np.linalg.norm(np.array(surface) - tip) == pytest.approx(depth, abs=RES_UM)
+
+    def test_tilted_trajectory_meets_the_surface_along_the_axis(self, slab_atlas):
+        tip = np.array([250.0, 250.0, 300.0])
+        out = np.array(surface_point_um(tuple(tip), pitch_deg=30.0, atlas_name=ATLAS))
+        # Positive pitch tips the top of the probe toward +AP.
+        assert out[0] > tip[0]
+        np.testing.assert_allclose(
+            np.cross(out - tip, probe_axis_up(30.0, 0.0)), 0.0, atol=1e-6
+        )
+
+    def test_an_internal_gap_is_not_mistaken_for_the_surface(self, monkeypatch):
+        ann = np.zeros((20, 20, 20), dtype=np.int32)
+        ann[:, 4:16, :] = 1
+        ann[:, 8:10, :] = 0
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _make_atlas_cls(ann))
+        out = surface_point_um((250.0, 250.0, 300.0), atlas_name=ATLAS)
+        assert out[2] == pytest.approx(87.5, abs=RES_UM / 2)
+
+    def test_a_line_that_misses_the_volume_returns_none(self, slab_atlas):
+        assert surface_point_um((250.0, 99_999.0, 100.0), atlas_name=ATLAS) is None
+
+    def test_a_line_through_no_brain_returns_none(self, monkeypatch):
+        empty = np.zeros((20, 20, 20), dtype=np.int32)
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _make_atlas_cls(empty))
+        assert surface_point_um((250.0, 250.0, 100.0), atlas_name=ATLAS) is None
+
+    def test_thin_dorsal_layer_is_not_stepped_over(self, monkeypatch):
+        """The default step is the finest voxel, so one thin sheet is found."""
+        ann = np.zeros((20, 20, 20), dtype=np.int32)
+        ann[:, 4, :] = 1        # a single 25 µm sheet
+        ann[:, 10:16, :] = 1    # bulk, well below it
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _make_atlas_cls(ann))
+        out = surface_point_um((250.0, 250.0, 350.0), atlas_name=ATLAS)
+        assert out[2] == pytest.approx(87.5, abs=RES_UM / 2)
+
+    def test_non_asr_orientation_gives_the_same_point(self, monkeypatch):
+        """Same brain described in a flipped native frame → same canonical answer."""
+        ann = np.zeros((20, 20, 20), dtype=np.int32)
+        ann[:, 4:16, :] = 1
+        ann[:10, 2:4, :] = 1  # make AP matter: the anterior half is taller
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _make_atlas_cls(ann))
+        expected = surface_point_um((100.0, 250.0, 300.0), atlas_name=ATLAS)
+
+        atlas_module.release_atlas_memory()
+        atlas_module.get_atlas.cache_clear()
+        atlas_module.canonical_annotation.cache_clear()
+        flipped = np.flip(ann, axis=0).copy()  # "psr" reverses AP
+        monkeypatch.setattr(
+            atlas_module, "BrainGlobeAtlas", _make_atlas_cls(flipped, orientation="psr"))
+        got = surface_point_um((100.0, 250.0, 300.0), atlas_name="other")
+        np.testing.assert_allclose(got, expected, atol=1e-6)
+        assert expected[2] == pytest.approx(37.5, abs=RES_UM / 2)
+
+    def test_non_positive_step_is_rejected(self, slab_atlas):
+        with pytest.raises(ValueError):
+            surface_point_um((250.0, 250.0, 300.0), atlas_name=ATLAS, step_um=-1.0)
