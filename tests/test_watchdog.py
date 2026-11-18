@@ -190,6 +190,37 @@ def test_env_float(monkeypatch, raw, expected):
     assert watchdog._env_float("PIXELMAP_TEST_KNOB", 7.0) == expected
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    # Finite zero and negatives stay accepted: they deliberately switch a check off.
+    [(" 12 ", 12.0), ("-1", -1.0), ("-0", 0.0), ("1e3", 1000.0)],
+)
+def test_env_float_accepts_finite_values(monkeypatch, raw, expected):
+    monkeypatch.setenv("PIXELMAP_TEST_KNOB", raw)
+    assert watchdog._env_float("PIXELMAP_TEST_KNOB", 7.0) == expected
+
+
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "Infinity", " inf "])
+def test_env_float_rejects_non_finite_values(monkeypatch, caplog, raw):
+    """``float()`` parses these, but none is a usable threshold: NaN makes every
+    stall comparison misbehave, and ±inf silently disables a check."""
+    monkeypatch.setenv("PIXELMAP_TEST_KNOB", raw)
+    with caplog.at_level(logging.WARNING, logger=watchdog.log.name):
+        assert watchdog._env_float("PIXELMAP_TEST_KNOB", 7.0) == 7.0
+    assert "PIXELMAP_TEST_KNOB" in caplog.text
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_env_float_unset_or_blank_is_silent(monkeypatch, caplog, raw):
+    if raw is None:
+        monkeypatch.delenv("PIXELMAP_TEST_KNOB", raising=False)
+    else:
+        monkeypatch.setenv("PIXELMAP_TEST_KNOB", raw)
+    with caplog.at_level(logging.WARNING, logger=watchdog.log.name):
+        assert watchdog._env_float("PIXELMAP_TEST_KNOB", 7.0) == 7.0
+    assert caplog.text == ""
+
+
 # --------------------------------------------------------------------------
 # install()
 # --------------------------------------------------------------------------
