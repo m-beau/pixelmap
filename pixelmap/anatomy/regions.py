@@ -84,27 +84,7 @@ def tip_depth_below_surface_um(
 
     distances = np.arange(0.0, float(max_search_um) + step, step)
     coords = tip + distances[:, None] * direction  # (N, 3) in (AP, ML, DV)
-
-    ap_idx = np.round(coords[:, 0] / voxel_size[0]).astype(int)
-    dv_idx = np.round(coords[:, 2] / voxel_size[1]).astype(int)
-    ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
-
-    n_ap, n_dv, n_ml = annotation.shape
-    in_volume = (
-        (ap_idx >= 0) & (ap_idx < n_ap)
-        & (dv_idx >= 0) & (dv_idx < n_dv)
-        & (ml_idx >= 0) & (ml_idx < n_ml)
-    )
-    inside = np.zeros(distances.shape, dtype=bool)
-    if in_volume.any():
-        # One bounding-box read for the whole search line: the samples are
-        # collinear, so the box is thin even when the line is 30 mm long.
-        inside[in_volume] = (
-            annotation.gather(
-                ap_idx[in_volume], dv_idx[in_volume], ml_idx[in_volume]
-            )
-            != 0
-        )
+    inside = _in_brain(annotation, voxel_size, coords)
 
     if not inside[0]:
         return None  # tip is not in the brain — "depth below surface" is meaningless
@@ -115,3 +95,105 @@ def tip_depth_below_surface_um(
     # The surface lies between the last in-brain sample and the first sample
     # past it; take the midpoint so the answer isn't biased by half a step.
     return float(distances[last_inside] + step / 2.0)
+
+
+def surface_point_um(
+    point_atlas: np.ndarray | tuple[float, float, float],
+    *,
+    pitch_deg: float = 0.0,
+    yaw_deg: float = 0.0,
+    atlas_name: str = "allen_mouse_25um",
+    step_um: float | None = None,
+) -> tuple[float, float, float] | None:
+    """Where a probe trajectory crosses the brain surface, as ``(AP, ML, DV)`` µm.
+
+    The counterpart of :func:`tip_depth_below_surface_um` for when the point
+    you have is *not* in the brain — typically an insertion point, which sits
+    on or above the surface by construction. The trajectory is the line
+    through ``point_atlas`` along the probe axis; the surface is its
+    *outermost* (most dorsal along the shank) crossing out of the annotated
+    volume, by the same rule and with the same half-step midpoint as the
+    depth readout.
+
+    The result depends only on the *line*, not on which of its points is
+    passed in — the line is clipped to the volume's bounding box and sampled
+    from where it enters the box. Casting from the tip or from the insertion
+    point therefore gives the same answer.
+
+    Args:
+        point_atlas: any ``(AP, ML, DV)`` µm point on the trajectory.
+        pitch_deg, yaw_deg: insertion tilts — see
+            :mod:`pixelmap.anatomy.transform`.
+        atlas_name: brainglobe atlas identifier.
+        step_um: sampling step along the axis. Defaults to the atlas's finest
+            voxel size, so a thin dorsal layer is never stepped over.
+
+    Returns:
+        The surface crossing, or ``None`` if the trajectory never passes
+        through a labelled voxel.
+    """
+    annotation, voxel_size = canonical_annotation(atlas_name)  # indexed (AP, DV, ML)
+    p = np.asarray(point_atlas, dtype=float).reshape(3)
+    direction = probe_axis_up(pitch_deg, yaw_deg)
+
+    step = float(step_um) if step_um else float(np.min(voxel_size))
+    if step <= 0:
+        raise ValueError(f"step_um must be positive; got {step_um}")
+
+    # Clip the infinite line to the slab of coordinates that round onto a
+    # voxel, in coordinate order (AP, ML, DV). A fixed window around ``p``
+    # would not do: an insertion point is routinely outside the volume, and
+    # the answer would then depend on which point of the line was passed in.
+    n_ap, n_dv, n_ml = annotation.shape
+    res = np.asarray(voxel_size, dtype=float)[[0, 2, 1]]
+    lo = -0.5 * res
+    hi = (np.array([n_ap, n_ml, n_dv]) - 0.5) * res
+    t_lo, t_hi = -np.inf, np.inf
+    for i in range(3):
+        if abs(direction[i]) < 1e-12:  # line parallel to this pair of faces
+            if not lo[i] <= p[i] < hi[i]:
+                return None
+            continue
+        t0, t1 = (lo[i] - p[i]) / direction[i], (hi[i] - p[i]) / direction[i]
+        t_lo, t_hi = max(t_lo, min(t0, t1)), min(t_hi, max(t0, t1))
+    if t_hi < t_lo:
+        return None  # the line misses the volume altogether
+
+    # Sample upward from where the line enters the box, so the sample grid
+    # (and hence the answer) is a property of the line alone.
+    ts = np.arange(t_lo, t_hi + step, step)
+    inside = _in_brain(annotation, voxel_size, p + ts[:, None] * direction)
+    hits = np.flatnonzero(inside)
+    if hits.size == 0:
+        return None
+    t_surface = ts[hits[-1]] + step / 2.0
+    return tuple(float(c) for c in p + t_surface * direction)
+
+
+def _in_brain(annotation, voxel_size, coords: np.ndarray) -> np.ndarray:
+    """Whether each ``(AP, ML, DV)`` µm sample lands on a labelled voxel.
+
+    Samples outside the volume count as outside the brain, matching
+    :func:`~pixelmap.anatomy.atlas.lookup_regions`.
+    """
+    ap_idx = np.round(coords[:, 0] / voxel_size[0]).astype(int)
+    dv_idx = np.round(coords[:, 2] / voxel_size[1]).astype(int)
+    ml_idx = np.round(coords[:, 1] / voxel_size[2]).astype(int)
+
+    n_ap, n_dv, n_ml = annotation.shape
+    in_volume = (
+        (ap_idx >= 0) & (ap_idx < n_ap)
+        & (dv_idx >= 0) & (dv_idx < n_dv)
+        & (ml_idx >= 0) & (ml_idx < n_ml)
+    )
+    inside = np.zeros(len(coords), dtype=bool)
+    if in_volume.any():
+        # One bounding-box read for the whole line: the samples are
+        # collinear, so the box is thin even when the line is 30 mm long.
+        inside[in_volume] = (
+            annotation.gather(
+                ap_idx[in_volume], dv_idx[in_volume], ml_idx[in_volume]
+            )
+            != 0
+        )
+    return inside

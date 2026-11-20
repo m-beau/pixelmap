@@ -250,8 +250,8 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 1. Design your channelmap as usual (presets, drag tools, etc.).
 2. Open the **Anatomical overlay** panel on the right side of the GUI.
 3. Choose your **atlas** (e.g. `allen_mouse_25um`; first use downloads it — a few MB of compressed OME-Zarr).
-4. Enter the **tip coordinates** in atlas µm (AP, ML, DV) — the position of the lowest electrode of shank 0.
-5. If your stereotaxic measurements are relative to bregma, tick **Tip relative to bregma** and enter your stereotaxic coordinates instead (see [Bregma-relative mode](#bregma-relative-coordinate-mode) below).
+4. Pick whether you want to enter **Tip** or **Insertion** coordinates (see [Tip vs. insertion-point entry](#tip-vs-insertion-point-entry) below), then type them in atlas µm (AP, ML, DV). Tip coordinates are the position of the lowest electrode of shank 0; insertion coordinates are where the shank enters the brain.
+5. If your stereotaxic measurements are relative to bregma, tick **Coordinates relative to bregma** and enter your stereotaxic coordinates instead (see [Bregma-relative mode](#bregma-relative-coordinate-mode) below).
 6. Adjust **Pitch** and **Yaw** to match the tilt of your stereotaxic arm if the probe is not inserted vertically.
 7. For multi-shank probes, set **Shank orientation** to indicate which direction the shanks run (0° = shanks along the ML axis, 90° = along AP).
 8. Click **Compute anatomical overlay 🧠**. The colored bands, labels, and locator figure appear immediately.
@@ -267,22 +267,60 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 | **Pitch** | degrees | AP tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe forward (toward +AP). Corresponds to the rotation of the stereotaxic arm around the ML axis. |
 | **Yaw** | degrees | ML tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe to the right (toward +ML). Corresponds to rotation around the AP axis. |
 | **Shank orientation** | degrees | For multi-shank probes only: rotation of the shank line around the probe's own long axis. `0°` = shanks arrayed along +ML (probe inserted side-on); `90°` = shanks arrayed along +AP (probe inserted front-to-back). Has no effect on single-shank probes. |
+| **Tip / Insertion** | — | Which coordinate triplet you type. The other one is greyed out and follows automatically. |
+| **Entry AP / ML / DV** | µm (atlas) | The insertion point: where the shank enters the brain, in the same frame as the tip coordinates. In Insertion mode you type AP and ML; **Entry DV is never typed** — it is the brain surface at that AP/ML. |
+| **Insertion depth** | µm | Travel **along the shank** from the insertion point down to the **physical shank tip** — what you advance the manipulator by. Editable in both modes; it is what links the two coordinate triplets. |
+| **⤓ Snap to brain surface** | — | Tip mode only: keeps the tip and sets **Insertion depth** so the entry point lands on the brain surface. Disabled until the atlas has been downloaded. |
 
-### Tip depth below the brain surface
+### Tip vs. insertion-point entry
 
-Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe tip to the brain (not skull) surface, measured **along the probe axis**. This maps onto the number you read off the micromanipulator during an insertion (how far the tip has travelled since the shank broke the surface), so it is the most direct way to check that a set of atlas coordinates matches what you actually did (or plan to do) at the rig.
+Surgeries are planned from the craniotomy, not from where the tip ends up. The **Tip / Insertion** switch lets you enter whichever you actually know:
 
-On multi-shank probes **the tip is the lowest electrode of shank 0** — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
+- **Tip** — you type the tip coordinates; the entry point is derived by projecting `Insertion depth` back up the shank.
+- **Insertion** — you type the entry point's **AP and ML** (your craniotomy coordinates); its DV is placed on the brain surface directly below, and the tip is derived by projecting `Insertion depth` down the shank. Entry DV does not depend on pitch or yaw: whatever the angle, the entry point *is* that surface point.
+
+Switching from Tip to Insertion keeps the probe where it is: the entry point is moved to where the current trajectory crosses the brain surface, and `Insertion depth` is updated to match. (If the tip is not inside the brain there is no crossing to keep, so the entry DV drops onto the surface and the tip moves with it.) Entry DV needs the atlas volume; until the atlas has been downloaded it is a placeholder, and the first **Compute anatomical overlay** settles it.
+
+The greyed-out triplet is always live: it updates as you type, so you can read off the other end of the trajectory at any time without switching modes.
+
+Because depth is measured *along the shank* rather than as a vertical drop, it is exactly how far you advance the manipulator, and it stays correct at any pitch or yaw — including a fully horizontal probe.
+
+:::{note}
+**Two different "tips".** `Insertion depth` is measured to the **physical shank tip**, because that is what a manipulator reading refers to. The **Tip AP/ML/DV** fields, the depth readout, and everything else in PixelMap refer to the **lowest electrode**, which sits above the shank tip on a stretch of inactive silicon — 209 µm on Neuropixels 1.0, 206 µm on Neuropixels 2.0 and QuadBase, and up to ~373 µm on some NHP probes.
+
+PixelMap applies this offset automatically from the selected part number (Bill Karsh's `tip_length_um`), so you can enter the manipulator reading directly. One consequence: an insertion depth *smaller* than the tip length means the shank tip has entered the brain but the electrodes have not yet — the overlay will correctly show them still above the surface.
+:::
+
+#### The switch also chooses the pivot
+
+Changing an angle keeps whichever coordinate you are entering fixed:
+
+- In **Tip** mode, adjusting pitch or yaw pivots the probe **around the tip** — useful when the recording target is what matters.
+- In **Insertion** mode, it pivots **around the entry point** — which is what actually happens when you change the arm angle over a fixed craniotomy.
+
+#### Snapping to the brain surface
+
+In **Tip** mode, **⤓ Snap to brain surface** finds where the current trajectory crosses the brain surface in the atlas annotation, using the same *outermost crossing* rule as the [depth readout](#lowest-electrode-to-brain-surface-along-the-shank). The tip stays exactly where it is and **Insertion depth** becomes the depth readout plus the tip length — i.e. it answers "how far do I need to lower the probe?". After a snap, the two numbers therefore differ by exactly the tip length (206 µm on 2.0 probes).
+
+Insertion mode has no Snap button, because the entry point is always on the surface there.
+
+If the tip is not inside the brain you get a warning and nothing changes. The button needs the atlas volume, so it stays disabled until the atlas has been downloaded (click **Compute anatomical overlay** once to fetch it).
+
+### Lowest electrode to brain surface, along the shank
+
+Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe's **lowest electrode** to the brain (not skull) surface, measured **along the probe axis**. That is a vertical depth only when the probe points straight down; at pitch or yaw θ off vertical the vertical depth is shorter, by a factor of cos θ for a tilt in one plane (about 13% less at 30°). On multi-shank probes that is the lowest electrode of shank 0 — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
+
+It is **not** the manipulator reading. The manipulator (and **Insertion depth**) measure to the physical shank tip, which is one tip length further along the shank: manipulator reading = this readout + 206 µm on 2.0 probes (209 µm on 1.0). The box states the offset for the selected probe.
 
 It is computed by walking up the shank axis from the tip until the axis leaves the annotated atlas volume, and taking the *outermost* crossing. An insertion that passes through a ventricle or between two structures therefore still reports the depth below the true brain surface, not the depth below the first gap.
 
 ::::{note}
-This is a **readout, not an input** — you cannot type a surface-relative depth in because it is an underconstrained instruction (infinitely many (AP, ML, DV) positions sit the same distance below the surface). Use the tip coordinates plus the tilts to move the probe in the atlas.
+This is a **readout, not an input** — a surface-relative depth on its own is an underconstrained instruction (infinitely many (AP, ML, DV) positions sit the same distance below the surface). To position the probe by depth, pin down *where* it enters as well: switch to [insertion-point entry](#tip-vs-insertion-point-entry), type the entry point, and set **Insertion depth**.
 ::::
 
 ### Bregma-relative coordinate mode
 
-Tick **Tip relative to bregma** to switch from absolute atlas coordinates to stereotaxic coordinates measured from a skull landmark. When active, the Tip AP/ML/DV fields accept offsets from bregma (or the anterior commissure, for non-rodent atlases) in µm, following the standard neuroscience convention: AP positive = anterior, ML positive = right of midline, DV positive = ventral (deeper).
+Tick **Coordinates relative to bregma** to switch from absolute atlas coordinates to stereotaxic coordinates measured from a skull landmark. When active, both the Tip and Entry AP/ML/DV fields accept offsets from bregma (or the anterior commissure, for non-rodent atlases) in µm, following the standard neuroscience convention: AP positive = anterior, ML positive = right of midline, DV positive = ventral (deeper).
 
 Three additional fields become editable in this mode:
 

@@ -83,6 +83,17 @@ def test_bregma_dot_adds_one_marker_per_slice(fake_brainglobe):
         assert len(a_yes.get_lines()) == len(a_no.get_lines()) + 1
 
 
+def test_insertion_point_adds_a_marker_and_a_path_per_slice(fake_brainglobe):
+    common = {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
+              "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
+    without = render_locator("fake", **common)
+    with_entry = render_locator("fake", entry_um=(100.0, 100.0, 10.0), **common)
+    for a_no, a_yes in zip(without.axes[:3], with_entry.axes[:3]):
+        assert len(a_yes.get_lines()) == len(a_no.get_lines()) + 2  # diamond + dashed path
+    labels = [t.get_text() for t in with_entry.axes[3].get_legend().get_texts()]
+    assert "insertion point" in labels
+
+
 def test_region_fill_uses_atlas_colors(fake_brainglobe):
     atlas = _FakeAtlas("fake")
     label_img = np.array([[0, 1, 2]], dtype=np.int32)
