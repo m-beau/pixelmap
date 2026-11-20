@@ -268,16 +268,18 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 | **Yaw** | degrees | ML tilt of the probe shaft. `0` = perfectly vertical. Positive values tip the top of the probe to the right (toward +ML). Corresponds to rotation around the AP axis. |
 | **Shank orientation** | degrees | For multi-shank probes only: rotation of the shank line around the probe's own long axis. `0°` = shanks arrayed along +ML (probe inserted side-on); `90°` = shanks arrayed along +AP (probe inserted front-to-back). Has no effect on single-shank probes. |
 | **Tip / Insertion** | — | Which coordinate triplet you type. The other one is greyed out and follows automatically. |
-| **Entry AP / ML / DV** | µm (atlas) | The insertion point: where the shank enters the brain, in the same frame as the tip coordinates. |
+| **Entry AP / ML / DV** | µm (atlas) | The insertion point: where the shank enters the brain, in the same frame as the tip coordinates. In Insertion mode you type AP and ML; **Entry DV is never typed** — it is the brain surface at that AP/ML. |
 | **Insertion depth** | µm | Travel **along the shank** from the insertion point down to the **physical shank tip** — what you advance the manipulator by. Editable in both modes; it is what links the two coordinate triplets. |
-| **⤓ Snap to brain surface** | — | Finds where the current trajectory actually enters the brain in the selected atlas. Disabled until the atlas has been downloaded. |
+| **⤓ Snap to brain surface** | — | Tip mode only: keeps the tip and sets **Insertion depth** so the entry point lands on the brain surface. Disabled until the atlas has been downloaded. |
 
 ### Tip vs. insertion-point entry
 
 Surgeries are planned from the craniotomy, not from where the tip ends up. The **Tip / Insertion** switch lets you enter whichever you actually know:
 
 - **Tip** — you type the tip coordinates; the entry point is derived by projecting `Insertion depth` back up the shank.
-- **Insertion** — you type the entry point; the tip is derived by projecting `Insertion depth` down the shank.
+- **Insertion** — you type the entry point's **AP and ML** (your craniotomy coordinates); its DV is placed on the brain surface directly below, and the tip is derived by projecting `Insertion depth` down the shank. Entry DV does not depend on pitch or yaw: whatever the angle, the entry point *is* that surface point.
+
+Switching from Tip to Insertion keeps the probe where it is: the entry point is moved to where the current trajectory crosses the brain surface, and `Insertion depth` is updated to match. (If the tip is not inside the brain there is no crossing to keep, so the entry DV drops onto the surface and the tip moves with it.) Entry DV needs the atlas volume; until the atlas has been downloaded it is a placeholder, and the first **Compute anatomical overlay** settles it.
 
 The greyed-out triplet is always live: it updates as you type, so you can read off the other end of the trajectory at any time without switching modes.
 
@@ -298,18 +300,17 @@ Changing an angle keeps whichever coordinate you are entering fixed:
 
 #### Snapping to the brain surface
 
-**⤓ Snap to brain surface** finds where the current trajectory crosses the brain surface in the atlas annotation, using the same *outermost crossing* rule as the [depth readout](#tip-depth-below-the-brain-surface). What it writes depends on the mode:
+In **Tip** mode, **⤓ Snap to brain surface** finds where the current trajectory crosses the brain surface in the atlas annotation, using the same *outermost crossing* rule as the [depth readout](#lowest-electrode-to-brain-surface-along-the-shank). The tip stays exactly where it is and **Insertion depth** becomes the depth readout plus the tip length — i.e. it answers "how far do I need to lower the probe?". After a snap, the two numbers therefore differ by exactly the tip length (206 µm on 2.0 probes).
 
-- In **Insertion** mode, the entry point slides onto the surface and the tip follows at the unchanged depth.
-- In **Tip** mode, the tip stays exactly where it is and **Insertion depth** becomes the depth readout plus the tip length — i.e. it answers "how far do I need to lower the probe?".
+Insertion mode has no Snap button, because the entry point is always on the surface there.
 
-If the trajectory never enters the brain (or, in Tip mode, the tip is not inside it) you get a warning and nothing changes. The button needs the atlas volume, so it stays disabled until the atlas has been downloaded (click **Compute anatomical overlay** once to fetch it).
+If the tip is not inside the brain you get a warning and nothing changes. The button needs the atlas volume, so it stays disabled until the atlas has been downloaded (click **Compute anatomical overlay** once to fetch it).
 
-### Tip depth below the brain surface
+### Lowest electrode to brain surface, along the shank
 
-Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe tip to the brain (not skull) surface, measured **along the probe axis**. This maps onto the number you read off the micromanipulator during an insertion (how far the tip has travelled since the shank broke the surface), so it is the most direct way to check that a set of atlas coordinates matches what you actually did (or plan to do) at the rig.
+Above the tip coordinate fields, PixelMap shows a **read-only** box: the distance from the probe's **lowest electrode** to the brain (not skull) surface, measured **along the probe axis**. That is a vertical depth only when the probe points straight down; at pitch or yaw θ off vertical the vertical depth is shorter, by a factor of cos θ for a tilt in one plane (about 13% less at 30°). On multi-shank probes that is the lowest electrode of shank 0 — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
 
-On multi-shank probes **the tip is the lowest electrode of shank 0** — the bottom of the leftmost shank — the same reference point the Tip AP/ML/DV fields use.
+It is **not** the manipulator reading. The manipulator (and **Insertion depth**) measure to the physical shank tip, which is one tip length further along the shank: manipulator reading = this readout + 206 µm on 2.0 probes (209 µm on 1.0). The box states the offset for the selected probe.
 
 It is computed by walking up the shank axis from the tip until the axis leaves the annotated atlas volume, and taking the *outermost* crossing. An insertion that passes through a ventricle or between two structures therefore still reports the depth below the true brain surface, not the depth below the first gap.
 

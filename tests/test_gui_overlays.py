@@ -378,14 +378,28 @@ def _measured_depth(gui):
     )
 
 
+def _readout_has_value(gui) -> bool:
+    """Whether the readout shows a measured depth (the value carries an mm twin)."""
+    return " mm)" in gui.tip_depth_readout.object
+
+
 class TestTipDepthReadout:
     """The readout is tied to the overlay: blank until Compute, blank after Clear."""
+
+    def test_readout_names_the_lowest_electrode_and_the_tip_offset(self, posed_gui):
+        """Insertion depth runs to the physical tip, the readout to the lowest
+        electrode; the label has to say so, with this probe's offset."""
+        html = posed_gui.tip_depth_readout.object
+        assert "Lowest electrode to brain surface, along the shank" in html
+        # Not a vertical depth unless the probe is straight down; say so.
+        assert "vertical depth only when the probe points straight down" in html
+        assert f"tip, {posed_gui._tip_length_um():.0f} µm further along" in html
 
     def test_readout_is_blank_before_the_overlay_is_computed(self, posed_gui):
         assert posed_gui._anatomy_overlay_active is False
         assert "—" in posed_gui.tip_depth_readout.object
         assert "compute the overlay" in posed_gui.tip_depth_readout.object
-        assert "µm" not in posed_gui.tip_depth_readout.object
+        assert _readout_has_value(posed_gui) is False
 
     def test_moving_the_tip_before_computing_does_not_fill_the_readout(self, posed_gui):
         posed_gui.tip_dv_input.value = 3500.0
@@ -399,12 +413,12 @@ class TestTipDepthReadout:
 
     def test_clearing_the_overlay_blanks_the_readout_again(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
-        assert "µm" in posed_gui.tip_depth_readout.object
+        assert _readout_has_value(posed_gui) is True
 
         posed_gui.clear_anatomy_overlay()
 
         assert "compute the overlay" in posed_gui.tip_depth_readout.object
-        assert "µm" not in posed_gui.tip_depth_readout.object
+        assert _readout_has_value(posed_gui) is False
 
     def test_readout_follows_the_tip_once_an_overlay_exists(self, posed_gui):
         posed_gui.compute_anatomy_overlay()
@@ -1114,17 +1128,26 @@ class TestCoordinateEntryModes:
         assert all(w.disabled for w in posed_gui._entry_inputs)
         posed_gui.coord_mode_input.value = "Insertion"
         assert all(w.disabled for w in posed_gui._tip_inputs)
-        assert all(not w.disabled for w in posed_gui._entry_inputs)
+        assert not posed_gui.entry_ap_input.disabled
+        assert not posed_gui.entry_ml_input.disabled
+        # Entry DV follows the brain surface, so it is never typed.
+        assert posed_gui.entry_dv_input.disabled
 
     def test_repeated_toggling_does_not_move_the_probe(self, posed_gui):
         posed_gui.pitch_input.value = 17.0
         posed_gui.yaw_input.value = -11.0
-        tip, entry = _triplet(posed_gui._tip_inputs), _triplet(posed_gui._entry_inputs)
+        tip = _triplet(posed_gui._tip_inputs)
+        # The first switch settles the entry onto the surface (depth changes,
+        # tip doesn't); from then on toggling must be a no-op.
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.coord_mode_input.value = "Tip"
+        entry, depth = _triplet(posed_gui._entry_inputs), posed_gui.insertion_depth_input.value
         for _ in range(10):
             posed_gui.coord_mode_input.value = "Insertion"
             posed_gui.coord_mode_input.value = "Tip"
         np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), tip)
         np.testing.assert_array_equal(_triplet(posed_gui._entry_inputs), entry)
+        assert posed_gui.insertion_depth_input.value == depth
 
     def test_toggling_never_rewrites_what_the_user_typed(self, posed_gui):
         """Only the greyed-out triplet is ever written; a value typed with
@@ -1137,12 +1160,14 @@ class TestCoordinateEntryModes:
 
     def test_typing_an_entry_point_moves_the_tip(self, posed_gui):
         posed_gui.coord_mode_input.value = "Insertion"
-        posed_gui.entry_dv_input.value = 500.0
+        posed_gui.entry_ap_input.value = 3000.0
         np.testing.assert_allclose(
             posed_gui._entry_atlas_um(), _expected_entry(posed_gui), atol=0.1
         )
+        assert posed_gui.tip_ap_input.value == pytest.approx(3000.0, abs=0.05)
+        depth = posed_gui.insertion_depth_input.value
         assert posed_gui.tip_dv_input.value == pytest.approx(
-            500.0 + 4000.0 - posed_gui._tip_length_um(), abs=0.05
+            posed_gui.entry_dv_input.value + depth - posed_gui._tip_length_um(), abs=0.05
         )
 
     def test_insertion_mode_pivots_around_the_entry_point(self, posed_gui):
@@ -1201,7 +1226,8 @@ class TestCoordinateEntryModes:
 
     def test_a_cleared_field_does_not_raise(self, posed_gui):
         posed_gui.coord_mode_input.value = "Insertion"
-        posed_gui.entry_dv_input.value = None  # what the browser sends on clear
+        posed_gui.entry_ap_input.value = None  # what the browser sends on clear
+        posed_gui.entry_dv_input.value = None
         posed_gui.insertion_depth_input.value = None
 
     def test_one_coordinate_edit_computes_once_with_the_mirrored_tip(
@@ -1222,7 +1248,8 @@ class TestCoordinateEntryModes:
             return original(req)
 
         monkeypatch.setattr(posed_gui, "_compute_anatomy", _spy)
-        posed_gui.entry_dv_input.value = 1200.0
+        # An AP edit also settles the entry DV on the surface before drawing.
+        posed_gui.entry_ap_input.value = 2800.0
 
         assert len(requests) == 1
         np.testing.assert_allclose(requests[0].tip, posed_gui._tip_atlas_um())
@@ -1244,19 +1271,6 @@ class TestSnapToSurface:
     def _snap(gui):
         asyncio.run(gui._on_snap_to_surface(None))
 
-    def test_insertion_mode_moves_the_entry_onto_the_surface(self, posed_gui):
-        posed_gui.coord_mode_input.value = "Insertion"
-        posed_gui.entry_dv_input.value = 100.0  # well above the brain
-
-        self._snap(posed_gui)
-
-        assert posed_gui.entry_dv_input.value == pytest.approx(self.SURFACE_DV, abs=25.0)
-        assert posed_gui.entry_ap_input.value == pytest.approx(2500.0)
-        # The tip follows at the unchanged depth.
-        np.testing.assert_allclose(
-            posed_gui._entry_atlas_um(), _expected_entry(posed_gui), atol=0.1
-        )
-
     def test_tip_mode_keeps_the_tip_and_matches_the_depth_readout(self, posed_gui):
         posed_gui.pitch_input.value = 20.0
         tip = _triplet(posed_gui._tip_inputs)
@@ -1269,28 +1283,12 @@ class TestSnapToSurface:
             _measured_depth(posed_gui) + posed_gui._tip_length_um(), abs=0.05
         )
 
-    def test_both_modes_agree_on_where_the_surface_is(self, posed_gui):
-        posed_gui.pitch_input.value = 25.0
-        posed_gui.yaw_input.value = -10.0
-        self._snap(posed_gui)  # Tip mode: sets the depth
-        via_tip = np.array(posed_gui._entry_atlas_um())
-
+    def test_snap_is_offered_in_tip_mode_only(self, posed_gui):
+        assert posed_gui.snap_surface_button.visible
         posed_gui.coord_mode_input.value = "Insertion"
-        self._snap(posed_gui)  # Insertion mode: moves the entry
-        via_entry = np.array(posed_gui._entry_atlas_um())
-
-        # Two sampling grids along the same line: within one voxel.
-        assert np.linalg.norm(via_tip - via_entry) <= 25.0
-
-    def test_a_trajectory_that_misses_the_brain_changes_nothing(self, posed_gui):
-        posed_gui.coord_mode_input.value = "Insertion"
-        posed_gui.entry_ml_input.value = 99_999.0  # far outside the volume
-        before = (_triplet(posed_gui._tip_inputs), _triplet(posed_gui._entry_inputs))
-
-        self._snap(posed_gui)
-
-        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), before[0])
-        np.testing.assert_array_equal(_triplet(posed_gui._entry_inputs), before[1])
+        assert not posed_gui.snap_surface_button.visible
+        posed_gui.coord_mode_input.value = "Tip"
+        assert posed_gui.snap_surface_button.visible
 
     def test_tip_outside_the_brain_leaves_the_depth_alone(self, posed_gui):
         posed_gui.tip_dv_input.value = 100.0  # above the surface
@@ -1327,3 +1325,107 @@ class TestSnapToSurface:
         monkeypatch.setattr(gui_module, "tip_depth_below_surface_um", _slow)
         self._snap(posed_gui)
         assert posed_gui.insertion_depth_input.value == 4000.0
+
+
+class TestEntryFollowsSurface:
+    """In Insertion mode only Entry AP/ML are typed; Entry DV is the surface.
+
+    The fake brain's surface is at DV ≈ 987.5 µm (see ``layered_atlas``).
+    """
+
+    SURFACE_DV = 987.5
+
+    def _assert_on_surface(self, gui):
+        assert gui._entry_atlas_um()[2] == pytest.approx(self.SURFACE_DV, abs=25.0)
+
+    @pytest.mark.parametrize("pitch", [0.0, 20.0])
+    def test_switching_to_insertion_keeps_the_probe_and_settles_the_entry(
+        self, posed_gui, pitch
+    ):
+        posed_gui.pitch_input.value = pitch
+        tip = _triplet(posed_gui._tip_inputs)
+
+        posed_gui.coord_mode_input.value = "Insertion"
+
+        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), tip)
+        self._assert_on_surface(posed_gui)
+        # Depth = lowest-electrode readout + the inactive tip.
+        assert posed_gui.insertion_depth_input.value == pytest.approx(
+            _measured_depth(posed_gui) + posed_gui._tip_length_um(), abs=0.05
+        )
+
+    def test_a_new_entry_ap_ml_drops_onto_the_surface_whatever_the_tilt(self, posed_gui):
+        posed_gui.pitch_input.value = 20.0
+        posed_gui.yaw_input.value = -10.0
+        posed_gui.coord_mode_input.value = "Insertion"
+
+        posed_gui.entry_ap_input.value = 3000.0
+        posed_gui.entry_ml_input.value = 2000.0
+
+        assert posed_gui.entry_ap_input.value == 3000.0
+        assert posed_gui.entry_ml_input.value == 2000.0
+        self._assert_on_surface(posed_gui)
+        np.testing.assert_allclose(
+            posed_gui._entry_atlas_um(), _expected_entry(posed_gui), atol=0.1
+        )
+
+    def test_no_brain_below_the_entry_leaves_its_dv_alone(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        dv = posed_gui.entry_dv_input.value
+        posed_gui.entry_ml_input.value = 99_999.0  # far outside the volume
+        assert posed_gui.entry_dv_input.value == dv
+
+    def test_a_tip_outside_the_brain_drops_the_entry_instead(self, posed_gui):
+        """No crossing above the tip to keep, so the entry DV moves (and the tip with it)."""
+        posed_gui.tip_dv_input.value = 100.0  # above the surface
+        posed_gui.coord_mode_input.value = "Insertion"
+        self._assert_on_surface(posed_gui)
+        assert posed_gui.insertion_depth_input.value == 4000.0
+
+    def test_without_a_local_atlas_compute_settles_the_entry(self, posed_gui, monkeypatch):
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: False)
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.entry_ap_input.value = 2600.0
+        assert posed_gui._entry_atlas_um()[2] < self.SURFACE_DV - 100  # still the mirror
+
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: True)
+        posed_gui.compute_anatomy_overlay()
+
+        self._assert_on_surface(posed_gui)
+        np.testing.assert_allclose(
+            posed_gui._entry_atlas_um(), _expected_entry(posed_gui), atol=0.1
+        )
+
+    def test_bregma_mode_entry_at_the_landmark_lands_on_the_surface(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        try:
+            posed_gui.bregma_relative_toggle.value = True
+            assert posed_gui.entry_ap_input.value == 0.0
+            assert posed_gui.entry_ml_input.value == 0.0
+            self._assert_on_surface(posed_gui)
+        finally:
+            posed_gui.bregma_relative_toggle.value = False
+
+    def test_the_surface_is_read_off_the_event_loop(self, posed_gui, monkeypatch):
+        threads = []
+        original = gui_module.surface_point_um
+
+        def _spy(*args, **kwargs):
+            threads.append(threading.current_thread())
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(gui_module, "surface_point_um", _spy)
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.entry_ap_input.value = 2700.0
+        assert threads and all(t is not threading.main_thread() for t in threads)
+
+    @pytest.mark.parametrize("pitch", [0.0, 20.0])
+    def test_computing_after_the_switch_does_not_nudge_the_tip(self, posed_gui, pitch):
+        """The switch settles along the shank axis, the overlay drain straight
+        down; their sampling grids differ by up to a voxel, which must not
+        move the probe."""
+        posed_gui.pitch_input.value = pitch
+        tip = _triplet(posed_gui._tip_inputs)
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.compute_anatomy_overlay()
+        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), tip)

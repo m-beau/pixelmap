@@ -25,6 +25,7 @@ from pixelmap.anatomy.transform import probe_to_atlas
 _FILL = "#d7d7e0"          # whole-brain silhouette fill (fallback view)
 _EDGE = "#9a9aa8"          # silhouette / region outline color
 _PROBE = "#d62728"         # probe trajectory + tip
+_ENTRY = "#1f77b4"         # insertion point + the shank path down from it
 _REGION_ALPHA = 0.6        # region fill opacity
 _OUTLINE_RGBA = (0.2, 0.2, 0.25, 0.8)
 
@@ -137,6 +138,7 @@ def render_locator(
     shank_positions: dict[int, float],
     y_range: tuple[float, float],
     bregma_um: tuple[float, float, float] | None = None,
+    entry_um: tuple[float, float, float] | None = None,
     ap_squish: float = 1.0,
     ml_squish: float = 1.0,
     dv_squish: float = 1.0,
@@ -149,7 +151,10 @@ def render_locator(
     :func:`pixelmap.anatomy.visualization.compute_region_bands`. Slices are
     taken at the tip's AP (coronal), ML (sagittal) and DV (horizontal).
 
-    ``bregma_um`` draws a black bregma dot. ``ap_squish`` / ``ml_squish`` /
+    ``bregma_um`` draws a black bregma dot. ``entry_um`` draws the insertion
+    point (where the shank enters the brain) as a blue diamond, joined to the
+    tip by a dashed line along shank 0 — the inactive shank above the
+    electrodes and the tip below them are not drawn otherwise. ``ap_squish`` / ``ml_squish`` /
     ``dv_squish`` and ``tilt_deg`` warp the *brain image* about bregma (per-axis
     squash + nose-up AP tilt) so the atlas is shown in its stereotaxic-corrected
     shape with the probe straight. Returns a bare matplotlib
@@ -230,8 +235,14 @@ def render_locator(
         if trajectories:  # tip = lowest electrode of shank 0
             tip = trajectories[0][0]
             ax.plot(tip[x_col], tip[y_col], "o", color=_PROBE, ms=3, zorder=6)
+        if entry_um is not None:
+            if trajectories:
+                tip = trajectories[0][0]
+                ax.plot([tip[x_col], entry_um[x_col]], [tip[y_col], entry_um[y_col]],
+                        "--", color=_ENTRY, lw=0.8, zorder=4)
+            ax.plot(entry_um[x_col], entry_um[y_col], "D", color=_ENTRY, ms=3.5, zorder=7)
         if bregma_um is not None:
-            ax.plot(bregma_um[x_col], bregma_um[y_col], "o", color="black", ms=3, zorder=7)
+            ax.plot(bregma_um[x_col], bregma_um[y_col], "o", color="black", ms=3, zorder=8)
 
     for ax in (ax_sag, ax_cor, ax_hor):
         ax.set_aspect("equal")
@@ -245,6 +256,9 @@ def render_locator(
     ax_leg.axis("off")
     handles = [Line2D([0], [0], marker="o", color="none", markerfacecolor=_PROBE,
                       markersize=6, label="probe tip")]
+    if entry_um is not None:
+        handles.append(Line2D([0], [0], marker="D", color="none", markerfacecolor=_ENTRY,
+                              markersize=5, label="insertion point"))
     if bregma_um is not None:
         handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="black",
                               markersize=6, label="bregma (est.)"))
