@@ -36,6 +36,8 @@ regardless of how the shank line is oriented around the probe shaft.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
@@ -113,6 +115,55 @@ def atlas_to_bregma_um(
     # unscaled there, so it must here too or the round trip breaks at 0.
     dv_b = dv_s * dv_squish if dv_squish else dv_s
     return (ap_b, a_ml - b_ml, dv_b)
+
+
+@dataclass(frozen=True)
+class AtlasWarp:
+    """The stereotaxic correction of an atlas: per-axis squish + AP tilt about bregma.
+
+    Two frames share the canonical ``(AP, ML, DV)`` µm axes:
+
+    * the **atlas** frame, the annotation volume as published;
+    * the **stereotaxic** frame, the atlas after it has been squashed and
+      tilted about bregma to match a flat-skull preparation. The probe is
+      straight in this frame, it is the frame the coordinate fields are typed
+      in, and it is what the locator figure draws.
+
+    ``from_atlas`` is the very affine map the locator applies to the brain
+    image (:func:`pixelmap.anatomy.schematic.render_locator`): scale each axis
+    about bregma, then rotate the ``(AP, DV)`` plane by ``tilt_deg``. Anything
+    that has to agree with the *drawn* brain — where its surface is, how deep
+    the tip sits below it — must sample the annotation through ``to_atlas``.
+    """
+
+    bregma_um: tuple[float, float, float]
+    ap_squish: float = 1.0
+    ml_squish: float = 1.0
+    dv_squish: float = 1.0
+    tilt_deg: float = 0.0
+
+    @property
+    def is_identity(self) -> bool:
+        return (self.ap_squish == 1.0 and self.ml_squish == 1.0
+                and self.dv_squish == 1.0 and self.tilt_deg == 0.0)
+
+    def _matrix(self) -> np.ndarray:
+        """Linear part of atlas → stereotaxic, acting on ``(AP, ML, DV)`` offsets."""
+        theta = np.deg2rad(self.tilt_deg)
+        c, s = np.cos(theta), np.sin(theta)
+        rotate = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]])
+        return rotate @ np.diag([self.ap_squish, self.ml_squish, self.dv_squish])
+
+    def from_atlas(self, points_atlas) -> np.ndarray:
+        """Atlas-frame ``(..., 3)`` µm → stereotaxic frame."""
+        b = np.asarray(self.bregma_um, dtype=float)
+        return (np.asarray(points_atlas, dtype=float) - b) @ self._matrix().T + b
+
+    def to_atlas(self, points_stereo) -> np.ndarray:
+        """Stereotaxic-frame ``(..., 3)`` µm → atlas frame. Inverse of ``from_atlas``."""
+        b = np.asarray(self.bregma_um, dtype=float)
+        inv = np.linalg.inv(self._matrix())
+        return (np.asarray(points_stereo, dtype=float) - b) @ inv.T + b
 
 
 def _R_pitch(pitch_rad: float) -> np.ndarray:

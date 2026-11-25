@@ -331,3 +331,97 @@ class TestFigureReuse:
 
     def test_omitting_the_figure_still_builds_a_fresh_one(self, fake_brainglobe):
         assert _render() is not _render()
+
+
+class TestWarpedViewsAreTrueSections:
+    """With squish/tilt each view is the section of the *warped* brain.
+
+    Regression: the coronal and horizontal views drew an unwarped atlas slice
+    (the AP tilt is out of their plane), so away from bregma the insertion
+    point floated deep inside the drawn brain.
+    """
+
+    @pytest.fixture
+    def wedge(self, monkeypatch):
+        """A brain filling DV >= 20 voxels: flat surface at 500 µm, 25 µm voxels."""
+        from pixelmap.anatomy import atlas as atlas_module
+
+        ann = np.zeros((80, 80, 80), dtype=np.uint32)
+        ann[:, 20:, :] = 1
+
+        class _Atlas:
+            def __init__(self, name, **_kw):
+                self.name, self.orientation = name, "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.annotation = ann
+                self.structures = {1: {"acronym": "A", "name": "A", "rgb_triplet": [1, 2, 3]}}
+
+        for clear in (atlas_module.release_atlas_memory, atlas_module.get_atlas.cache_clear,
+                      atlas_module.canonical_annotation.cache_clear):
+            clear()
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _Atlas)
+        yield ann
+        for clear in (atlas_module.release_atlas_memory, atlas_module.get_atlas.cache_clear,
+                      atlas_module.canonical_annotation.cache_clear):
+            clear()
+
+    BREGMA = (500.0, 1000.0, 500.0)
+
+    def _surface_dv(self, label_img, y_um):
+        """DV of the topmost labelled pixel in the middle column."""
+        col = label_img[:, label_img.shape[1] // 2]
+        return y_um[np.flatnonzero(col)[0]]
+
+    def test_coronal_section_follows_the_tilt_away_from_bregma(self, wedge):
+        from pixelmap.anatomy.schematic import _warped_slice, canonical_annotation
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        ann, res = canonical_annotation("wedge")
+        warp = AtlasWarp(self.BREGMA, tilt_deg=15.0)
+        for ap in (500.0, 1500.0):
+            label, _x, y_um = _warped_slice(ann, res, warp, 0, ap, 1, 2)
+            # A flat surface tilted about bregma is a plane sloping along AP.
+            slope = np.tan(np.deg2rad(15.0))
+            expected_dv = 500.0 + (ap - 500.0) * slope
+            assert self._surface_dv(label, y_um) == pytest.approx(expected_dv, abs=30.0)
+
+    def test_identity_warp_reproduces_the_plain_slice(self, wedge):
+        from pixelmap.anatomy.schematic import _warped_slice, canonical_annotation
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        ann, res = canonical_annotation("wedge")
+        label, *_ = _warped_slice(ann, res, AtlasWarp(self.BREGMA), 0, 1000.0, 1, 2)
+        np.testing.assert_array_equal(label, ann[40, :, :])
+
+    def test_oblique_reads_stay_bounded(self, wedge, monkeypatch):
+        """A tilted plane must be read as thin boxes, never one thick slab."""
+        from pixelmap.anatomy import schematic
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        ann, res = schematic.canonical_annotation("wedge")
+        monkeypatch.setattr(schematic, "_GATHER_BUDGET", 20_000)
+        boxes = []
+        original = type(ann).gather
+
+        def _spy(self, ap, dv, ml):
+            boxes.append(np.ptp(ap) + 1)
+            return original(self, ap, dv, ml)
+
+        monkeypatch.setattr(type(ann), "gather", _spy)
+        bounded, *_ = schematic._warped_slice(ann, res, AtlasWarp(self.BREGMA, tilt_deg=15.0), 0, 1500.0, 1, 2)
+        assert len(boxes) > 1 and max(boxes) < 20
+        monkeypatch.setattr(schematic, "_GATHER_BUDGET", 10**9)
+        whole, *_ = schematic._warped_slice(ann, res, AtlasWarp(self.BREGMA, tilt_deg=15.0), 0, 1500.0, 1, 2)
+        np.testing.assert_array_equal(bounded, whole)
+
+    def test_insertion_point_sits_on_the_drawn_coronal_surface(self, wedge):
+        from pixelmap.anatomy.regions import surface_point_um
+        from pixelmap.anatomy.schematic import _warped_slice, canonical_annotation
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        ann, res = canonical_annotation("wedge")
+        warp = AtlasWarp(self.BREGMA, dv_squish=0.885, tilt_deg=13.0)
+        tip = (1500.0, 1000.0, 1300.0)
+        entry = surface_point_um(tip, atlas_name="wedge", warp=warp)
+        label, _x, y_um = _warped_slice(ann, res, warp, 0, tip[0], 1, 2)
+        assert entry[2] == pytest.approx(self._surface_dv(label, y_um), abs=30.0)

@@ -17,6 +17,7 @@ from pixelmap.anatomy.regions import (
     tip_depth_below_surface_um,
 )
 from pixelmap.anatomy.transform import (
+    AtlasWarp,
     insertion_depth_um,
     insertion_to_tip,
     probe_axis_up,
@@ -25,6 +26,7 @@ from pixelmap.anatomy.transform import (
 )
 
 __all__ = [
+    "AtlasWarp",
     "RegionInfo",
     "insertion_depth_um",
     "insertion_to_tip",

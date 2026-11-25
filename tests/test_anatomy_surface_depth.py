@@ -280,3 +280,55 @@ class TestSurfacePoint:
     def test_non_positive_step_is_rejected(self, slab_atlas):
         with pytest.raises(ValueError):
             surface_point_um((250.0, 250.0, 300.0), atlas_name=ATLAS, step_um=-1.0)
+
+
+class TestSurfaceUnderAtlasWarp:
+    """With a squish/tilt warp the surface is that of the *warped* brain.
+
+    The slab's surface sits at DV ≈ 87.5 µm; bregma is put 100 µm below it.
+    """
+
+    BREGMA = (250.0, 250.0, 187.5)
+
+    def _warp(self, **kwargs):
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        return AtlasWarp(self.BREGMA, **kwargs)
+
+    def test_identity_warp_changes_nothing(self, slab_atlas):
+        plain = surface_point_um((250.0, 250.0, 300.0), atlas_name=ATLAS)
+        warped = surface_point_um((250.0, 250.0, 300.0), atlas_name=ATLAS, warp=self._warp())
+        np.testing.assert_allclose(warped, plain, atol=1e-6)
+
+    def test_dv_squish_pulls_the_surface_toward_bregma(self, slab_atlas):
+        out = surface_point_um(
+            (250.0, 250.0, 300.0), atlas_name=ATLAS, warp=self._warp(dv_squish=0.5))
+        # 100 µm above bregma in the atlas → 50 µm above it once squashed.
+        assert out[2] == pytest.approx(self.BREGMA[2] - 50.0, abs=RES_UM / 2)
+
+    def test_tilt_slopes_a_flat_surface(self, slab_atlas):
+        warp = self._warp(tilt_deg=20.0)
+        ahead = surface_point_um((150.0, 250.0, 300.0), atlas_name=ATLAS, warp=warp)
+        behind = surface_point_um((350.0, 250.0, 300.0), atlas_name=ATLAS, warp=warp)
+        slope = (behind[2] - ahead[2]) / 200.0
+        assert abs(slope) == pytest.approx(np.tan(np.deg2rad(20.0)), abs=0.15)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"dv_squish": 0.885}, {"ap_squish": 0.9, "ml_squish": 1.1},
+        {"tilt_deg": 13.0}, {"dv_squish": 0.885, "tilt_deg": 13.0},
+    ])
+    def test_surface_maps_back_onto_the_atlas_surface(self, slab_atlas, kwargs):
+        """The invariant the locator relies on: it draws the atlas through the
+        same warp, so the point must sit on the drawn surface."""
+        warp = self._warp(**kwargs)
+        out = surface_point_um(
+            (230.0, 260.0, 250.0), pitch_deg=10.0, yaw_deg=-5.0, atlas_name=ATLAS, warp=warp)
+        assert warp.to_atlas(out)[2] == pytest.approx(87.5, abs=RES_UM)
+
+    @pytest.mark.parametrize("kwargs", [{"dv_squish": 0.8}, {"dv_squish": 0.885, "tilt_deg": 13.0}])
+    def test_depth_readout_agrees_with_the_surface_point(self, slab_atlas, kwargs):
+        warp = self._warp(**kwargs)
+        tip = np.array([250.0, 250.0, 300.0])
+        depth = tip_depth_below_surface_um(tuple(tip), pitch_deg=10.0, atlas_name=ATLAS, warp=warp)
+        surface = surface_point_um(tuple(tip), pitch_deg=10.0, atlas_name=ATLAS, warp=warp)
+        assert np.linalg.norm(np.array(surface) - tip) == pytest.approx(depth, abs=RES_UM)

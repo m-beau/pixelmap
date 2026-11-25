@@ -17,10 +17,9 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
-from matplotlib.transforms import Affine2D
 
 from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
-from pixelmap.anatomy.transform import probe_to_atlas
+from pixelmap.anatomy.transform import AtlasWarp, probe_to_atlas
 
 _FILL = "#d7d7e0"          # whole-brain silhouette fill (fallback view)
 _EDGE = "#9a9aa8"          # silhouette / region outline color
@@ -28,6 +27,9 @@ _PROBE = "#d62728"         # probe trajectory + tip
 _ENTRY = "#1f77b4"         # insertion point + the shank path down from it
 _REGION_ALPHA = 0.6        # region fill opacity
 _OUTLINE_RGBA = (0.2, 0.2, 0.25, 0.8)
+# Largest bounding box (voxels) read in one go when resampling an oblique
+# plane; ~32 MB of uint32. See _gather_bounded.
+_GATHER_BUDGET = 8_000_000
 
 
 def _atlas_data(atlas_name: str):
@@ -86,45 +88,109 @@ def _outline_rgba(label_img: np.ndarray) -> np.ndarray:
     return rgba
 
 
-def _draw_view(ax, label_img, x_um, y_um, atlas, silhouette, title, warp=None):
+def _hollow(color: str) -> dict:
+    """Marker style: a colored outline with no fill, so the anatomy under the
+    tip, insertion point and bregma stays visible."""
+    return {"markerfacecolor": "none", "markeredgecolor": color, "markeredgewidth": 1.0}
+
+
+def _gather_bounded(ann, ap, dv, ml) -> np.ndarray:
+    """``ann.gather`` for points on an oblique plane, without reading a thick slab.
+
+    ``gather`` reads the bounding box of its points. For a tilted plane that
+    box is most of the volume (hundreds of MB on a 10 µm atlas), so the points
+    are split along AP until each piece's box is small: a plane cut into short
+    AP runs is a staircase of thin boxes.
+    """
+    out = np.zeros(ap.size, dtype=ann.dtype)
+    stack = [np.arange(ap.size)]
+    while stack:
+        sel = stack.pop()
+        a, d, m = ap[sel], dv[sel], ml[sel]
+        a_lo, a_hi = int(a.min()), int(a.max())
+        box = (a_hi - a_lo + 1) * (int(d.max()) - int(d.min()) + 1) * (int(m.max()) - int(m.min()) + 1)
+        if box <= _GATHER_BUDGET or a_lo == a_hi:
+            out[sel] = ann.gather(a, d, m)
+        else:
+            mid = (a_lo + a_hi) // 2
+            stack.append(sel[a <= mid])
+            stack.append(sel[a > mid])
+    return out
+
+
+def _warped_slice(ann, res, warp: AtlasWarp, fixed_col: int, fixed_um: float,
+                  x_col: int, y_col: int):
+    """Cross-section of the *warped* brain on a plane of the stereotaxic frame.
+
+    The plane is ``coordinate[fixed_col] == fixed_um`` in the frame the probe
+    lives in (columns index ``(AP, ML, DV)``). Each pixel is mapped back into
+    the atlas and looked up there, so the picture is the true section of the
+    squished/tilted brain — including the out-of-plane part of the tilt, which
+    a 2D transform of an axis-aligned atlas slice cannot show.
+
+    Returns ``(label_img, x_um, y_um)`` with ``label_img`` shaped
+    ``(len(y_um), len(x_um))``; pixels outside the volume are 0.
+    """
+    n_ap, n_dv, n_ml = ann.shape
+    res_c = np.asarray(res, dtype=float)[[0, 2, 1]]          # (AP, ML, DV) voxel size
+    n_c = np.array([n_ap, n_ml, n_dv])
+    # The window is the warped volume's bounding box, at the atlas's own pitch.
+    corners = np.array([[i, j, k] for i in (0, 1) for j in (0, 1) for k in (0, 1)], dtype=float)
+    corners = warp.from_atlas(corners * (n_c - 1) * res_c)
+    lo, hi = corners.min(axis=0), corners.max(axis=0)
+    x_um = np.arange(lo[x_col], hi[x_col] + res_c[x_col], res_c[x_col])
+    y_um = np.arange(lo[y_col], hi[y_col] + res_c[y_col], res_c[y_col])
+
+    # The warp is affine, so each atlas index is (constant + x term + y term):
+    # build it from two 1D ramps per axis rather than a full (N, 3) float
+    # point cloud, whose temporaries cost hundreds of MB on a 10 µm atlas.
+    origin = np.zeros(3)
+    origin[fixed_col] = fixed_um
+    e_x, e_y = np.zeros(3), np.zeros(3)
+    e_x[x_col], e_y[y_col] = 1.0, 1.0
+    base = warp.to_atlas(origin)
+    d_x, d_y = warp.to_atlas(origin + e_x) - base, warp.to_atlas(origin + e_y) - base
+
+    def _index(col):
+        ramp = ((base[col] + y_um * d_y[col])[:, None] + (x_um * d_x[col])[None, :]) / res_c[col]
+        return np.rint(ramp, out=ramp).astype(np.int32).ravel()
+
+    ap, ml, dv = _index(0), _index(1), _index(2)
+    inside = ((ap >= 0) & (ap < n_ap) & (dv >= 0) & (dv < n_dv) & (ml >= 0) & (ml < n_ml))
+
+    label = np.zeros(ap.size, dtype=ann.dtype)
+    if inside.any():
+        label[inside] = _gather_bounded(ann, ap[inside], dv[inside], ml[inside])
+    return label.reshape(len(y_um), len(x_um)), x_um, y_um
+
+
+def _draw_view(ax, label_img, x_um, y_um, atlas, silhouette, title):
     """Draw one slice (colored regions + outlines), or a silhouette fallback.
 
-    ``label_img`` and the mask ``silhouette`` returns are shaped
-    ``(len(y_um), len(x_um))``; y is DV in both views. The y-axis is oriented
-    dorsal-up. ``warp``, if given, is ``(scale_x, scale_y, rotate_deg, pivot_x,
-    pivot_y)`` applied to the *brain image only* (not the probe) so the atlas
-    visibly squashes/tilts about bregma.
+    ``label_img`` is shaped ``(len(y_um), len(x_um))``; y is DV in the sagittal
+    and coronal views. The y-axis is oriented dorsal-up.
 
-    ``silhouette`` is a *callable*, not a mask: building it is the one operation
-    here that has to read every voxel, and it is only needed when the tip falls
-    outside the volume and there is no slice to draw. Passing the array instead
-    meant paying for it on every render, including the overwhelmingly common
-    case where it goes unused.
+    ``silhouette`` is a *callable* returning ``(x_um, y_um, mask)``, not a
+    mask: building it is the one operation here that has to read every voxel,
+    and it is only needed when the slice misses the brain and there is nothing
+    to draw. Passing the array instead meant paying for it on every render,
+    including the overwhelmingly common case where it goes unused.
     """
     # extent=(left, right, bottom, top); top = y_um[0] (DV 0) puts dorsal up.
     extent = (float(x_um[0]), float(x_um[-1]), float(y_um[-1]), float(y_um[0]))
-    artists = []
     if label_img.any():
-        artists.append(ax.imshow(_region_fill_rgba(label_img, atlas), extent=extent,
-                       origin="upper", aspect="equal", interpolation="nearest", zorder=1))
-        artists.append(ax.imshow(_outline_rgba(label_img), extent=extent,
-                       origin="upper", aspect="equal", interpolation="nearest", zorder=2))
+        ax.imshow(_region_fill_rgba(label_img, atlas), extent=extent,
+                  origin="upper", aspect="equal", interpolation="nearest", zorder=1)
+        ax.imshow(_outline_rgba(label_img), extent=extent,
+                  origin="upper", aspect="equal", interpolation="nearest", zorder=2)
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
     else:
-        # Tip is outside the volume here — show the whole-brain silhouette.
-        mask = silhouette()
-        artists.append(ax.contourf(x_um, y_um, mask, levels=[0.5, 1.5], colors=[_FILL]))
-        artists.append(ax.contour(x_um, y_um, mask, levels=[0.5], colors=[_EDGE], linewidths=0.6))
+        # The slice misses the brain here — show the whole-brain silhouette.
+        sx, sy, mask = silhouette()
+        ax.contourf(sx, sy, mask, levels=[0.5, 1.5], colors=[_FILL])
+        ax.contour(sx, sy, mask, levels=[0.5], colors=[_EDGE], linewidths=0.6)
         ax.invert_yaxis()
-
-    if warp is not None:
-        scale_x, scale_y, rotate_deg, px, py = warp
-        if scale_x != 1.0 or scale_y != 1.0 or rotate_deg != 0.0:
-            tr = (Affine2D().translate(-px, -py).scale(scale_x, scale_y)
-                  .rotate_deg(rotate_deg).translate(px, py)) + ax.transData
-            for a in artists:
-                a.set_transform(tr)
     ax.set_title(title, fontsize=8)
 
 
@@ -143,6 +209,7 @@ def render_locator(
     ml_squish: float = 1.0,
     dv_squish: float = 1.0,
     tilt_deg: float = 0.0,
+    warp: AtlasWarp | None = None,
     fig: Figure | None = None,
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
@@ -155,9 +222,13 @@ def render_locator(
     point (where the shank enters the brain) as a blue diamond, joined to the
     tip by a dashed line along shank 0 — the inactive shank above the
     electrodes and the tip below them are not drawn otherwise. ``ap_squish`` / ``ml_squish`` /
-    ``dv_squish`` and ``tilt_deg`` warp the *brain image* about bregma (per-axis
-    squash + nose-up AP tilt) so the atlas is shown in its stereotaxic-corrected
-    shape with the probe straight. Returns a bare matplotlib
+    ``dv_squish`` and ``tilt_deg`` warp the *brain* about bregma (per-axis
+    squash + nose-up AP tilt, see :class:`~pixelmap.anatomy.transform.AtlasWarp`)
+    so the atlas is shown in its stereotaxic-corrected shape with the probe
+    straight. Each view is then the true cross-section of that warped brain
+    through the tip, resampled from the atlas — not a 2D-transformed atlas
+    slice, which would miss the part of the tilt that is out of the view's
+    plane and draw the wrong section away from bregma. Returns a bare matplotlib
     :class:`~matplotlib.figure.Figure` for a Panel ``Matplotlib`` pane (no
     pyplot global state).
 
@@ -202,30 +273,48 @@ def render_locator(
     ax_cor = fig.add_subplot(2, 2, 2)
     ax_hor = fig.add_subplot(2, 2, 3)
 
-    # Brain-image warp about bregma: per-axis squash on each panel's two
-    # in-plane axes + nose-up AP tilt (sagittal only; tilt about ML is
-    # out-of-plane for the coronal/horizontal views). warp = (sx, sy, deg, px, py).
-    warp_sag = warp_cor = warp_hor = None
-    if bregma_um is not None:
-        b_ap, b_ml, b_dv = bregma_um
-        warp_sag = (ap_squish, dv_squish, tilt_deg, b_ap, b_dv)  # x=AP, y=DV
-        warp_cor = (ml_squish, dv_squish, 0.0, b_ml, b_dv)        # x=ML, y=DV
-        warp_hor = (ml_squish, ap_squish, 0.0, b_ml, b_ap)        # x=ML, y=AP
+    silhouettes = (
+        lambda: (ap_um, dv_um, ann.projections()[0].T),
+        lambda: (ml_um, dv_um, ann.projections()[1]),
+        lambda: (ml_um, ap_um, ann.projections()[2]),
+    )
+    # ``warp`` wins; the separate squish/tilt arguments describe one about
+    # ``bregma_um`` for callers that have no AtlasWarp to hand.
+    if warp is None and bregma_um is not None:
+        warp = AtlasWarp(tuple(float(c) for c in bregma_um),
+                         ap_squish, ml_squish, dv_squish, tilt_deg)
+    if warp is not None and warp.is_identity:
+        warp = None
 
-    # Labels report the coordinate along each panel's visible horizontal axis:
-    # AP on the sagittal view, ML on the coronal view.
-    # ``projections()`` returns the silhouette reduced over ML, AP and DV
-    # respectively, and caches, so at most one whole-volume scan happens — and
-    # only if some view actually has no slice to draw.
-    _draw_view(ax_sag, ann[:, :, ml_idx].T, ap_um, dv_um, atlas,
-               silhouette=lambda: ann.projections()[0].T,
-               title=f"Sagittal · AP {ap_um[ap_idx]:.0f} µm", warp=warp_sag)
-    _draw_view(ax_cor, ann[ap_idx, :, :], ml_um, dv_um, atlas,
-               silhouette=lambda: ann.projections()[1],
-               title=f"Coronal · ML {ml_um[ml_idx]:.0f} µm", warp=warp_cor)
-    _draw_view(ax_hor, ann[:, dv_idx, :], ml_um, ap_um, atlas,
-               silhouette=lambda: ann.projections()[2],
-               title=f"Horizontal · DV {dv_um[dv_idx]:.0f} µm", warp=warp_hor)
+    # Labels report the tip coordinate along each panel's visible horizontal
+    # axis: AP on the sagittal view, ML on the coronal view. ``projections()``
+    # returns the silhouette reduced over ML, AP and DV respectively, and
+    # caches, so at most one whole-volume scan happens — and only if some view
+    # actually has no slice to draw.
+    if warp is None:
+        # Slices of the atlas as published: plain axis-aligned reads.
+        views = (
+            (ann[:, :, ml_idx].T, ap_um, dv_um),
+            (ann[ap_idx, :, :], ml_um, dv_um),
+            (ann[:, dv_idx, :], ml_um, ap_um),
+        )
+        at = (ap_um[ap_idx], ml_um[ml_idx], dv_um[dv_idx])
+    else:
+        # Sections of the warped brain through the tip; (fixed, x, y) columns
+        # index (AP, ML, DV). The fallback silhouette stays unwarped: it only
+        # says "the probe is out here", and warping it would mean resampling
+        # the whole volume.
+        views = (
+            _warped_slice(ann, res, warp, 1, tip_ml, 0, 2),
+            _warped_slice(ann, res, warp, 0, tip_ap, 1, 2),
+            _warped_slice(ann, res, warp, 2, tip_dv, 1, 0),
+        )
+        at = (tip_ap, tip_ml, tip_dv)
+    titles = (f"Sagittal · AP {at[0]:.0f} µm", f"Coronal · ML {at[1]:.0f} µm",
+              f"Horizontal · DV {at[2]:.0f} µm")
+    for ax, (label_img, x_um, y_um), silhouette, title in zip(
+            (ax_sag, ax_cor, ax_hor), views, silhouettes, titles):
+        _draw_view(ax, label_img, x_um, y_um, atlas, silhouette=silhouette, title=title)
 
     # Probe (red) + bregma estimate (black) per view: (axis, x-col, y-col)
     # indexing into (AP, ML, DV).
@@ -234,15 +323,15 @@ def render_locator(
             ax.plot(pts[:, x_col], pts[:, y_col], "-", color=_PROBE, lw=1.3, zorder=5)
         if trajectories:  # tip = lowest electrode of shank 0
             tip = trajectories[0][0]
-            ax.plot(tip[x_col], tip[y_col], "o", color=_PROBE, ms=3, zorder=6)
+            ax.plot(tip[x_col], tip[y_col], "o", ms=4.5, zorder=6, **_hollow(_PROBE))
         if entry_um is not None:
             if trajectories:
                 tip = trajectories[0][0]
                 ax.plot([tip[x_col], entry_um[x_col]], [tip[y_col], entry_um[y_col]],
                         "--", color=_ENTRY, lw=0.8, zorder=4)
-            ax.plot(entry_um[x_col], entry_um[y_col], "D", color=_ENTRY, ms=3.5, zorder=7)
+            ax.plot(entry_um[x_col], entry_um[y_col], "D", ms=4.5, zorder=7, **_hollow(_ENTRY))
         if bregma_um is not None:
-            ax.plot(bregma_um[x_col], bregma_um[y_col], "o", color="black", ms=3, zorder=8)
+            ax.plot(bregma_um[x_col], bregma_um[y_col], "o", ms=4.5, zorder=8, **_hollow("black"))
 
     for ax in (ax_sag, ax_cor, ax_hor):
         ax.set_aspect("equal")
@@ -254,13 +343,13 @@ def render_locator(
     # Legend in the empty 4th quadrant.
     ax_leg = fig.add_subplot(2, 2, 4)
     ax_leg.axis("off")
-    handles = [Line2D([0], [0], marker="o", color="none", markerfacecolor=_PROBE,
-                      markersize=6, label="probe tip")]
+    handles = [Line2D([0], [0], marker="o", color="none", markersize=6,
+                      label="probe tip", **_hollow(_PROBE))]
     if entry_um is not None:
-        handles.append(Line2D([0], [0], marker="D", color="none", markerfacecolor=_ENTRY,
-                              markersize=5, label="insertion point"))
+        handles.append(Line2D([0], [0], marker="D", color="none", markersize=5,
+                              label="insertion point", **_hollow(_ENTRY)))
     if bregma_um is not None:
-        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="black",
-                              markersize=6, label="bregma (est.)"))
+        handles.append(Line2D([0], [0], marker="o", color="none", markersize=6,
+                              label="bregma (est.)", **_hollow("black")))
     ax_leg.legend(handles=handles, loc="center", frameon=False, fontsize=8)
     return fig

@@ -323,3 +323,45 @@ class TestBregmaRoundTrip:
             e = np.array(atlas_to_bregma_um(tuple(entry), bregma_um=bregma))
             offsets.append(e - t)
         np.testing.assert_allclose(offsets[0], offsets[1], atol=TOL)
+
+
+class TestAtlasWarp:
+    """The stereotaxic correction: squish + tilt about bregma."""
+
+    BREGMA = (5400.0, 5700.0, 330.0)
+
+    def _warp(self, **kwargs):
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        return AtlasWarp(self.BREGMA, **kwargs)
+
+    def test_bregma_is_the_fixed_point(self):
+        warp = self._warp(ap_squish=0.9, ml_squish=1.1, dv_squish=0.885, tilt_deg=13.0)
+        np.testing.assert_allclose(warp.from_atlas(self.BREGMA), self.BREGMA)
+        np.testing.assert_allclose(warp.to_atlas(self.BREGMA), self.BREGMA)
+
+    def test_round_trip(self):
+        warp = self._warp(ap_squish=0.9, ml_squish=1.1, dv_squish=0.885, tilt_deg=13.0)
+        pts = np.array([[1000.0, 2000.0, 3000.0], [7000.0, 5700.0, 100.0]])
+        np.testing.assert_allclose(warp.to_atlas(warp.from_atlas(pts)), pts, atol=1e-6)
+
+    def test_squish_scales_offsets_from_bregma(self):
+        out = self._warp(dv_squish=0.5).from_atlas((5400.0, 5700.0, 1330.0))
+        np.testing.assert_allclose(out, (5400.0, 5700.0, 830.0))
+
+    def test_matches_the_affine_the_locator_applies_to_the_image(self):
+        """render_locator warps the sagittal image with this very Affine2D."""
+        from matplotlib.transforms import Affine2D
+
+        warp = self._warp(ap_squish=0.9, dv_squish=0.885, tilt_deg=13.0)
+        b_ap, _b_ml, b_dv = self.BREGMA
+        image = (Affine2D().translate(-b_ap, -b_dv).scale(0.9, 0.885)
+                 .rotate_deg(13.0).translate(b_ap, b_dv))
+        p = np.array([7200.0, 5700.0, 2500.0])
+        out = warp.from_atlas(p)
+        np.testing.assert_allclose(out[[0, 2]], image.transform(p[[0, 2]]), atol=1e-6)
+        assert out[1] == p[1]
+
+    def test_identity(self):
+        assert self._warp().is_identity
+        assert not self._warp(tilt_deg=1.0).is_identity
