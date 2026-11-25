@@ -210,6 +210,9 @@ def render_locator(
     dv_squish: float = 1.0,
     tilt_deg: float = 0.0,
     warp: AtlasWarp | None = None,
+    title_coords: tuple[float, float, float] | None = None,
+    tip_label_um: tuple[float, float, float] | None = None,
+    entry_label_um: tuple[float, float, float] | None = None,
     fig: Figure | None = None,
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
@@ -228,7 +231,18 @@ def render_locator(
     straight. Each view is then the true cross-section of that warped brain
     through the tip, resampled from the atlas — not a 2D-transformed atlas
     slice, which would miss the part of the tilt that is out of the view's
-    plane and draw the wrong section away from bregma. Returns a bare matplotlib
+    plane and draw the wrong section away from bregma.
+
+    ``title_coords`` overrides the ``(AP, ML, DV)`` quoted in the panel titles,
+    which otherwise are the tip's canonical atlas coordinates — pass the tip
+    as the user typed it (e.g. relative to bregma) so the figure speaks the
+    same coordinates as the input fields.
+
+    ``tip_label_um`` and ``entry_label_um`` write coordinates under the
+    legend entries, again as the user reads them in the input fields: the
+    tip's ``(AP, ML, DV)``, and the insertion point's ``(AP, ML, depth along
+    the shank)`` — its DV is the brain surface, so the depth of the tip below
+    it is the number worth showing. Returns a bare matplotlib
     :class:`~matplotlib.figure.Figure` for a Panel ``Matplotlib`` pane (no
     pyplot global state).
 
@@ -310,6 +324,8 @@ def render_locator(
             _warped_slice(ann, res, warp, 2, tip_dv, 1, 0),
         )
         at = (tip_ap, tip_ml, tip_dv)
+    if title_coords is not None:
+        at = title_coords
     titles = (f"Sagittal · AP {at[0]:.0f} µm", f"Coronal · ML {at[1]:.0f} µm",
               f"Horizontal · DV {at[2]:.0f} µm")
     for ax, (label_img, x_um, y_um), silhouette, title in zip(
@@ -343,13 +359,24 @@ def render_locator(
     # Legend in the empty 4th quadrant.
     ax_leg = fig.add_subplot(2, 2, 4)
     ax_leg.axis("off")
+    def _with_coords(name, header, coords):
+        if coords is None:
+            return name
+        return f"{name}\n{header} (µm):\n" + ", ".join(f"{c:.0f}" for c in coords)
+
     handles = [Line2D([0], [0], marker="o", color="none", markersize=6,
-                      label="probe tip", **_hollow(_PROBE))]
+                      label=_with_coords("probe tip", "AP, ML, DV", tip_label_um),
+                      **_hollow(_PROBE))]
     if entry_um is not None:
-        handles.append(Line2D([0], [0], marker="D", color="none", markersize=5,
-                              label="insertion point", **_hollow(_ENTRY)))
+        handles.append(Line2D(
+            [0], [0], marker="D", color="none", markersize=5,
+            label=_with_coords("insertion point", "AP, ML, depth along shank", entry_label_um),
+            **_hollow(_ENTRY)))
     if bregma_um is not None:
         handles.append(Line2D([0], [0], marker="o", color="none", markersize=6,
                               label="bregma (est.)", **_hollow("black")))
-    ax_leg.legend(handles=handles, loc="center", frameon=False, fontsize=8)
+    # Against the quadrant's left edge: the coordinate lines need the width.
+    ax_leg.legend(handles=handles, loc="center left", bbox_to_anchor=(-0.2, 0.5),
+                  frameon=False, fontsize=7, labelspacing=0.9, handletextpad=0.4,
+                  borderaxespad=0.0)
     return fig

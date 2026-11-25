@@ -48,6 +48,7 @@ from pixelmap.analytics import AnalyticsSessionTracker
 from pixelmap.anatomy import atlas as anatomy_atlas
 from pixelmap.anatomy.regions import surface_point_um
 from pixelmap.anatomy.schematic import render_locator
+from pixelmap.anatomy.search import region_catalog, region_target_um, search_regions
 from pixelmap.anatomy.transform import (
     AtlasWarp,
     atlas_to_bregma_um,
@@ -153,6 +154,9 @@ class _AnatomyRequest:
     shank_orientation_deg: float
     bregma_um: tuple | None       # where to draw the landmark dot, if any
     warp: AtlasWarp | None        # squish/tilt in force; None = atlas as published
+    title_coords: tuple | None    # tip as typed, when that differs from atlas µm
+    tip_label: tuple              # tip (AP, ML, DV) as typed, for the legend
+    entry_label: tuple | None     # entry (AP, ML, depth along shank) as shown
     generation: int
     locator_fig: Any = None  # reused across renders; see _compute_anatomy
 
@@ -1248,7 +1252,7 @@ class ChannelmapGUI(param.Parameterized):
         per-session lock: the event loop is free to serve other users while
         the work runs, and the session cannot be reaped mid-compute.
         """
-        self._anatomy_overlay_active = True
+        self._set_anatomy_overlay_active(True)
         self._anatomy_dirty = True
         await self._drain_anatomy_requests()
 
@@ -1326,8 +1330,26 @@ class ChannelmapGUI(param.Parameterized):
         (scripts, tests) Panel runs it to completion before returning; inside a
         running loop (the served app, Jupyter) it is scheduled instead.
         """
-        self._anatomy_overlay_active = True
+        self._set_anatomy_overlay_active(True)
         self._request_anatomy_recompute()
+
+    def _set_anatomy_overlay_active(self, active: bool):
+        """Turn the live overlay on or off, and the controls that only matter with it.
+
+        Without an overlay the panel is collapsed to the atlas dropdown and
+        the Compute button: the probe-placement fields, and the region search
+        on the right, would be positioning a probe nothing is drawn for.
+        """
+        self._anatomy_overlay_active = active
+        for attr in ("anatomy_pose_section", "clear_anatomy_button", "region_search_section"):
+            if hasattr(self, attr):
+                getattr(self, attr).visible = active
+
+    def _entry_label(self) -> tuple | None:
+        """Insertion point for the locator legend: Entry AP, ML and the depth."""
+        values = (self.entry_ap_input.value, self.entry_ml_input.value,
+                  self.tip_depth_input.value)
+        return None if any(v is None for v in values) else tuple(float(v) for v in values)
 
     def _anatomy_request(self) -> _AnatomyRequest:
         """Snapshot the overlay's inputs.  Event loop only; cheap, no atlas reads."""
@@ -1352,6 +1374,12 @@ class ChannelmapGUI(param.Parameterized):
             shank_orientation_deg=float(self.shank_orientation_input.value),
             bregma_um=bregma_um,
             warp=self._atlas_warp(),  # the same one the insertion point used
+            # The locator titles quote the tip; in bregma mode they must quote
+            # it the way the fields do, not in atlas µm.
+            title_coords=(tuple(_fval(w) for w in self._tip_inputs)
+                          if bregma_mode else None),
+            tip_label=tuple(_fval(w) for w in self._tip_inputs),
+            entry_label=self._entry_label(),
             generation=self._anatomy_generation,
             locator_fig=self._locator_fig,
         )
@@ -1392,6 +1420,9 @@ class ChannelmapGUI(param.Parameterized):
                 bregma_um=req.bregma_um,
                 entry_um=req.entry,
                 warp=req.warp,
+                title_coords=req.title_coords,
+                tip_label_um=req.tip_label,
+                entry_label_um=req.entry_label,
                 fig=req.locator_fig,
             )
             result.locator_fig = fig
@@ -1478,7 +1509,7 @@ class ChannelmapGUI(param.Parameterized):
 
     def clear_anatomy_overlay(self):
         """Wipe the region bands, labels, boundaries and reset the legend."""
-        self._anatomy_overlay_active = False  # stop live-updating
+        self._set_anatomy_overlay_active(False)  # stop live-updating, collapse the panel
         # Any compute still in flight finishes in its worker thread, but its
         # result is for an overlay the user just dismissed: drop it.
         self._anatomy_generation += 1
@@ -1544,8 +1575,8 @@ class ChannelmapGUI(param.Parameterized):
             "</div>"
         )
 
-    def _anatomy_coord_note_html(self) -> str:
-        """Coordinate-space note: the fixed tip frame + the atlas's native code.
+    def _anatomy_coord_note_text(self) -> str:
+        """Hover help on the Atlas dropdown: coordinate-space note: the fixed tip frame + the atlas's native code.
 
         Tip coordinates use one fixed frame for every atlas; the atlas's own
         voxel orientation is read and remapped under the hood. We surface that
@@ -1575,14 +1606,12 @@ class ChannelmapGUI(param.Parameterized):
                 "downloaded (on first overlay compute)."
             )
         return (
-            '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
             "Coordinates use a <b>fixed CCF / atlas frame</b>, the same for "
             "every atlas: (0,0,0) is the <b>anterior-superior-right</b> corner, "
             "with AP increasing posteriorly, DV ventrally and ML from the right. "
             f"Tick the <i>Coordinates relative to {landmark}</i> toggle below "
             f"to enter them from {landmark} instead."
-            f"<br>{native_line}"
-            "</div>"
+            f"\n\n{native_line}"
         )
 
     def _on_atlas_change(self, *events):
@@ -1593,10 +1622,15 @@ class ChannelmapGUI(param.Parameterized):
         """
         with self._anatomy_recompute_suppressed():
             self._update_reference_params(*events)
+            # Landmark-relative coordinates whenever the atlas has a landmark:
+            # that is how stereotaxic coordinates are quoted. Flipping the
+            # toggle reseeds the tip for the new frame.
+            self.bregma_relative_toggle.value = self._landmark_known(
+                self._selected_atlas_name())
             self._update_tip_to_atlas_center(*events)
             self._update_anatomy_origin_note(*events)
             self._update_landmark_labels()
-            self.bregma_estimate_header.object = self._bregma_header_html()
+            self.bregma_hint.value = self._bregma_hint_text()
             # The tip was just reseeded (and the landmark may have moved), so
             # the insertion point restarts from it whichever mode is active.
             self._reseat_entry_on_tip()
@@ -1635,21 +1669,23 @@ class ChannelmapGUI(param.Parameterized):
         """Refill the origin fields and banner without triggering a recompute."""
         with self._anatomy_recompute_suppressed():
             self._update_reference_params()
-        self.bregma_estimate_header.object = self._bregma_header_html()
+        self.bregma_hint.value = self._bregma_hint_text()
 
     def _refresh_compute_button(self):
         """Label the Compute button by whether the selected atlas is local."""
         downloaded = anatomy_atlas.is_downloaded(self._selected_atlas_name())
         self.compute_anatomy_button.name = _BUTTON_COMPUTE if downloaded else _BUTTON_DOWNLOAD
+        self._refresh_region_search(downloaded)
 
     @contextlib.contextmanager
     def _anatomy_recompute_suppressed(self):
         """Batch field writes so they don't each request an overlay recompute."""
+        previous = self._suppress_anatomy_recompute  # re-entrant: batches nest
         self._suppress_anatomy_recompute = True
         try:
             yield
         finally:
-            self._suppress_anatomy_recompute = False
+            self._suppress_anatomy_recompute = previous
 
     def _landmark_words(self) -> tuple[str, str]:
         """The atlas's landmark as ``(name in a sentence, field-label prefix)``."""
@@ -1672,50 +1708,41 @@ class ChannelmapGUI(param.Parameterized):
         self.bregma_ml_input.name = f"{prefix} ML (µm)"
         self.bregma_dv_input.name = f"{prefix} DV (µm)"
 
-    def _bregma_header_html(self) -> str:
-        """Banner above the bregma fields: explain the estimate, or prompt for one."""
+    def _bregma_hint_text(self) -> str:
+        """Hover help beside the bregma toggle: explain the estimate, or prompt for one."""
         spec = self._origin_spec(self.atlas_name_input.value)
         status, lm, src = spec["status"], spec["landmark"], spec.get("source", "")
-        GREEN = ("#e7f6e7", "#9ccb9c", "#2e6b2e")   # defined / real value
-        ORANGE = ("#ffe7d1", "#f0a35e", "#9a4a00")  # rough estimate
-        BLUE = ("#e8f0fb", "#a9c4ea", "#34507e")    # info / pending
-        RED = ("#fdecec", "#e3a5a5", "#8a3a3a")     # user must define
         if status == "defined" and lm == "bregma":  # WHS rat
-            icon, palette = "✓", GREEN
+            icon = "✓"
             body = (f"<b>Bregma (defined, not an estimate)</b> — from {src}. "
                     "Edit only if needed.")
         elif status == "defined":  # AC is the species' established origin (human)
-            icon, palette = "✓", GREEN
+            icon = "✓"
             body = (f"<b>Origin = {lm} (defined)</b> — {src}; the established "
                     "reference for this species. Edit only if needed.")
         elif status == "estimate":  # Allen-family mouse
-            icon, palette = "⚠", ORANGE
+            icon = "⚠"
             body = (f"<b>Bregma estimate (rough)</b> — from {src}. Edit if you "
                     "have better values.")
         elif status == "ac_pending":
-            icon, palette = "ℹ", BLUE
+            icon = "ℹ"
             body = (f"<b>Origin = {lm}</b> — located from the atlas on the first "
                     "<i>Compute</i>.")
         elif status == "landmark_undefined":  # rodent/cat: bregma, but no value here
-            icon, palette = "ℹ", BLUE
+            icon = "ℹ"
             body = (f"<b>{lm.capitalize()}</b> is the standard origin for this "
                     f"species, but isn't located in this atlas — set {lm} in the "
                     "fields below.")
         else:  # user_origin — no skull landmark for this species
-            icon, palette = "⚠", RED
+            icon = "⚠"
             body = ("<b>No skull-bregma landmark</b> for this species — "
                     "coordinates are atlas-defined; set an <b>origin</b> (0,0,0) "
                     "yourself below if you want relative coordinates.")
-        bg, border, color = palette
-        return (
-            f'<div style="font-size: 11px; color: {color}; background: {bg}; '
-            f'border: 1px solid {border}; border-radius: 4px; padding: 4px 7px; '
-            f'margin: 4px 0; text-align: justify;">{icon} {body}</div>'
-        )
+        return f"{icon} {body}"
 
     def _update_anatomy_origin_note(self, *events):
-        """Refresh the coordinate note when the atlas selection changes."""
-        self.anatomy_coord_note.object = self._anatomy_coord_note_html()
+        """Refresh the Atlas dropdown's hover help when the selection changes."""
+        self.atlas_name_input.description = self._anatomy_coord_note_text()
 
     def _selected_atlas_name(self) -> str:
         return str(self.atlas_name_input.value).strip()
@@ -1803,8 +1830,8 @@ class ChannelmapGUI(param.Parameterized):
         """Current tip in canonical (AP, ML, DV) µm, honoring bregma mode.
 
         The single source of the tip for the whole overlay path: in Insertion
-        mode Tip AP/ML are derived, but :meth:`_sync_tip_from_entry` keeps
-        them current.
+        mode the tip is derived, but :meth:`_sync_tip_from_entry` keeps
+        it current.
         """
         return self._from_display(tuple(_fval(w) for w in self._tip_inputs))
 
@@ -1819,9 +1846,10 @@ class ChannelmapGUI(param.Parameterized):
     #   Tip mode        type Tip AP/ML/DV. The insertion point is where that
     #                   trajectory crosses the brain surface; all three Entry
     #                   fields are derived.
-    #   Insertion mode  type Entry AP/ML (the craniotomy) and Tip DV (how deep
-    #                   to go). Entry DV is the brain surface below Entry
-    #                   AP/ML, and Tip AP/ML follow from the angles.
+    #   Insertion mode  type Entry AP/ML (the craniotomy) and Probe insertion
+    #                   depth (how far to lower the probe). Entry DV is the
+    #                   brain surface below Entry AP/ML, and the whole tip
+    #                   follows from the depth and the angles.
     #
     # "Brain surface" always means the surface of the squished/tilted brain
     # the locator draws (see _atlas_warp), so the marker sits on the picture.
@@ -1845,17 +1873,19 @@ class ChannelmapGUI(param.Parameterized):
         field still fires its watchers, and without this guard a derived
         write would sync and recompute a second time.
         """
+        previous = self._syncing_coords  # re-entrant: helpers nest these
         self._syncing_coords = True
         try:
             yield
         finally:
-            self._syncing_coords = False
+            self._syncing_coords = previous
 
     def _write_entry(self, values):
         """Set the insertion point from display-frame ``(AP, ML, DV)``; ``None`` blanks.
 
         Entry DV has no field of its own — it is the brain surface, shown to
         the user as the tip's depth below it — so it is kept in ``_entry_dv``.
+        Callers write under :meth:`_coord_writes`.
         """
         ap, ml, dv = values
         self.entry_ap_input.value = None if ap is None else round(float(ap), 1)
@@ -1863,21 +1893,31 @@ class ChannelmapGUI(param.Parameterized):
         self._entry_dv = None if dv is None else round(float(dv), 1)
         self._update_tip_depth()
 
-    def _update_tip_depth(self):
-        """Refresh *Tip depth along shank*: insertion point → tip, along the shank.
+    def _update_tip_depth(self, reset: bool = False):
+        """Refresh *Probe insertion depth*: insertion point → tip, along the shank.
 
         The lowest electrode's travel since the shank entered the brain, so
         it is the vertical depth only for a vertical probe. Negative when the
         tip is still above the insertion point; blank when there is none.
         Cheap: no atlas read, the surface is already in the insertion point.
+
+        In Tip mode the depth is derived, so it is always recomputed. In
+        Insertion mode it is what the user types, so it is only *filled in*
+        when blank and the insertion point is known; ``reset`` forgets a typed
+        value, for when the tip has been reseeded and the depth must restart
+        from it.
         """
+        typed = self.coord_mode_input.value == "Insertion"
         entry = self._entry_atlas_um()
-        if entry is None:
-            self.tip_depth_input.value = None
+        if typed and not reset and (self.tip_depth_input.value is not None or entry is None):
             return
-        up = probe_axis_up(_fval(self.pitch_input), _fval(self.yaw_input))
-        depth = float(np.dot(np.asarray(entry) - np.asarray(self._tip_atlas_um()), up))
-        self.tip_depth_input.value = round(depth, 1)
+        depth = None
+        if entry is not None:
+            up = probe_axis_up(_fval(self.pitch_input), _fval(self.yaw_input))
+            depth = round(
+                float(np.dot(np.asarray(entry) - np.asarray(self._tip_atlas_um()), up)), 1)
+        with self._coord_writes():
+            self.tip_depth_input.value = depth
 
     @staticmethod
     def _write_triplet(widgets, values):
@@ -1886,42 +1926,43 @@ class ChannelmapGUI(param.Parameterized):
             w.value = None if v is None else round(float(v), 1)
 
     def _sync_tip_from_entry(self):
-        """Insertion mode: derive Tip AP/ML from the entry point, Tip DV and angles.
+        """Insertion mode: derive the tip from the entry point, depth and angles.
 
-        The tip is where the shank through the insertion point reaches the
-        typed Tip DV. Cheap (no atlas read), so it runs on every edit; only
-        the greyed-out Tip AP/ML are ever written.
+        The tip sits *Probe insertion depth* down the shank from the insertion
+        point. Cheap (no atlas read), so it runs on every edit; only the
+        greyed-out Tip fields are ever written. Until the insertion point's
+        surface height or the depth is known there is nothing to derive from,
+        and the tip is left where it is.
         """
         if self.coord_mode_input.value != "Insertion":
             return
-        ap, ml = self.entry_ap_input.value, self.entry_ml_input.value
-        if ap is None or ml is None:
+        entry, depth = self._entry_atlas_um(), self.tip_depth_input.value
+        if entry is None or depth is None:
             return
-        entry = self._entry_atlas_um()
-        tip_ap, tip_ml = float(ap), float(ml)  # straight below, until we know better
-        if entry is not None:
-            tip_dv = self._from_display((0.0, 0.0, _fval(self.tip_dv_input)))[2]
-            up = probe_axis_up(_fval(self.pitch_input), _fval(self.yaw_input))
-            if abs(up[2]) > 1e-6:  # a horizontal shank never reaches another DV
-                tip = np.asarray(entry) - (entry[2] - tip_dv) / up[2] * up
-                tip_ap, tip_ml, _ = self._to_display(tuple(tip))
+        up = probe_axis_up(_fval(self.pitch_input), _fval(self.yaw_input))
+        tip = self._to_display(tuple(np.asarray(entry) - float(depth) * up))
+        current = [w.value for w in self._tip_inputs]
+        if None not in current and np.allclose(current, tip, atol=0.06):
+            # Already there to display precision (a mode switch, typically):
+            # rewriting would only round away what was typed in Tip mode.
+            return
         with self._coord_writes():
-            self.tip_ap_input.value = round(float(tip_ap), 1)
-            self.tip_ml_input.value = round(float(tip_ml), 1)
+            self._write_triplet(self._tip_inputs, tip)
 
     def _reseat_entry_on_tip(self):
         """Restart the insertion point from the tip, after the tip was reseeded.
 
-        Entry AP/ML take the tip's (exact for a vertical probe) and Entry DV
-        is blanked until :meth:`_settle_entry` finds the surface.
+        Entry AP/ML take the tip's (exact for a vertical probe), and Entry DV
+        and the depth are blanked until :meth:`_settle_entry` finds the surface.
         """
         with self._coord_writes():
             self._write_entry((self.tip_ap_input.value, self.tip_ml_input.value, None))
+            self._update_tip_depth(reset=True)
 
     def _on_pose_input_change(self, *events):
         """Single funnel for every input that moves the probe or the brain surface.
 
-        Deriving Tip AP/ML must finish *before* the overlay recompute
+        Deriving the tip must finish *before* the overlay recompute
         snapshots the tip, or it would snapshot a stale one. Routing these
         widgets through one handler (instead of also watching them with
         ``_recompute_anatomy_if_active``) is what guarantees that order.
@@ -1949,13 +1990,16 @@ class ChannelmapGUI(param.Parameterized):
     def _on_coord_mode_change(self, *events):
         """Swap which fields are editable; the probe itself does not move.
 
-        Tip DV is typed in both modes and Entry DV in neither.
+        Tip mode types the tip; Insertion mode types the craniotomy (Entry
+        AP/ML) and how far to lower the probe (Probe insertion depth), which
+        starts from the depth the probe already has.
         """
         tip_active = self.coord_mode_input.value == "Tip"
-        self.tip_ap_input.disabled = not tip_active
-        self.tip_ml_input.disabled = not tip_active
+        for w in self._tip_inputs:
+            w.disabled = not tip_active
         self.entry_ap_input.disabled = tip_active
         self.entry_ml_input.disabled = tip_active
+        self.tip_depth_input.disabled = tip_active
         if self.entry_ap_input.value is None or self.entry_ml_input.value is None:
             # No insertion point known yet to start from.
             self._reseat_entry_on_tip()
@@ -2006,7 +2050,7 @@ class ChannelmapGUI(param.Parameterized):
 
         Insertion mode: Entry DV is the surface straight below Entry AP/ML —
         independent of pitch and yaw, so tilting pivots around the craniotomy
-        — and Tip AP/ML are re-derived from it.
+        — and the tip is re-derived from it.
 
         Both read the annotation through :meth:`_atlas_warp`, i.e. they find
         the surface of the brain as the locator draws it. The read happens in
@@ -2065,8 +2109,133 @@ class ChannelmapGUI(param.Parameterized):
             # grid, so the two can disagree by that much; re-settling after a
             # mode switch would nudge the probe for nothing.
             self._entry_dv = round(float(self._to_display(surface)[2]), 1)
+        self._update_tip_depth()  # fills a blank depth from the current tip
         self._sync_tip_from_entry()
-        self._update_tip_depth()
+
+    ###########################################
+    ##### "Move probe tip to..." region search
+    ###########################################
+
+    _REGION_SEARCH_PROMPT = "Region acronym or name, e.g. VISp or primary visual"
+    _REGION_SEARCH_NEEDS_ATLAS = "Download the atlas first (Compute anatomical overlay)"
+
+    def _refresh_region_search(self, downloaded: bool):
+        """Enable the region search only once the atlas (and its region list) is local."""
+        if not hasattr(self, "region_search_input"):
+            return
+        self.region_search_input.disabled = not downloaded
+        self.region_search_input.placeholder = (
+            self._REGION_SEARCH_PROMPT if downloaded else self._REGION_SEARCH_NEEDS_ATLAS
+        )
+        self._on_region_query()  # the same text means other regions in another atlas
+
+    def _on_region_query(self, *events):
+        """List the regions of the selected atlas matching what has been typed."""
+        name = self._selected_atlas_name()
+        query = self.region_search_input.value_input or ""
+        matches = []
+        if query.strip() and anatomy_atlas.is_downloaded(name):
+            try:
+                matches = search_regions(query, region_catalog(name))
+            except Exception as exc:  # noqa: BLE001 - unreadable atlas metadata: no results
+                print(f"Region search failed: {exc}")
+        # Emptied first and under a guard: swapping the options under a live
+        # selection would report whichever old pick survived as a new one.
+        self._listing_regions = True
+        try:
+            self.region_results.value = []
+            self.region_results.options = {m.label: m.atlas_id for m in matches}
+        finally:
+            self._listing_regions = False
+        self.region_results.visible = bool(matches)
+        if query.strip() and not matches and not self.region_search_input.disabled:
+            self.region_search_status.object = self._region_status_html("No region matches.")
+        else:
+            self.region_search_status.object = ""
+
+    @staticmethod
+    def _region_status_html(text: str, color: str = "#555") -> str:
+        return f'<div style="font-size: 11px; color: {color}; padding: 2px 0;">{text}</div>'
+
+    def _on_region_picked(self, event):
+        """A region was clicked in the result list: move the tip onto it."""
+        if self._listing_regions or not event.new:
+            return
+        region_id = event.new[-1]
+        label = next((k for k, v in self.region_results.options.items() if v == region_id),
+                     str(region_id))
+        # Deselect straight away, so clicking the same region again (after
+        # moving the tip elsewhere by hand) is a new pick; the status line
+        # below the list says where the tip went.
+        self._listing_regions = True
+        try:
+            self.region_results.value = []
+        finally:
+            self._listing_regions = False
+        pn.state.execute(functools.partial(self._move_tip_to_region, region_id, label))
+
+    @pn.io.with_lock
+    async def _move_tip_to_region(self, region_id: int, label: str):
+        """Put the tip in the middle of a region, leaving the angles alone.
+
+        The target is the region's centre in one hemisphere — the one the tip
+        is in now, so a probe on the left stays on the left. Finding it scans
+        the whole annotation, so it runs in a worker thread.
+
+        Only Tip AP/ML/DV are written. Insertion mode derives the tip from
+        the craniotomy, so the switch goes to Tip: the tip is what was asked
+        to move, and the insertion point then follows it as usual.
+        """
+        name = self._selected_atlas_name()
+        warp = self._atlas_warp()
+        tip = np.asarray(self._tip_atlas_um(), dtype=float)
+        if warp is not None:
+            tip = warp.to_atlas(tip)  # the fields are in the warped frame
+        try:
+            _ann, res = anatomy_atlas.canonical_annotation(name)
+            midline_um = (_ann.shape[2] - 1) / 2.0 * float(res[2])
+            right = bool(tip[1] <= midline_um)
+        except Exception:  # noqa: BLE001 - no volume to ask: default hemisphere
+            right = True
+        self.region_search_status.object = self._region_status_html(f"Locating {label}…")
+        try:
+            target = await asyncio.to_thread(region_target_um, name, region_id, right)
+        except Exception as exc:  # noqa: BLE001 - reported to the user, GUI stays usable
+            print(f"Region lookup failed: {exc}")
+            self.region_search_status.object = self._region_status_html(
+                f"Could not locate {label}: {exc}", "#b00")
+            return
+        if self._selected_atlas_name() != name:
+            return  # another atlas was picked meanwhile; this point is not in it
+        if target is None:
+            self.region_search_status.object = self._region_status_html(
+                f"{label} has no voxels in this atlas's annotation.", "#b00")
+            return
+
+        if warp is not None:
+            target = tuple(warp.from_atlas(target))
+        with self._anatomy_recompute_suppressed(), self._coord_writes():
+            self._write_triplet(self._tip_inputs, self._to_display(target))
+            self._reseat_entry_on_tip()
+        if self.coord_mode_input.value != "Tip":
+            self.coord_mode_input.value = "Tip"
+        # Awaited rather than scheduled: scheduled from inside a coroutine it
+        # becomes a task that a one-shot loop (scripts, tests) abandons.
+        if self._anatomy_overlay_active:
+            self._anatomy_dirty = True
+            await self._drain_anatomy_requests()
+        else:
+            await self._settle_entry()
+        side = "right" if right else "left"
+        self.region_search_status.object = self._region_status_html(
+            f"Tip moved to the centre of <b>{label}</b> ({side} hemisphere).", "#2e6b2e")
+
+    def _landmark_known(self, name) -> bool:
+        """Whether the atlas comes with a located landmark (bregma, or AC origin).
+
+        Decides the default of the *Coordinates relative to …* toggle.
+        """
+        return self._origin_spec(name)["status"] in ("defined", "estimate")
 
     def _origin_spec(self, name) -> dict:
         """Resolve the recommended coordinate origin + banner status for an atlas.
@@ -2137,7 +2306,8 @@ class ChannelmapGUI(param.Parameterized):
             # The display frame itself just changed, so the insertion point
             # restarts from the reseeded tip whichever mode is active.
             self._reseat_entry_on_tip()
-        self._refresh_probe_placement()
+        if not self._suppress_anatomy_recompute:  # else part of a batch (atlas switch)
+            self._refresh_probe_placement()
 
     def _recompute_anatomy_if_active(self, *events):
         """Re-run the overlay on input changes, but only once one exists."""
@@ -2950,9 +3120,15 @@ class ChannelmapGUI(param.Parameterized):
         )
         # Default the tip to the atlas center (mid-brain) when we can read it
         # cheaply; otherwise fall back to a reasonable fixed coordinate.
-        default_ap, default_ml, default_dv = (
-            self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
-        )
+        # With a located landmark, coordinates default to being relative to
+        # it (the toggle below starts ticked): at the landmark, 4 mm deep.
+        landmark_default = self._landmark_known(atlas_default)
+        if landmark_default:
+            default_ap, default_ml, default_dv = 0.0, 0.0, 4000.0
+        else:
+            default_ap, default_ml, default_dv = (
+                self._atlas_tip_center(atlas_default) or (5000.0, 2500.0, 3000.0)
+            )
         self.tip_ap_input = pn.widgets.FloatInput(
             name="Tip AP (µm)", value=round(default_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
@@ -2963,44 +3139,50 @@ class ChannelmapGUI(param.Parameterized):
             name="Tip DV (µm)", value=round(default_dv, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
         )
         # The probe is placed either by its tip or by its insertion point
-        # (craniotomy AP/ML + Tip DV); derived fields are greyed out and
+        # (craniotomy AP/ML + insertion depth); derived fields are greyed out and
         # follow live. See "Tip / insertion coordinate modes".
         self.coord_mode_input = pn.widgets.RadioButtonGroup(
             name="Coordinate entry", options=["Tip", "Insertion"], value="Tip",
             button_type="default", sizing_mode="stretch_width", margin=(8, 2, 2, 2),
         )
-        # Short labels: three across a narrow sidebar leaves ~110 px each,
-        # which "Entry AP (µm)" would overflow. Units are given in the help.
         # Blank until the surface has been read from the atlas (first Compute,
         # or the first pose edit once the atlas is local): the insertion point
         # is where the trajectory meets the brain, which only the atlas knows.
         self.entry_ap_input = pn.widgets.FloatInput(
-            name="Entry AP", value=None, step=10.0,
+            name="Entry AP (µm)", value=None, step=10.0,
             sizing_mode="stretch_width", margin=(5, 2), disabled=True,
         )
         self.entry_ml_input = pn.widgets.FloatInput(
-            name="Entry ML", value=None, step=10.0,
+            name="Entry ML (µm)", value=None, step=10.0,
             sizing_mode="stretch_width", margin=(5, 2), disabled=True,
         )
         # Entry DV is never typed nor shown as such: it is the brain surface,
-        # which reads more usefully as how far the tip sits below it. Read-only.
+        # which reads more usefully as how far the tip sits below it. Derived
+        # in Tip mode; in Insertion mode it is typed, and places the tip.
         self._entry_dv = None  # display-frame DV of the insertion point
         self.tip_depth_input = pn.widgets.FloatInput(
-            name="Tip depth along shank", value=None, step=10.0,
+            name="Probe insertion depth (µm)", value=None, step=10.0,
             sizing_mode="stretch_width", min_width=150, margin=(5, 2), disabled=True,
         )
         # Grouped for the sync helpers, in (AP, ML, DV) order.
         self._tip_inputs = (self.tip_ap_input, self.tip_ml_input, self.tip_dv_input)
         self.pitch_input = pn.widgets.FloatInput(
-            name="Pitch (deg)", value=0.0, step=1.0,
+            name="Pitch (AP tilt; °)", value=0.0, step=1.0,
+            description="<b>Pitch</b> = AP tilt (probe leaning forward / backward).",
             start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         self.yaw_input = pn.widgets.FloatInput(
-            name="Yaw (deg)", value=0.0, step=1.0,
+            name="Yaw (ML tilt; °)", value=0.0, step=1.0,
+            description="<b>Yaw</b> = ML tilt (probe leaning left / right).",
             start=-90.0, end=90.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         self.shank_orientation_input = pn.widgets.FloatInput(
-            name="Shank ori (deg)", value=0.0, step=1.0,
+            name="Roll (rotation; °)", value=0.0, step=1.0,
+            description=(
+                "<b>Roll</b> = rotation about the probe's own long axis, i.e. the "
+                "direction of shanks 0→3 in the horizontal plane; 0° = lateral "
+                "(+ML), 90° = anterior (+AP)."
+            ),
             start=-180.0, end=360.0, sizing_mode="stretch_width", margin=(5, 2),
         )
         # Optional bregma-relative coordinate mode + per-atlas calibration,
@@ -3011,7 +3193,8 @@ class ChannelmapGUI(param.Parameterized):
         }
         b_ap, b_ml, b_dv = ref["bregma_um"]
         self.bregma_relative_toggle = pn.widgets.Checkbox(
-            name="Tip relative to bregma", value=False, sizing_mode="stretch_width", margin=(6, 0, 0, 0),
+            name="Tip relative to bregma", value=landmark_default,
+            margin=(6, 0, 0, 0),  # natural width, so its "?" sits right after the label
         )
         self.bregma_ap_input = pn.widgets.FloatInput(
             name="Bregma AP (µm)", value=round(b_ap, 1), step=10.0, sizing_mode="stretch_width", margin=(5, 2)
@@ -3036,26 +3219,52 @@ class ChannelmapGUI(param.Parameterized):
         self.tilt_input = pn.widgets.FloatInput(
             name="AP tilt°", value=ref["tilt_deg"], step=0.5, sizing_mode="stretch_width", margin=(5, 2)
         )
-        self.atlas_transform_note = pn.pane.HTML(
-            '<div style="font-size: 12px; font-weight: bold; margin: 6px 0 2px 0;">'
-            "Atlas transformation</div>"
-            '<div style="font-size: 11px; color: #555; padding: 0 0 2px 0; text-align: justify;">'
-            "Some volumes, like the Allen mouse atlas, are not in stereotaxic "
-            "coordinates: they are designed for post-hoc registration rather "
-            "than pre-surgery trajectory planning. You may therefore find that "
-            "you need to consistently apply some tilt and squish to the volume "
-            "(tilt applies around bregma). The defaults below for the mouse "
-            "Allen atlas were "
-            "settled on by Julie Fabre in the Harris and Carandini lab."
+        # "Move probe tip to...": search the selected atlas's regions by
+        # acronym or name and drop the tip in the middle of the one picked.
+        self._listing_regions = False
+        self.region_search_input = pn.widgets.TextInput(
+            name="", placeholder=self._REGION_SEARCH_PROMPT,
+            sizing_mode="stretch_width", margin=(0, 0, 4, 0),
+        )
+        self.region_results = pn.widgets.MultiSelect(
+            name="", options={}, value=[], size=6, visible=False,
+            sizing_mode="stretch_width", margin=(0, 0, 2, 0),
+        )
+        self.region_search_status = pn.pane.HTML("", sizing_mode="stretch_width", margin=(0, 0))
+        self.region_search_help = pn.pane.HTML(
+            '<div style="font-size: 11px; color: #555; padding: 0 0 4px 0; text-align: justify;">'
+            "Search the selected atlas for a region by acronym or name, then "
+            "click a result: the tip moves to the centre of that region, in "
+            "the hemisphere it is already in. Pitch, yaw and roll "
+            "are kept."
             "</div>",
             sizing_mode="stretch_width", margin=(0, 0),
         )
-        self.bregma_estimate_header = pn.pane.HTML(
-            self._bregma_header_html(), sizing_mode="stretch_width", margin=(0, 0)
+        self.region_search_input.param.watch(self._on_region_query, "value_input")
+        self.region_results.param.watch(self._on_region_picked, "value")
+        # Explanations live behind hover "?" icons rather than in the panel:
+        # widgets that take a label carry theirs (``description``); the toggle
+        # and the section title, which cannot, get a TooltipIcon beside them.
+        self.atlas_transform_title = pn.pane.HTML(
+            '<div style="font-size: 12px; font-weight: bold;">Atlas transformation</div>',
+            margin=(8, 0, 2, 0),
         )
-        self.anatomy_coord_note = pn.pane.HTML(
-            self._anatomy_coord_note_html(), sizing_mode="stretch_width", margin=(0, 0)
+        self.atlas_transform_hint = pn.widgets.TooltipIcon(
+            value=(
+                "Some volumes, like the Allen mouse atlas, are not in stereotaxic "
+                "coordinates: they are designed for post-hoc registration rather "
+                "than pre-surgery trajectory planning. You may therefore find that "
+                "you need to consistently apply some tilt and squish to the volume "
+                "(tilt applies around bregma). The defaults below for the mouse "
+                "Allen atlas were settled on by Julie Fabre in the Harris and "
+                "Carandini lab."
+            ),
+            margin=(6, 0, 0, 4),
         )
+        self.bregma_hint = pn.widgets.TooltipIcon(
+            value=self._bregma_hint_text(), margin=(4, 0, 0, 4),
+        )
+        self.atlas_name_input.description = self._anatomy_coord_note_text()
         self.atlas_name_input.param.watch(self._on_atlas_change, "value")
         self.bregma_relative_toggle.param.watch(self._on_bregma_toggle, "value")
 
@@ -3066,10 +3275,10 @@ class ChannelmapGUI(param.Parameterized):
         # triplet *before* the overlay recomputes, so they go through one
         # handler rather than also being watched by the recompute directly.
         for _w in (*self._tip_inputs, self.entry_ap_input, self.entry_ml_input,
-                   self.pitch_input, self.yaw_input):
+                   self.tip_depth_input, self.pitch_input, self.yaw_input):
             _w.param.watch(self._on_pose_input_change, "value")
 
-        # Shank orientation spins the shanks *around* the shank-0 axis, so it
+        # Roll (shank orientation) spins the shanks *around* the shank-0 axis, so it
         # moves neither the tip nor the insertion point: recompute only.
         self.shank_orientation_input.param.watch(self._recompute_anatomy_if_active, "value")
         # The landmark and the squish / tilt reshape the brain the coordinates
@@ -3081,32 +3290,6 @@ class ChannelmapGUI(param.Parameterized):
             _w.param.watch(self._on_pose_input_change, "value")
         self.coord_mode_input.param.watch(self._on_coord_mode_change, "value")
         self._update_landmark_labels()  # name the toggle/fields for the default atlas
-        self.anatomy_help = pn.pane.HTML(
-            (
-                '<div style="font-size: 11px; color: #555; padding: 2px 0 6px 0; text-align: justify;">'
-                "<b>Pitch</b> = AP tilt (probe leaning forward / backward). "
-                "<b>Yaw</b> = ML tilt (probe leaning left / right). "
-                "<b>Shank orientation</b> = direction of shanks 0→3 in the "
-                "horizontal plane; 0° = lateral (+ML), 90° = anterior (+AP)."
-                "<br><br>"
-                "The <b>insertion point</b> (Entry) is where shank 0 enters "
-                "the brain: always on the brain surface, so it has no DV to "
-                "type. <b>Tip depth along shank</b> is the distance from it to "
-                "the tip (the lowest electrode of shank 0), measured along the "
-                "shank; the physical shank tip a manipulator refers to sits "
-                "about 200 µm further. <b>Tip</b>: type the tip; the insertion point is where "
-                "that trajectory crosses the surface. <b>Insertion</b>: type "
-                "<b>Entry AP / ML</b> (your craniotomy) and <b>Tip DV</b> (how "
-                "deep to go); Tip AP / ML follow from the angles. The switch "
-                "also decides what the probe <b>pivots around</b> when you "
-                "change an angle — the tip, or the insertion point. Greyed-out "
-                "fields are derived and update live once the atlas is "
-                "downloaded."
-                "</div>"
-            ),
-            sizing_mode="stretch_width",
-            margin=(0, 0),
-        )
         self.compute_anatomy_button = pn.widgets.Button(
             name=_BUTTON_COMPUTE, button_type="primary",
             sizing_mode="stretch_width", margin=(0, 0, 0, 0),
@@ -3289,6 +3472,21 @@ class ChannelmapGUI(param.Parameterized):
     def create_layout(self):
         """Create the main Panel layout"""
 
+        # "Move probe tip to...", under the locator on the right. Shown only
+        # while an overlay is up (see _set_anatomy_overlay_active).
+        self.region_search_section = pn.Column(
+            pn.pane.Markdown("## Move probe tip to... 🎯", margin=(-5, 0, 0, 0)),
+            self.region_search_help,
+            self.region_search_input,
+            self.region_results,
+            self.region_search_status,
+            styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px",
+                    "max-height": "none"},
+            margin=(10, 10, 10, 10),
+            sizing_mode="stretch_width",
+            visible=self._anatomy_overlay_active,
+        )
+
         # Counter and Downloader (fixed on the right)
         right_column = pn.Column(
             self.undo_keyboard_pane,
@@ -3314,6 +3512,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 30)),
             self.anatomy_locator_section,
             self.anatomy_legend,
+            self.region_search_section,
 
             pn.pane.Markdown("## PixelMap [documentation](https://pixelmap-neuropixels.readthedocs.io/en/latest/)", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
@@ -3346,6 +3545,26 @@ class ChannelmapGUI(param.Parameterized):
             width=350,
             scroll=False,
         )
+
+        # Everything in the anatomy panel between the atlas dropdown and the
+        # Compute button. Shown only while an overlay is up (see
+        # _set_anatomy_overlay_active): until then the panel is just
+        # "pick an atlas, compute".
+        self.anatomy_pose_section = pn.Column(
+            self.coord_mode_input,
+            pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
+            pn.Row(self.entry_ap_input, self.entry_ml_input, self.tip_depth_input, sizing_mode="stretch_width"),
+            pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
+            pn.Row(self.bregma_relative_toggle, self.bregma_hint, margin=(0, 0)),
+            pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
+            pn.Row(self.atlas_transform_title, self.atlas_transform_hint, margin=(0, 0)),
+            pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
+                   self.tilt_input, sizing_mode="stretch_width"),
+            visible=self._anatomy_overlay_active,
+            sizing_mode="stretch_width", margin=(0, 0),
+            styles={"max-height": "none"},
+        )
+        self.clear_anatomy_button.visible = self._anatomy_overlay_active
 
         # Controls panel (fixed on left)
         left_column = pn.Column(
@@ -3412,18 +3631,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.Column(
                 pn.pane.Markdown("## Anatomical overlay 🧠", margin=(-5, 0, 0, 0)),
                 self.atlas_name_input,
-                self.anatomy_coord_note,
-                self.coord_mode_input,
-                pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
-                pn.Row(self.entry_ap_input, self.entry_ml_input, self.tip_depth_input, sizing_mode="stretch_width"),
-                pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
-                self.anatomy_help,
-                self.bregma_estimate_header,
-                self.bregma_relative_toggle,
-                pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
-                self.atlas_transform_note,
-                pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
-                       self.tilt_input, sizing_mode="stretch_width"),
+                self.anatomy_pose_section,
                 pn.Row(self.compute_anatomy_button, self.clear_anatomy_button,
                        sizing_mode="stretch_width", styles={"gap": "6px"}),
                 # Panel caps a Column at max-height: 100% — here the viewport-
@@ -3431,7 +3639,7 @@ class ChannelmapGUI(param.Parameterized):
                 # rows spilled out below the grey background.
                 styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px",
                         "max-height": "none"},
-                margin=(10, 5, 0, 5),
+                margin=(10, 5, 10, 5),
                 sizing_mode="stretch_width",
             ),
             styles={

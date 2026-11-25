@@ -425,3 +425,34 @@ class TestWarpedViewsAreTrueSections:
         entry = surface_point_um(tip, atlas_name="wedge", warp=warp)
         label, _x, y_um = _warped_slice(ann, res, warp, 0, tip[0], 1, 2)
         assert entry[2] == pytest.approx(self._surface_dv(label, y_um), abs=30.0)
+
+
+class TestLegendCoordinates:
+    """The legend can carry the tip and insertion-point coordinates."""
+
+    @property
+    def COMMON(self):
+        return {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
+                "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0},
+                "y_range": (0.0, 80.0)}
+
+    @staticmethod
+    def _labels(fig):
+        return [t.get_text() for t in fig.axes[3].get_legend().get_texts()]
+
+    def test_plain_labels_without_coordinates(self, fake_brainglobe):
+        fig = render_locator("fake", entry_um=(100.0, 100.0, 10.0), **self.COMMON)
+        assert self._labels(fig) == ["probe tip", "insertion point"]
+
+    def test_tip_and_insertion_point_coordinates_are_written(self, fake_brainglobe):
+        fig = render_locator(
+            "fake", entry_um=(100.0, 100.0, 10.0),
+            tip_label_um=(-2272.8, 3070.0, 2713.7), entry_label_um=(-2759.4, 3070.0, 1878.2),
+            **self.COMMON)
+        tip, entry = self._labels(fig)
+        assert tip == "probe tip\nAP, ML, DV (µm):\n-2273, 3070, 2714"
+        assert entry == "insertion point\nAP, ML, depth along shank (µm):\n-2759, 3070, 1878"
+
+    def test_the_legend_sits_at_the_left_of_its_quadrant(self, fake_brainglobe):
+        fig = render_locator("fake", tip_label_um=(1.0, 2.0, 3.0), **self.COMMON)
+        assert fig.axes[3].get_legend()._loc == 6  # "center left"
