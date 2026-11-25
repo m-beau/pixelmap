@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
-from pixelmap.anatomy.transform import AtlasWarp, probe_to_atlas
+from pixelmap.anatomy.transform import AtlasWarp, ProbePlacement
 
 _FILL = "#d7d7e0"          # whole-brain silhouette fill (fallback view)
 _EDGE = "#9a9aa8"          # silhouette / region outline color
@@ -197,19 +197,11 @@ def _draw_view(ax, label_img, x_um, y_um, atlas, silhouette, title):
 def render_locator(
     atlas_name: str,
     *,
-    tip_atlas: tuple[float, float, float],
-    pitch_deg: float,
-    yaw_deg: float,
-    shank_orientation_deg: float,
+    placement: ProbePlacement,
     shank_positions: dict[int, float],
     y_range: tuple[float, float],
     bregma_um: tuple[float, float, float] | None = None,
     entry_um: tuple[float, float, float] | None = None,
-    ap_squish: float = 1.0,
-    ml_squish: float = 1.0,
-    dv_squish: float = 1.0,
-    tilt_deg: float = 0.0,
-    warp: AtlasWarp | None = None,
     title_coords: tuple[float, float, float] | None = None,
     tip_label_um: tuple[float, float, float] | None = None,
     entry_label_um: tuple[float, float, float] | None = None,
@@ -217,16 +209,18 @@ def render_locator(
 ) -> Figure:
     """Render the locator figure for the current insertion pose.
 
-    Pose args mirror
-    :func:`pixelmap.anatomy.visualization.compute_region_bands`. Slices are
-    taken at the tip's AP (coronal), ML (sagittal) and DV (horizontal).
+    ``placement`` is where the probe sits — tip, angles and the atlas warp in
+    force; pass the very instance given to
+    :func:`pixelmap.anatomy.visualization.compute_region_bands`, so the shanks
+    drawn here are the ones whose regions the bands report. Slices are taken
+    at the tip's AP (coronal), ML (sagittal) and DV (horizontal).
 
     ``bregma_um`` draws a black bregma dot. ``entry_um`` draws the insertion
     point (where the shank enters the brain) as a blue diamond, joined to the
     tip by a dashed line along shank 0 — the inactive shank above the
-    electrodes and the tip below them are not drawn otherwise. ``ap_squish`` / ``ml_squish`` /
-    ``dv_squish`` and ``tilt_deg`` warp the *brain* about bregma (per-axis
-    squash + nose-up AP tilt, see :class:`~pixelmap.anatomy.transform.AtlasWarp`)
+    electrodes and the tip below them are not drawn otherwise.
+    ``placement.warp`` warps the *brain* about bregma (per-axis squash +
+    nose-up AP tilt, see :class:`~pixelmap.anatomy.transform.AtlasWarp`)
     so the atlas is shown in its stereotaxic-corrected shape with the probe
     straight. Each view is then the true cross-section of that warped brain
     through the tip, resampled from the atlas — not a 2D-transformed atlas
@@ -260,17 +254,16 @@ def render_locator(
     ml_um = np.arange(n_ml) * res[2]
 
     # Each shank's trajectory from its lowest electrode (y_lo) to its top
-    # (y_hi); columns of every entry are atlas (AP, ML, DV) in µm.
+    # (y_hi); columns of every entry are (AP, ML, DV) µm in the stereotaxic
+    # frame — the frame the brain is drawn in below.
     y_lo, y_hi = y_range
     trajectories = []
     for shank_id in sorted(shank_positions):
         xy = np.array([[shank_positions[shank_id], y_lo],
                        [shank_positions[shank_id], y_hi]], dtype=float)
-        trajectories.append(
-            probe_to_atlas(xy, tip_atlas, pitch_deg, yaw_deg, shank_orientation_deg)
-        )
+        trajectories.append(placement.to_stereotaxic(xy))
 
-    tip_ap, tip_ml, tip_dv = tip_atlas
+    tip_ap, tip_ml, tip_dv = placement.tip_um
     ap_idx = int(np.clip(round(tip_ap / res[0]), 0, n_ap - 1))
     dv_idx = int(np.clip(round(tip_dv / res[1]), 0, n_dv - 1))
     ml_idx = int(np.clip(round(tip_ml / res[2]), 0, n_ml - 1))
@@ -292,13 +285,11 @@ def render_locator(
         lambda: (ml_um, dv_um, ann.projections()[1]),
         lambda: (ml_um, ap_um, ann.projections()[2]),
     )
-    # ``warp`` wins; the separate squish/tilt arguments describe one about
-    # ``bregma_um`` for callers that have no AtlasWarp to hand.
-    if warp is None and bregma_um is not None:
-        warp = AtlasWarp(tuple(float(c) for c in bregma_um),
-                         ap_squish, ml_squish, dv_squish, tilt_deg)
+    # The brain is drawn through the placement's own warp: the frame the
+    # shank lines above are in, and the one the region bands are read through.
+    warp = placement.warp
     if warp is not None and warp.is_identity:
-        warp = None
+        warp = None  # plain axis-aligned reads below
 
     # Labels report the tip coordinate along each panel's visible horizontal
     # axis: AP on the sagittal view, ML on the coronal view. ``projections()``

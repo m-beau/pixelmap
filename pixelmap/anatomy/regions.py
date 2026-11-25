@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from pixelmap.anatomy.atlas import RegionInfo, canonical_annotation, lookup_regions
-from pixelmap.anatomy.transform import AtlasWarp, probe_axis_up, probe_to_atlas
+from pixelmap.anatomy.transform import AtlasWarp, ProbePlacement, probe_axis_up
 
 
 def regions_for_positions(
@@ -16,6 +16,7 @@ def regions_for_positions(
     yaw_deg: float = 0.0,
     shank_orientation_deg: float = 0.0,
     atlas_name: str = "allen_mouse_25um",
+    warp: AtlasWarp | None = None,
 ) -> list[RegionInfo | None]:
     """Resolve atlas regions for an array of probe-local electrode positions.
 
@@ -25,17 +26,22 @@ def regions_for_positions(
         pitch_deg, yaw_deg, shank_orientation_deg: insertion pose — see
             :mod:`pixelmap.anatomy.transform`.
         atlas_name: brainglobe atlas identifier.
+        warp: stereotaxic correction of the atlas (squish + tilt about
+            bregma). When given, ``tip_atlas`` and the pose are in the
+            *stereotaxic* frame, and the regions are those of the warped
+            brain — the one the locator draws.
 
     Returns:
         Length-``N`` list; entries are ``None`` for positions outside the volume.
     """
-    atlas_coords = probe_to_atlas(
-        electrode_xy, tip_atlas,
+    placement = ProbePlacement(
+        tuple(float(c) for c in np.asarray(tip_atlas, dtype=float).reshape(3)),
         pitch_deg=pitch_deg,
         yaw_deg=yaw_deg,
         shank_orientation_deg=shank_orientation_deg,
+        warp=warp,
     )
-    return lookup_regions(atlas_name, atlas_coords)
+    return lookup_regions(atlas_name, placement.to_atlas(electrode_xy))
 
 
 def tip_depth_below_surface_um(

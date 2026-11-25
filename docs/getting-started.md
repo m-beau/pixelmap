@@ -76,6 +76,17 @@ type, message, traceback, session id, host and version. Optional settings:
 once per window, default 60; `0` sends every one).
 :::
 
+:::{note}
+**Usage statistics**: the server records each visit (an anonymous cookie ID,
+IP address, user agent and timestamp) in the SQLite database at
+`ANALYTICS_DB_PATH`, which stays on the server. `/usage-stats` publishes one
+aggregate of it as JSON: the number of unique visitors per week (Monday to
+Sunday, UTC), automated browsers included. The `Usage stats graph` GitHub
+workflow fetches it every Monday and commits
+`weekly_unique_visitors.png` and `.csv` to the `usage-stats` branch. For
+another deployment, point the workflow's `USAGE_STATS_URL` at your server.
+:::
+
 ## Quick Start
 
 ### Option 1: Browser GUI

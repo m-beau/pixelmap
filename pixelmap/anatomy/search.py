@@ -6,7 +6,9 @@ Two halves, both free of GUI code:
   list, by acronym (``VISp``) or plain-English name (``primary visual``),
   tolerant of typos, partial words and word order.
 * :func:`region_target_um` — a representative point *inside* a region, in
-  canonical atlas ``(AP, ML, DV)`` µm, for moving a probe tip onto it.
+  canonical atlas ``(AP, ML, DV)`` µm, for aiming a probe at it;
+  :func:`region_span_along_shank` — how much of the region a shank through
+  that point crosses, for stopping the lowest electrode below it.
 """
 
 from __future__ import annotations
@@ -18,12 +20,16 @@ from difflib import SequenceMatcher
 
 import numpy as np
 
-from pixelmap.anatomy.atlas import canonical_annotation, get_atlas
+from pixelmap.anatomy.atlas import canonical_annotation, get_atlas, lookup_regions
+from pixelmap.anatomy.regions import _sampling_step
+from pixelmap.anatomy.transform import ProbePlacement
 
 # region_target_um: size of the coarse sampling grid, and how few hits on it
 # mean "too small a region to trust the grid".
 _GRID_SAMPLES = 4_000_000
 _MIN_HITS = 200
+# region_span_along_shank: samples read per step outward along the shank.
+_SPAN_CHUNK = 64
 
 
 @dataclass(frozen=True)
@@ -219,3 +225,64 @@ def region_target_um(
         (ap - centre[0]) ** 2 + (dv - centre[1]) ** 2 + (ml - centre[2]) ** 2
     ))
     return (float(ap[nearest] * res[0]), float(ml[nearest] * res[2]), float(dv[nearest] * res[1]))
+
+
+def region_span_along_shank(
+    atlas_name: str,
+    region_id: int,
+    placement: ProbePlacement,
+    *,
+    step_um: float | None = None,
+    max_um: float = 30_000.0,
+) -> tuple[float, float]:
+    """The stretch of shank 0 inside a region, around the placement's tip.
+
+    Aiming the *lowest electrode* at the middle of a region
+    (:func:`region_target_um`) leaves half of the region below every
+    electrode — nearly all of a thin one. This says how far the region
+    reaches down and up the shank from there, so the probe can be slid down
+    its own axis until the lowest electrode is at the bottom of the region and
+    the whole crossing is on the electrodes.
+
+    Args:
+        atlas_name: brainglobe atlas identifier.
+        region_id: structure id; its descendants are included.
+        placement: the probe, with its tip (lowest electrode of shank 0) at
+            the point to measure from. Its angles give the shank axis and its
+            warp the brain the shank is in.
+        step_um: sampling step along the shank. Defaults to the atlas's
+            finest voxel as seen through the warp.
+        max_um: give up beyond this distance from the tip, either way.
+
+    Returns:
+        ``(y_lo, y_hi)`` in probe-local µm along shank 0 (``0`` at the tip,
+        positive up the shank), with ``y_lo <= 0 <= y_hi``: the last samples
+        still in the region, walking down and up from the tip without leaving
+        it. ``(0.0, 0.0)`` when the tip itself is not in the region.
+    """
+    _ann, voxel_size = canonical_annotation(atlas_name)
+    ids = set(_region_label_ids(get_atlas(atlas_name), region_id))
+    step = _sampling_step(step_um, voxel_size, placement.warp)
+
+    def _inside(ys: np.ndarray) -> np.ndarray:
+        xy = np.column_stack([np.zeros_like(ys), ys])
+        regions = lookup_regions(atlas_name, placement.to_atlas(xy))
+        return np.array([r is not None and r.atlas_id in ids for r in regions])
+
+    if not _inside(np.array([0.0]))[0]:
+        return (0.0, 0.0)
+
+    def _reach(sign: float) -> float:
+        """Distance to the last in-region sample, walking one way from the tip."""
+        n = 0  # samples known to be inside, beyond the tip
+        while n * step < max_um:
+            # A stretch at a time: one read of a short, thin box, where the
+            # whole line could span most of the volume.
+            inside = _inside(sign * step * (n + 1 + np.arange(_SPAN_CHUNK)))
+            outside = np.flatnonzero(~inside)
+            if outside.size:
+                return (n + int(outside[0])) * step
+            n += _SPAN_CHUNK
+        return n * step
+
+    return (-_reach(-1.0), _reach(1.0))

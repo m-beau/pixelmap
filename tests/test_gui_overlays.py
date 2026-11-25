@@ -901,7 +901,7 @@ class TestOverlayComputeRunsOffTheEventLoop:
         tips = []
 
         def _slow_bands(**kwargs):
-            tips.append(kwargs["tip_atlas"][2])
+            tips.append(kwargs["placement"].tip_um[2])
             if len(tips) == 1:  # the user keeps typing while this one runs
                 for dv in (2100.0, 2200.0, 2300.0):
                     posed_gui.tip_dv_input.value = dv
@@ -1198,7 +1198,7 @@ class TestCoordinateEntryModes:
         posed_gui.entry_ap_input.value = 2800.0
 
         assert len(requests) == 1
-        np.testing.assert_allclose(requests[0].tip, posed_gui._tip_atlas_um())
+        np.testing.assert_allclose(requests[0].placement.tip_um, posed_gui._tip_atlas_um())
         np.testing.assert_allclose(requests[0].entry, posed_gui._entry_atlas_um())
         assert requests[0].entry[0] == 2800.0
 
@@ -1408,6 +1408,8 @@ class TestAtlasTransformationWithoutBregmaMode:
     def test_section_is_titled_and_explained(self, posed_gui):
         assert "Atlas transformation" in posed_gui.atlas_transform_title.object
         assert "Julie Fabre" in posed_gui.atlas_transform_hint.value
+        assert ("https://github.com/Julie-Fabre/awesome_neuropixels/blob/main/AtlasScaling.md"
+                in posed_gui.atlas_transform_hint.value)
 
     def test_neutral_values_mean_no_warp(self, posed_gui):
         assert posed_gui._atlas_warp() is None
@@ -1425,11 +1427,246 @@ class TestAtlasTransformationWithoutBregmaMode:
         assert posed_gui._entry_dv == pytest.approx(SURFACE_DV, abs=25.0)
 
 
-class TestMoveProbeTipToRegion:
-    """Search the atlas for a region and drop the tip in the middle of it.
+class TestRegionBandsHonourTheAtlasWarp:
+    """The bands on the shanks are the regions of the brain the locator draws.
 
-    The fake brain has "SUP" (DV voxels 40–79) above "DEEP" (80 and below).
+    Regression: squish / tilt reshaped the locator's brain and moved the
+    insertion point, but the bands were still read from the atlas as
+    published — the two were computed independently and disagreed.
+
+    The fake brain's SUP → DEEP boundary is at DV 2987.5 µm; the tip is at
+    4000 µm, so unwarped the boundary sits 1012.5 µm up the shank.
     """
+
+    @staticmethod
+    def _deep_tops(gui):
+        """Top of the DEEP band on every shank, in probe µm above the lowest electrode."""
+        data = gui.region_band_source.data
+        tops = [y + h / 2 for y, h, a in zip(data["y"], data["height"], data["acronym"])
+                if a == "DEEP"]
+        assert tops, "no DEEP band drawn"
+        return np.array(tops)
+
+    @pytest.fixture
+    def warpable_gui(self, posed_gui):
+        posed_gui.bregma_dv_input.value = 2000.0  # the pivot, inside the brain
+        posed_gui.compute_anatomy_overlay()
+        yield posed_gui
+        for w in (posed_gui.ap_squish_input, posed_gui.ml_squish_input,
+                  posed_gui.dv_squish_input):
+            w.value = 1.0
+        posed_gui.tilt_input.value = 0.0
+        posed_gui.bregma_dv_input.value = 0.0
+
+    def test_unwarped_boundary(self, warpable_gui):
+        np.testing.assert_allclose(self._deep_tops(warpable_gui), 1012.5, atol=13.0)
+
+    def test_dv_squish_moves_the_bands(self, warpable_gui):
+        warpable_gui.dv_squish_input.value = 0.8
+        # Squashed about DV 2000: the boundary rises to 2000 + 0.8 * 987.5 =
+        # 2790 µm, i.e. 1210 µm above a tip that stayed at 4000.
+        np.testing.assert_allclose(self._deep_tops(warpable_gui), 1210.0, atol=13.0)
+        warpable_gui.dv_squish_input.value = 1.0
+        np.testing.assert_allclose(self._deep_tops(warpable_gui), 1012.5, atol=13.0)
+
+    def test_tilt_moves_the_bands(self, warpable_gui):
+        """A flat boundary tilted about the landmark is lower behind it."""
+        warpable_gui.bregma_ap_input.value = 2500.0
+        try:
+            warpable_gui.tilt_input.value = 10.0
+            warpable_gui.tip_ap_input.value = 3500.0
+            behind = self._deep_tops(warpable_gui)[0]
+            warpable_gui.tip_ap_input.value = 1500.0
+            ahead = self._deep_tops(warpable_gui)[0]
+        finally:
+            warpable_gui.bregma_ap_input.value = 0.0
+        expected = 2 * 1000.0 * np.tan(np.deg2rad(10.0))
+        assert abs(ahead - behind) == pytest.approx(expected, abs=40.0)
+
+    def test_the_band_under_the_insertion_point_is_brain(self, warpable_gui):
+        """Bands and insertion point agree on where the warped surface is."""
+        warpable_gui.dv_squish_input.value = 0.85
+        warpable_gui.tilt_input.value = 13.0
+        data = warpable_gui.region_band_source.data
+        top_of_brain = max(y + h / 2 for y, h in zip(data["y"], data["height"]))
+        # Probe insertion depth: lowest electrode → surface, along the shank.
+        assert top_of_brain == pytest.approx(warpable_gui.tip_depth_input.value, abs=30.0)
+
+    def test_bands_and_locator_are_given_the_same_placement(self, warpable_gui, monkeypatch):
+        seen = {}
+        for label in ("compute_region_bands", "render_locator"):
+            real = getattr(gui_module, label)
+
+            def _spy(*args, _real=real, _label=label, **kwargs):
+                seen[_label] = kwargs["placement"]
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(gui_module, label, _spy)
+
+        warpable_gui.dv_squish_input.value = 0.9
+
+        assert seen["compute_region_bands"] is seen["render_locator"]
+        assert seen["render_locator"].warp == warpable_gui._atlas_warp()
+        assert seen["render_locator"].warp.dv_squish == 0.9
+
+
+class TestElectrodeRegionField:
+    """Every electrode carries a region acronym, as it carries a survey value.
+
+    "NaN" until an anatomical overlay is computed, and for electrodes outside
+    the brain; otherwise the acronym of the band drawn behind the electrode.
+    """
+
+    @staticmethod
+    def _expected_from_bands(gui):
+        """Region of each electrode, re-derived from what the plot draws."""
+        bands = gui.region_band_source.data
+        centers = {round(v, 3): k for k, v in gui._shank_plot_centers().items()}
+        spans = {}
+        for x, y, h, acronym in zip(bands["x"], bands["y"], bands["height"], bands["acronym"]):
+            spans.setdefault(centers[round(x, 3)], []).append((y - h / 2, y + h / 2, acronym))
+        data = gui.electrode_source.data
+        expected = []
+        for shank_id, y in zip(data["shank_id"].tolist(), data["y"].tolist()):
+            hits = [a for lo, hi, a in spans.get(int(shank_id), []) if lo <= y < hi]
+            expected.append(hits[0] if hits else "NaN")
+        return expected
+
+    def test_without_an_overlay_every_region_is_nan(self, posed_gui):
+        assert posed_gui.region_acronyms is None
+        assert set(posed_gui.electrode_source.data["region"]) == {"NaN"}
+
+    def test_the_hover_tooltip_shows_it_beside_the_survey_value(self, posed_gui):
+        from bokeh.models import HoverTool
+
+        (hover,) = posed_gui.plot.select({"type": HoverTool})
+        assert ("Survey value", "@val") in hover.tooltips
+        assert ("Region", "@region") in hover.tooltips
+
+    def test_computing_names_each_electrode_after_the_band_behind_it(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        regions = list(posed_gui.electrode_source.data["region"])
+        assert regions == self._expected_from_bands(posed_gui)
+        # Tip 4000 µm, SUP → DEEP at 2987.5, surface at 987.5: all three occur.
+        assert set(regions) == {"DEEP", "SUP", "NaN"}
+
+    def test_electrodes_above_the_brain_have_no_region(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        data = posed_gui.electrode_source.data
+        above = [r for y, r in zip(data["y"].tolist(), data["region"]) if y > 4000.0 - SURFACE_DV + 13.0]
+        assert above and set(above) == {"NaN"}
+
+    def test_it_follows_the_probe_and_the_atlas_transformation(self, posed_gui):
+        posed_gui.bregma_dv_input.value = 2000.0
+        posed_gui.compute_anatomy_overlay()
+        try:
+            before = list(posed_gui.electrode_source.data["region"])
+            posed_gui.dv_squish_input.value = 0.8
+            squished = list(posed_gui.electrode_source.data["region"])
+            assert squished != before
+            assert squished == self._expected_from_bands(posed_gui)
+            posed_gui.tip_dv_input.value = 2500.0
+            assert list(posed_gui.electrode_source.data["region"]) == self._expected_from_bands(posed_gui)
+            assert "DEEP" not in posed_gui.electrode_source.data["region"]
+        finally:
+            posed_gui.dv_squish_input.value = 1.0
+            posed_gui.bregma_dv_input.value = 0.0
+
+    def test_clearing_the_overlay_resets_it(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        posed_gui.clear_anatomy_overlay()
+        assert posed_gui.region_acronyms is None
+        assert set(posed_gui.electrode_source.data["region"]) == {"NaN"}
+
+    def test_selecting_electrodes_keeps_it(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        before = list(posed_gui.electrode_source.data["region"])
+        posed_gui.update_electrode_colors()
+        assert list(posed_gui.electrode_source.data["region"]) == before
+
+
+class TestTableDownload:
+    """The fourth download: every electrode's fields as CSV."""
+
+    @staticmethod
+    def _csv(gui) -> pd.DataFrame:
+        return pd.read_csv(gui.generate_table_content())
+
+    def test_one_row_per_electrode_with_every_field(self, gui):
+        table = self._csv(gui)
+        assert list(table.columns) == [
+            "shank", "electrode", "channel", "bank", "x_um", "z_um",
+            "status", "survey_value", "region_acronym",
+        ]
+        assert len(table) == len(gui.positions_df)
+        assert table[["shank", "electrode"]].values.tolist() == (
+            gui.positions_df[["shank", "electrode"]].values.tolist())
+
+    def test_survey_and_region_are_nan_until_loaded(self, gui):
+        text = gui.generate_table_content().getvalue()
+        assert text.splitlines()[1].endswith(",NaN,NaN")
+        table = self._csv(gui)
+        assert table["survey_value"].isna().all()
+        assert table["region_acronym"].isna().all()
+
+    def test_it_does_not_wait_for_a_complete_selection(self, gui):
+        gui.clear_selection()
+        assert not gui.ready_to_download()
+        assert gui.generate_imro_content() is None
+        table = self._csv(gui)
+        assert set(table["status"]) == {"Unselected"}
+
+    def test_status_is_the_current_selection(self, gui):
+        gui.preset = next(p for p in gui.param.preset.objects if p)
+        gui.apply_preset()
+        table = self._csv(gui)
+        selected = table[table["status"] == "Selected"]
+        assert {(s, e) for s, e in zip(selected["shank"], selected["electrode"])} == {
+            (int(e.shank_id), int(e.electrode_id)) for e in gui.electrodes.selected}
+        assert len(selected) == gui.electrodes.n_maximum_electrodes
+        # A complete selection reads each channel exactly once.
+        assert sorted(selected["channel"]) == list(range(len(selected)))
+        assert set(table["status"]) <= {"Selected", "Unselected", "Unavailable"}
+        assert (table["status"] == "Unavailable").sum() == len(gui.electrodes.unavailable)
+
+    def test_survey_values_are_written(self, gui):
+        _load_survey(gui, _survey_content(gui.positions_df, lambda s, x, y: y / 100.0))
+        table = self._csv(gui)
+        np.testing.assert_allclose(table["survey_value"], table["z_um"] / 100.0)
+
+    def test_regions_are_those_of_the_hover_tooltip(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        table = self._csv(posed_gui)
+        shown = list(posed_gui.electrode_source.data["region"])
+        assert table["region_acronym"].fillna("NaN").tolist() == shown
+        assert {"DEEP", "SUP"} <= set(shown)
+
+    def test_the_file_is_named_after_the_filename_field(self, gui):
+        gui.filename_input.value = "my_probe.csv"
+        try:
+            gui.generate_table_content()
+            assert gui.filename_input.value == "my_probe"
+            assert gui.download_table_button.filename == "my_probe.csv"
+            assert gui.download_imro_button.filename == "my_probe.imro"
+        finally:
+            gui.update_filename(reset=True)
+
+    def test_the_button_survives_the_buttons_being_rebuilt(self, gui):
+        """The other three change label and colour once a selection is complete."""
+        row = gui.create_download_buttons()
+        buttons = [b for r in row for b in r]
+        assert gui.download_table_button in buttons and len(buttons) == 4
+        assert gui.download_table_button.label == "Table ⬇"
+
+
+class TestMoveProbeTipToRegion:
+    """Search the atlas for a region and put shank 0 through the middle of it,
+    with the lowest electrode at the bottom of the region.
+
+    The fake brain has "SUP" (DV voxels 40–119) above "DEEP" (120 and below).
+    """
+
+    SUP_BOTTOM_DV = 119 * 25.0  # centre of the deepest SUP voxel
 
     @staticmethod
     def _pick(gui, query):
@@ -1468,6 +1705,48 @@ class TestMoveProbeTipToRegion:
         self._pick(posed_gui, query)
         assert self._region_at_tip(posed_gui) == acronym
         assert acronym in posed_gui.region_search_status.object
+
+    def test_the_lowest_electrode_stops_at_the_bottom_of_the_region(self, posed_gui):
+        """Regression: it stopped at the centre, leaving the lower half of the
+        region below every electrode — nearly all of a small nucleus."""
+        self._pick(posed_gui, "SUP")
+        assert posed_gui.tip_dv_input.value == pytest.approx(self.SUP_BOTTOM_DV, abs=25.0)
+        assert self._region_at_tip(posed_gui) == "SUP"
+        assert "crosses the centre" in posed_gui.region_search_status.object
+
+    def test_the_whole_crossing_is_on_the_electrodes(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        self._pick(posed_gui, "SUP")
+        data = posed_gui.region_band_source.data
+        sup = [(y - h / 2, y + h / 2) for y, h, a in zip(data["y"], data["height"], data["acronym"])
+               if a == "SUP"]
+        assert sup and "DEEP" not in data["acronym"]
+        for bottom, top in sup:  # every shank: from the lowest electrode to the surface
+            assert bottom == pytest.approx(0.0, abs=13.0)
+            assert top == pytest.approx(self.SUP_BOTTOM_DV - SURFACE_DV, abs=30.0)
+
+    def test_a_tilted_shank_still_passes_through_the_centre(self, posed_gui, monkeypatch):
+        """The probe slides down its own axis from the centre, whatever the angles."""
+        centres = []
+        original = gui_module.region_target_um
+
+        def _spy(*args, **kwargs):
+            centres.append(original(*args, **kwargs))
+            return centres[-1]
+
+        monkeypatch.setattr(gui_module, "region_target_um", _spy)
+        posed_gui.pitch_input.value = 25.0
+        posed_gui.yaw_input.value = -15.0
+        self._pick(posed_gui, "SUP")
+
+        from pixelmap.anatomy.transform import probe_axis_up
+
+        up = probe_axis_up(25.0, -15.0)
+        to_centre = np.asarray(centres[-1]) - np.asarray(posed_gui._tip_atlas_um())
+        along = float(to_centre @ up)
+        assert along > 500.0  # the centre is well up the shank from the tip
+        assert np.linalg.norm(to_centre - along * up) < 1.0  # and on its axis
+        assert self._region_at_tip(posed_gui) == "SUP"
 
     def test_the_same_region_can_be_picked_again(self, posed_gui):
         """Regression: it stayed selected, so a second click was not a change."""
@@ -1533,7 +1812,7 @@ class TestMoveProbeTipToRegion:
         monkeypatch.setattr(posed_gui, "_compute_anatomy", _spy)
         self._pick(posed_gui, "SUP")
         assert requests
-        np.testing.assert_allclose(requests[-1].tip, posed_gui._tip_atlas_um())
+        np.testing.assert_allclose(requests[-1].placement.tip_um, posed_gui._tip_atlas_um())
 
     def test_the_volume_is_scanned_off_the_event_loop(self, posed_gui, monkeypatch):
         threads = []

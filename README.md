@@ -78,6 +78,12 @@ See the [full documentation](https://pixelmap-neuropixels.readthedocs.io) for th
 
 UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/pixelmap/issues) if you need support for these.
 
+## Usage of the online GUI
+
+![Unique visitors of the online GUI per week](https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors.png)
+
+Updated every Monday by a [GitHub workflow](.github/workflows/usage-stats.yml); the numbers are in [`weekly_unique_visitors.csv`](https://github.com/m-beau/pixelmap/blob/usage-stats/weekly_unique_visitors.csv).
+
 ## Contributing
 
 Bug reports and feature requests are welcome via [GitHub Issues](https://github.com/m-beau/pixelmap/issues). Pull requests are also welcome — please open an issue first to discuss significant changes.

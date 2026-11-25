@@ -71,8 +71,13 @@ log "NUM_PROCS $NUM_PROCS"
 #
 # --setup warms what the first session would otherwise load on the event loop,
 # freezing every session and /liveness (see scripts/warm_first_session.py).
+#
+# --plugins adds /usage-stats: weekly unique-visitor counts as JSON, which the
+# usage-stats GitHub workflow fetches to redraw the usage graph (see
+# pixelmap/usage_stats.py).
 exec "$PYTHON_BIN" -m panel serve ./app.py \
     --setup ./scripts/warm_first_session.py \
+    --plugins pixelmap.usage_stats \
     --address "$ADDRESS" \
     --port "$INTERNAL_PORT" \
     --allow-websocket-origin "$ALLOW_WEBSOCKET_ORIGIN" \

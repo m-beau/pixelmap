@@ -69,6 +69,6 @@ __all__ = [
     "save_to_imro_file",
 ]
 
-__version__ = "1.6.1"
+__version__ = "1.6.3"
 __author__ = "Maxime Beau"
 __email__ = "maxime@princeton.edu"

@@ -365,3 +365,38 @@ class TestAtlasWarp:
     def test_identity(self):
         assert self._warp().is_identity
         assert not self._warp(tilt_deg=1.0).is_identity
+
+
+class TestProbePlacement:
+    """The single probe → brain mapping the locator and the region bands share."""
+
+    BREGMA = (5400.0, 5700.0, 440.0)
+    XY = np.array([[0.0, 0.0], [0.0, 1500.0], [250.0, 720.0], [750.0, 2880.0]])
+
+    def test_without_a_warp_both_frames_are_probe_to_atlas(self):
+        from pixelmap.anatomy.transform import ProbePlacement
+
+        placement = ProbePlacement((5000.0, 2500.0, 3000.0), 12.0, -7.0, 30.0)
+        expected = probe_to_atlas(self.XY, (5000.0, 2500.0, 3000.0), 12.0, -7.0, 30.0)
+        np.testing.assert_allclose(placement.to_stereotaxic(self.XY), expected)
+        np.testing.assert_allclose(placement.to_atlas(self.XY), expected)
+
+    def test_the_atlas_position_is_the_drawn_position_carried_through_the_warp(self):
+        """What is read is, by construction, what is drawn — un-warped."""
+        from pixelmap.anatomy.transform import AtlasWarp, ProbePlacement
+
+        warp = AtlasWarp(self.BREGMA, ap_squish=0.95, dv_squish=0.885, tilt_deg=13.0)
+        placement = ProbePlacement((7000.0, 4000.0, 4500.0), 20.0, 5.0, 90.0, warp)
+        drawn = placement.to_stereotaxic(self.XY)
+        read = placement.to_atlas(self.XY)
+        np.testing.assert_allclose(read, warp.to_atlas(drawn))
+        np.testing.assert_allclose(warp.from_atlas(read), drawn)
+        assert not np.allclose(read, drawn, atol=50.0)  # the warp is not a no-op here
+
+    def test_the_warp_does_not_move_the_probe_in_the_stereotaxic_frame(self):
+        from pixelmap.anatomy.transform import AtlasWarp, ProbePlacement
+
+        pose = ((7000.0, 4000.0, 4500.0), 20.0, 5.0, 90.0)
+        warped = ProbePlacement(*pose, AtlasWarp(self.BREGMA, dv_squish=0.8, tilt_deg=10.0))
+        np.testing.assert_allclose(
+            warped.to_stereotaxic(self.XY), ProbePlacement(*pose).to_stereotaxic(self.XY))

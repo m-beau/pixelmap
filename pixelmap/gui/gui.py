@@ -13,7 +13,7 @@ import re
 import threading
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -48,15 +48,22 @@ from pixelmap.analytics import AnalyticsSessionTracker
 from pixelmap.anatomy import atlas as anatomy_atlas
 from pixelmap.anatomy.regions import surface_point_um
 from pixelmap.anatomy.schematic import render_locator
-from pixelmap.anatomy.search import region_catalog, region_target_um, search_regions
+from pixelmap.anatomy.search import (
+    region_catalog,
+    region_span_along_shank,
+    region_target_um,
+    search_regions,
+)
 from pixelmap.anatomy.transform import (
     AtlasWarp,
+    ProbePlacement,
     atlas_to_bregma_um,
     bregma_to_atlas_um,
     probe_axis_up,
 )
-from pixelmap.anatomy.visualization import compute_region_bands
+from pixelmap.anatomy.visualization import band_acronyms_at, compute_region_bands
 from pixelmap.constants import (
+    IMRO_FORMATS_WITH_GAINS,
     LEGACY_INT_TO_IMRO_FORMAT,
     PROBE_FEATURES,
     PROBE_TYPE_MAP,
@@ -147,17 +154,19 @@ class _AnatomyRequest:
     probe_xs: dict
     plot_centers: dict
     y_max: float
-    tip: tuple
+    # Where the probe sits: tip, angles and the squish/tilt in force. The one
+    # object both the region bands and the locator take their shanks from.
+    placement: ProbePlacement
     entry: tuple | None  # None: the trajectory never meets the brain
-    pitch_deg: float
-    yaw_deg: float
-    shank_orientation_deg: float
     bregma_um: tuple | None       # where to draw the landmark dot, if any
-    warp: AtlasWarp | None        # squish/tilt in force; None = atlas as published
     title_coords: tuple | None    # tip as typed, when that differs from atlas µm
     tip_label: tuple              # tip (AP, ML, DV) as typed, for the legend
     entry_label: tuple | None     # entry (AP, ML, depth along shank) as shown
     generation: int
+    # Every electrode's shank, id and probe-local y, to name its region.
+    electrode_shanks: tuple = ()
+    electrode_ids: tuple = ()
+    electrode_ys: tuple = ()
     locator_fig: Any = None  # reused across renders; see _compute_anatomy
 
 
@@ -166,6 +175,9 @@ class _AnatomyResult:
     """What a worker-thread compute hands back for the loop to draw."""
 
     bands: list | None = None
+    # Region acronym per electrode, keyed like ``survey_values``; electrodes
+    # outside the brain are absent.
+    region_acronyms: dict | None = None
     error: Exception | None = None
     locator_html: str | None = None
     locator_fig: Any = None
@@ -398,6 +410,11 @@ class ChannelmapGUI(param.Parameterized):
         self.survey_color_bar_title = None
         self._survey_range_suspend = False
 
+        # Region acronym of each electrode, the anatomy's counterpart of
+        # ``survey_values``: None until an overlay is computed, and electrodes
+        # outside the brain are absent from it.
+        self.region_acronyms: dict[Electrode, str] | None = None
+
         # Anatomy overlay state.  Once an overlay is requested, live-update it
         # whenever any pose / bregma / squish / tilt input changes; set on
         # Compute, not on the first draw, so edits made while that first
@@ -539,6 +556,7 @@ class ChannelmapGUI(param.Parameterized):
             "electrode_id": electrode_ids,
             "bar_x": bar_x,
             "bar_height": np.full(len(positions), electrode_height * 1.5),
+            "region": self._region_column(shank_ids.tolist(), electrode_ids.tolist()),
             **self._electrode_appearance_columns(shank_ids.tolist(), electrode_ids.tolist()),
         }
 
@@ -586,6 +604,32 @@ class ChannelmapGUI(param.Parameterized):
         if self.survey_values is None:
             return float("nan")
         return self.survey_values.get(electrode, float("nan"))
+
+    def _get_region_acronym(self, electrode: Electrode) -> str | None:
+        """Region acronym of an electrode, or None: no overlay, or not in the brain."""
+        if self.region_acronyms is None:
+            return None
+        return self.region_acronyms.get(electrode)
+
+    def _region_column(self, shank_ids, electrode_ids) -> list[str]:
+        """The ``region`` column of the electrode source: an acronym or "NaN".
+
+        "NaN" as text, to read in the hover tooltip like a missing survey value.
+        """
+        return [
+            self._get_region_acronym(Electrode(shank_id, electrode_id)) or "NaN"
+            for shank_id, electrode_id in zip(shank_ids, electrode_ids, strict=True)
+        ]
+
+    def _refresh_region_column(self):
+        """Push ``region_acronyms`` to the plot (the hover tooltip reads it)."""
+        if getattr(self, "electrode_source", None) is None:
+            return
+        data = self.electrode_source.data
+        if "shank_id" not in data:
+            return  # the plot is being torn down for another probe type
+        self.electrode_source.data["region"] = self._region_column(
+            data["shank_id"].tolist(), data["electrode_id"].tolist())
 
     def _get_survey_color(self, electrode: Electrode) -> str:
         """Map a survey Val to a hex color using the current colormap bounds."""
@@ -935,10 +979,14 @@ class ChannelmapGUI(param.Parameterized):
     def update_filename(self, reset=False):
         if reset:
             self.filename_input.value = f"manual_selection_{self.probe_type}"
-        self.filename_input.value = self.filename_input.value.replace(".imro", "").replace(".pdf", "").replace(".json", "")
-        self.download_imro_button.filename = f"{self.filename_input.value}.imro"
-        self.download_pdf_button.filename = f"{self.filename_input.value}.pdf"
-        self.download_kilosort_button.filename = f"{self.filename_input.value}.json"
+        stem = self.filename_input.value
+        for extension in (".imro", ".pdf", ".json", ".csv"):
+            stem = stem.replace(extension, "")
+        self.filename_input.value = stem
+        self.download_imro_button.filename = f"{stem}.imro"
+        self.download_pdf_button.filename = f"{stem}.pdf"
+        self.download_kilosort_button.filename = f"{stem}.json"
+        self.download_table_button.filename = f"{stem}.csv"
 
     def generate_imro(self):
         """Generate IMRO file from current selection"""
@@ -1080,6 +1128,39 @@ class ChannelmapGUI(param.Parameterized):
         # Convert to JSON string and return as StringIO
         json_str = json.dumps(kilosort_dict_serializable, indent=2)
         return StringIO(json_str)
+
+    # Text written to the table for a value that does not exist: no survey
+    # loaded, no anatomical overlay computed, or an electrode outside the brain.
+    _TABLE_MISSING = "NaN"
+
+    def electrodes_table(self) -> pd.DataFrame:
+        """Every electrode of the probe with all its fields, one row each.
+
+        The fields the hover tooltip shows, for the whole probe at once:
+        where the electrode is and how it is wired
+        (:func:`pixelmap.backend.electrode_table`), then its selection
+        ``status``, its ``survey_value`` and its ``region_acronym``. The last
+        two are missing (NaN / None) until a survey is loaded and an
+        anatomical overlay computed.
+        """
+        table = backend.electrode_table(self.positions_df, self.wiring_df)
+        electrodes = [
+            Electrode(shank_id, electrode_id)
+            for shank_id, electrode_id in zip(table["shank"].tolist(), table["electrode"].tolist())
+        ]
+        table["status"] = [self.get_electrode_plotting_params(e)[0] for e in electrodes]
+        table["survey_value"] = [self._get_survey_val(e) for e in electrodes]
+        table["region_acronym"] = [self._get_region_acronym(e) for e in electrodes]
+        return table
+
+    def generate_table_content(self):
+        """The *Table* download: :meth:`electrodes_table` as CSV.
+
+        Unlike the IMRO, PDF and Kilosort files it describes the probe as it
+        is right now, so it does not wait for the selection to be complete.
+        """
+        self.update_filename()
+        return StringIO(self.electrodes_table().to_csv(index=False, na_rep=self._TABLE_MISSING))
 
     def apply_uploaded_imro(self):
 
@@ -1367,13 +1448,9 @@ class ChannelmapGUI(param.Parameterized):
             probe_xs=self._shank_probe_xs(),
             plot_centers=self._shank_plot_centers(),
             y_max=float(self.positions_df["y"].max()),
-            tip=self._tip_atlas_um(),
+            placement=self._probe_placement(),  # as the insertion point used
             entry=self._entry_atlas_um(),  # settled by the drain just before
-            pitch_deg=float(self.pitch_input.value),
-            yaw_deg=float(self.yaw_input.value),
-            shank_orientation_deg=float(self.shank_orientation_input.value),
             bregma_um=bregma_um,
-            warp=self._atlas_warp(),  # the same one the insertion point used
             # The locator titles quote the tip; in bregma mode they must quote
             # it the way the fields do, not in atlas µm.
             title_coords=(tuple(_fval(w) for w in self._tip_inputs)
@@ -1381,6 +1458,9 @@ class ChannelmapGUI(param.Parameterized):
             tip_label=tuple(_fval(w) for w in self._tip_inputs),
             entry_label=self._entry_label(),
             generation=self._anatomy_generation,
+            electrode_shanks=tuple(self.positions_df["shank"].tolist()),
+            electrode_ids=tuple(self.positions_df["electrode"].tolist()),
+            electrode_ys=tuple(self.positions_df["y"].tolist()),
             locator_fig=self._locator_fig,
         )
 
@@ -1389,37 +1469,44 @@ class ChannelmapGUI(param.Parameterized):
 
         Must not touch widgets, Bokeh models or session state — only ``req``
         and the atlas.
+
+        The bands on the shanks and the probe in the locator are two views of
+        one thing, so both are handed the same ``req.placement``: the regions
+        reported along a shank are those under the shank the locator draws.
         """
         try:
             bands = compute_region_bands(
                 shank_positions=req.probe_xs,
                 y_range=(0.0, req.y_max),
-                tip_atlas=req.tip,
-                pitch_deg=req.pitch_deg,
-                yaw_deg=req.yaw_deg,
-                shank_orientation_deg=req.shank_orientation_deg,
+                placement=req.placement,
                 atlas_name=req.atlas_name,
                 step_um=25.0,
             )
         except Exception as exc:  # noqa: BLE001 - any lookup failure is reported to the user
             return _AnatomyResult(error=exc)
 
-        result = _AnatomyResult(bands=bands, locator_fig=req.locator_fig)
+        # Each electrode's region is the band behind it: read off the bands,
+        # not looked up again, so the two cannot disagree.
+        acronyms = band_acronyms_at(bands, req.electrode_shanks, req.electrode_ys)
+        region_acronyms = {
+            Electrode(shank_id, electrode_id): acronym
+            for shank_id, electrode_id, acronym in zip(
+                req.electrode_shanks, req.electrode_ids, acronyms, strict=True)
+            if acronym is not None
+        }
+        result = _AnatomyResult(
+            bands=bands, region_acronyms=region_acronyms, locator_fig=req.locator_fig)
         try:
             # Reuse this session's figure: building one per render cost 3.1 MB
             # of RSS per overlay compute, and the overlay recomputes on every
             # pose edit.
             fig = render_locator(
                 req.atlas_name,
-                tip_atlas=req.tip,
-                pitch_deg=req.pitch_deg,
-                yaw_deg=req.yaw_deg,
-                shank_orientation_deg=req.shank_orientation_deg,
+                placement=req.placement,
                 shank_positions=req.probe_xs,
                 y_range=(0.0, req.y_max),
                 bregma_um=req.bregma_um,
                 entry_um=req.entry,
-                warp=req.warp,
                 title_coords=req.title_coords,
                 tip_label_um=req.tip_label,
                 entry_label_um=req.entry_label,
@@ -1498,6 +1585,8 @@ class ChannelmapGUI(param.Parameterized):
         self.region_band_source.data = band_data
         self.region_label_source.data = label_data
         self.region_boundary_source.data = boundary_data
+        self.region_acronyms = result.region_acronyms
+        self._refresh_region_column()
 
         self._update_anatomy_legend(bands)
         # The atlas is now downloaded, so the origin corner can be shown.
@@ -1518,6 +1607,9 @@ class ChannelmapGUI(param.Parameterized):
         }
         self.region_label_source.data = {"x": [], "y": [], "text": [], "color": [], "center": []}
         self.region_boundary_source.data = {"x0": [], "x1": [], "y0": [], "y1": []}
+        if self.region_acronyms is not None:
+            self.region_acronyms = None
+            self._refresh_region_column()
         self.anatomy_legend.object = self._empty_legend_html()
         self.anatomy_locator.object = ""
         self.anatomy_locator_section.visible = False
@@ -1785,8 +1877,10 @@ class ChannelmapGUI(param.Parameterized):
         """Typed-in coordinates → canonical atlas (AP, ML, DV) µm.
 
         Identity in absolute mode; folds in the landmark in bregma mode.
-        Translation only: DV-squish and tilt are applied as a *visual* warp of
-        the atlas image in the locator, not by relocating the probe in CCF.
+        Translation only, so the result is in the *stereotaxic* frame: the
+        atlas after its squish and tilt (:meth:`_atlas_warp`). To read the
+        annotation there, go through that warp — :meth:`_probe_placement`
+        does it for every point of the probe.
         """
         if not self.bregma_relative_toggle.value:
             return raw
@@ -1829,11 +1923,28 @@ class ChannelmapGUI(param.Parameterized):
     def _tip_atlas_um(self) -> tuple[float, float, float]:
         """Current tip in canonical (AP, ML, DV) µm, honoring bregma mode.
 
-        The single source of the tip for the whole overlay path: in Insertion
-        mode the tip is derived, but :meth:`_sync_tip_from_entry` keeps
-        it current.
+        In the stereotaxic frame (see :meth:`_from_display`), which is the
+        atlas frame only while no squish/tilt is set. The single source of
+        the tip for the whole overlay path: in Insertion mode the tip is
+        derived, but :meth:`_sync_tip_from_entry` keeps it current.
         """
         return self._from_display(tuple(_fval(w) for w in self._tip_inputs))
+
+    def _probe_placement(self) -> ProbePlacement:
+        """Where the probe sits right now: tip, angles and the atlas warp.
+
+        The one description of the probe's position that everything showing
+        it against the anatomy is computed from — the shanks in the locator,
+        the region bands along them and the insertion point — so they cannot
+        disagree about where the probe is.
+        """
+        return ProbePlacement(
+            tip_um=self._tip_atlas_um(),
+            pitch_deg=_fval(self.pitch_input),
+            yaw_deg=_fval(self.yaw_input),
+            shank_orientation_deg=_fval(self.shank_orientation_input),
+            warp=self._atlas_warp(),
+        )
 
     ###########################################
     ##### Tip / insertion coordinate modes ####
@@ -2062,10 +2173,10 @@ class ChannelmapGUI(param.Parameterized):
         if not anatomy_atlas.is_downloaded(name):
             return
         before = self._entry_settle_key()
-        mode, warp = self.coord_mode_input.value, self._atlas_warp()
+        placement = self._probe_placement()
+        mode, warp = self.coord_mode_input.value, placement.warp
         if mode == "Tip":
-            point = self._tip_atlas_um()
-            pitch, yaw = _fval(self.pitch_input), _fval(self.yaw_input)
+            point, pitch, yaw = placement.tip_um, placement.pitch_deg, placement.yaw_deg
         else:
             if self.entry_ap_input.value is None or self.entry_ml_input.value is None:
                 return
@@ -2158,7 +2269,7 @@ class ChannelmapGUI(param.Parameterized):
         return f'<div style="font-size: 11px; color: {color}; padding: 2px 0;">{text}</div>'
 
     def _on_region_picked(self, event):
-        """A region was clicked in the result list: move the tip onto it."""
+        """A region was clicked in the result list: move the probe onto it."""
         if self._listing_regions or not event.new:
             return
         region_id = event.new[-1]
@@ -2176,19 +2287,24 @@ class ChannelmapGUI(param.Parameterized):
 
     @pn.io.with_lock
     async def _move_tip_to_region(self, region_id: int, label: str):
-        """Put the tip in the middle of a region, leaving the angles alone.
+        """Put shank 0 through the middle of a region, leaving the angles alone.
 
-        The target is the region's centre in one hemisphere — the one the tip
-        is in now, so a probe on the left stays on the left. Finding it scans
-        the whole annotation, so it runs in a worker thread.
+        The shank is aimed at the region's centre in one hemisphere — the one
+        the tip is in now, so a probe on the left stays on the left — and the
+        tip (the lowest electrode) is put where that shank leaves the region
+        at the bottom, so the whole crossing lies on the electrodes. Stopping
+        the tip *at* the centre would leave everything below it unrecorded,
+        which for a small nucleus is most of it. Both lookups read the
+        annotation, so they run in a worker thread.
 
         Only Tip AP/ML/DV are written. Insertion mode derives the tip from
         the craniotomy, so the switch goes to Tip: the tip is what was asked
         to move, and the insertion point then follows it as usual.
         """
         name = self._selected_atlas_name()
-        warp = self._atlas_warp()
-        tip = np.asarray(self._tip_atlas_um(), dtype=float)
+        placement = self._probe_placement()  # the angles and warp to keep
+        warp = placement.warp
+        tip = np.asarray(placement.tip_um, dtype=float)
         if warp is not None:
             tip = warp.to_atlas(tip)  # the fields are in the warped frame
         try:
@@ -2198,8 +2314,21 @@ class ChannelmapGUI(param.Parameterized):
         except Exception:  # noqa: BLE001 - no volume to ask: default hemisphere
             right = True
         self.region_search_status.object = self._region_status_html(f"Locating {label}…")
+        def _locate():
+            centre = region_target_um(name, region_id, right)
+            if centre is None:
+                return None, 0.0
+            if warp is not None:
+                centre = tuple(float(c) for c in warp.from_atlas(centre))
+            # Slide down the shank from the centre to the last point still in
+            # the region: that is where the lowest electrode goes.
+            through_centre = replace(placement, tip_um=centre)
+            y_lo, y_hi = region_span_along_shank(name, region_id, through_centre)
+            bottom = through_centre.to_stereotaxic([[0.0, y_lo]])[0]
+            return tuple(float(c) for c in bottom), y_hi - y_lo
+
         try:
-            target = await asyncio.to_thread(region_target_um, name, region_id, right)
+            target, span_um = await asyncio.to_thread(_locate)
         except Exception as exc:  # noqa: BLE001 - reported to the user, GUI stays usable
             print(f"Region lookup failed: {exc}")
             self.region_search_status.object = self._region_status_html(
@@ -2212,8 +2341,6 @@ class ChannelmapGUI(param.Parameterized):
                 f"{label} has no voxels in this atlas's annotation.", "#b00")
             return
 
-        if warp is not None:
-            target = tuple(warp.from_atlas(target))
         with self._anatomy_recompute_suppressed(), self._coord_writes():
             self._write_triplet(self._tip_inputs, self._to_display(target))
             self._reseat_entry_on_tip()
@@ -2228,7 +2355,8 @@ class ChannelmapGUI(param.Parameterized):
             await self._settle_entry()
         side = "right" if right else "left"
         self.region_search_status.object = self._region_status_html(
-            f"Tip moved to the centre of <b>{label}</b> ({side} hemisphere).", "#2e6b2e")
+            f"Shank 0 now crosses the centre of <b>{label}</b> ({side} hemisphere): "
+            f"its lowest {span_um:.0f} µm are in it.", "#2e6b2e")
 
     def _landmark_known(self, name) -> bool:
         """Whether the atlas comes with a located landmark (bregma, or AC origin).
@@ -2624,6 +2752,7 @@ class ChannelmapGUI(param.Parameterized):
                 ("Z position", "@y μm"),
                 ("Status", "@status"),
                 ("Survey value", "@val"),
+                ("Region", "@region"),
             ],
         )
 
@@ -2987,7 +3116,7 @@ class ChannelmapGUI(param.Parameterized):
 
         # IMRO directory and filename inputs (split into two)
         self.filename_input = pn.widgets.TextInput(
-            name="IMRO or PDF filename (omit extension)",
+            name="Filename of the downloads (omit extension)",
             value=f"manual_selection_{self.probe_type}",  # default filename defined here
             width=300,
             margin=(0, 0, 0, 30)
@@ -3037,6 +3166,22 @@ class ChannelmapGUI(param.Parameterized):
             widgets={"hardware_hp_filter_on": {"type": pn.widgets.Select, "width": 300, "margin": 0}},
             show_name=False,
         )
+
+        # Gains and hardware filter: only some IMRO tables carry them, so the
+        # section is shown only for the part numbers that do (see
+        # _update_gain_section_visibility).
+        self.gain_settings_section = pn.Column(
+            pn.pane.Markdown("<b>Gains and filter (1.0-format IMRO):</b>", margin=(0, 0, -15, 10)),
+            self.hardware_hp_filter_on_selector_widget,
+            pn.Row(
+                self.ap_gain_input,
+                self.lf_gain_input,
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
+            margin=(0, 0),
+        )
+        self._update_gain_section_visibility()
 
         # Undo / redo widgets
         self.undo_button = pn.widgets.Button(
@@ -3238,8 +3383,10 @@ class ChannelmapGUI(param.Parameterized):
         self.region_search_hint = pn.widgets.TooltipIcon(
             value=(
                 "Search the selected atlas for a region by acronym or name, then "
-                "click a result: the tip moves to the centre of that region, in "
-                "the hemisphere it is already in. Pitch, yaw and roll are kept."
+                "click a result: the probe moves so that shank 0 crosses the "
+                "centre of that region, in the hemisphere it is already in, with "
+                "its lowest electrode at the bottom of the region. Pitch, yaw and "
+                "roll are kept."
             ),
             margin=(6, 0, 0, 4),
         )
@@ -3260,7 +3407,10 @@ class ChannelmapGUI(param.Parameterized):
                 "you need to consistently apply some tilt and squish to the volume "
                 "(tilt applies around bregma). The defaults below for the mouse "
                 "Allen atlas were settled on by Julie Fabre in the Harris and "
-                "Carandini lab."
+                "Carandini lab (<a href='https://github.com/Julie-Fabre/"
+                "awesome_neuropixels/blob/main/AtlasScaling.md' target='_blank'>"
+                "AtlasScaling.md</a>; click the icon to pin this note, then "
+                "follow the link)."
             ),
             margin=(6, 0, 0, 4),
         )
@@ -3350,7 +3500,7 @@ class ChannelmapGUI(param.Parameterized):
             callback=self.generate_imro_content,
             filename=f"{self.filename_input.value}.imro",
             button_type=self.download_button_color,
-            width=87,
+            width=135,
             icon="file-text",
             label=self.download_button_label,
         )
@@ -3359,7 +3509,7 @@ class ChannelmapGUI(param.Parameterized):
             callback=self.generate_pdf_content,
             filename=f"{self.filename_input.value}.pdf",
             button_type=self.download_button_color,
-            width=87,
+            width=135,
             icon="file-type-pdf",
             label=self.download_button_label.replace("IMRO", "PDF"),
         )
@@ -3368,15 +3518,26 @@ class ChannelmapGUI(param.Parameterized):
             callback=self.generate_kilosort_channelmap,
             filename=f"{self.filename_input.value}.json",
             button_type=self.download_button_color,
-            width=87,
+            width=135,
             icon="file-code",
             label=self.download_button_label.replace("IMRO", "Kilosort"),
         )
 
-        return pn.Row(
-            self.download_imro_button,
-            self.download_pdf_button,
-            self.download_kilosort_button,
+        # Every electrode's fields as CSV. Always on offer: it describes the
+        # probe as it is, complete selection or not.
+        self.download_table_button = pn.widgets.FileDownload(
+            callback=self.generate_table_content,
+            filename=f"{self.filename_input.value}.csv",
+            button_type=self.download_button_color,
+            width=135,
+            icon="table",
+            label="Table ⬇",
+        )
+
+        # Two rows of two: four across would overflow the side panel.
+        return pn.Column(
+            pn.Row(self.download_imro_button, self.download_pdf_button, margin=0),
+            pn.Row(self.download_kilosort_button, self.download_table_button, margin=0),
             sizing_mode="stretch_width",
             margin=(0, 0, 0, 20),
         )
@@ -3596,13 +3757,7 @@ class ChannelmapGUI(param.Parameterized):
                     sizing_mode="stretch_width",
                 ),
                 self.legacy_imro_mode_checkbox,
-                pn.pane.Markdown("<b>For 1.0 only (2.0 gains not in channelmap):</b>", margin=(0, 0, -15, 10)),
-                self.hardware_hp_filter_on_selector_widget,
-                pn.Row(
-                    self.ap_gain_input,
-                    self.lf_gain_input,
-                    sizing_mode="stretch_width",
-                ),
+                self.gain_settings_section,
                 styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
                 margin=(0, 5, 0, 5),
             ),
@@ -3765,6 +3920,21 @@ class ChannelmapGUI(param.Parameterized):
         # Set reference_id to the first available option if current selection is not available
         if self.reference_id not in self.param.reference_id.objects:
             self.reference_id = self.param.reference_id.objects[0]
+
+        self._update_gain_section_visibility()
+
+    def _update_gain_section_visibility(self):
+        """Show the gain / hardware-filter inputs only when the IMRO table stores them.
+
+        Keyed on the part number's IMRO format, not on the probe group: NHP,
+        UHD and Opto probes run on the 1.0 ASIC and write 1.0-format tables,
+        so they need these inputs as much as a standard 1.0 does. 2.0 and
+        later have fixed gains, and their tables have no field for them.
+        """
+        if not hasattr(self, "gain_settings_section"):
+            return  # probe data is loaded before the widgets exist
+        imro_fmt = PROBE_FEATURES[self.probe_subtype]["IMRO_format"]
+        self.gain_settings_section.visible = imro_fmt in IMRO_FORMATS_WITH_GAINS
 
     def update_electrode_counter(self):
         """Update status information"""
