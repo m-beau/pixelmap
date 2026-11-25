@@ -57,6 +57,7 @@ from pixelmap.anatomy.transform import (
 )
 from pixelmap.anatomy.visualization import compute_region_bands
 from pixelmap.constants import (
+    IMRO_FORMATS_WITH_GAINS,
     LEGACY_INT_TO_IMRO_FORMAT,
     PROBE_FEATURES,
     PROBE_TYPE_MAP,
@@ -3038,6 +3039,22 @@ class ChannelmapGUI(param.Parameterized):
             show_name=False,
         )
 
+        # Gains and hardware filter: only some IMRO tables carry them, so the
+        # section is shown only for the part numbers that do (see
+        # _update_gain_section_visibility).
+        self.gain_settings_section = pn.Column(
+            pn.pane.Markdown("<b>Gains and filter (1.0-format IMRO):</b>", margin=(0, 0, -15, 10)),
+            self.hardware_hp_filter_on_selector_widget,
+            pn.Row(
+                self.ap_gain_input,
+                self.lf_gain_input,
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
+            margin=(0, 0),
+        )
+        self._update_gain_section_visibility()
+
         # Undo / redo widgets
         self.undo_button = pn.widgets.Button(
             name="↶ Undo",
@@ -3596,13 +3613,7 @@ class ChannelmapGUI(param.Parameterized):
                     sizing_mode="stretch_width",
                 ),
                 self.legacy_imro_mode_checkbox,
-                pn.pane.Markdown("<b>For 1.0 only (2.0 gains not in channelmap):</b>", margin=(0, 0, -15, 10)),
-                self.hardware_hp_filter_on_selector_widget,
-                pn.Row(
-                    self.ap_gain_input,
-                    self.lf_gain_input,
-                    sizing_mode="stretch_width",
-                ),
+                self.gain_settings_section,
                 styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px"},
                 margin=(0, 5, 0, 5),
             ),
@@ -3765,6 +3776,21 @@ class ChannelmapGUI(param.Parameterized):
         # Set reference_id to the first available option if current selection is not available
         if self.reference_id not in self.param.reference_id.objects:
             self.reference_id = self.param.reference_id.objects[0]
+
+        self._update_gain_section_visibility()
+
+    def _update_gain_section_visibility(self):
+        """Show the gain / hardware-filter inputs only when the IMRO table stores them.
+
+        Keyed on the part number's IMRO format, not on the probe group: NHP,
+        UHD and Opto probes run on the 1.0 ASIC and write 1.0-format tables,
+        so they need these inputs as much as a standard 1.0 does. 2.0 and
+        later have fixed gains, and their tables have no field for them.
+        """
+        if not hasattr(self, "gain_settings_section"):
+            return  # probe data is loaded before the widgets exist
+        imro_fmt = PROBE_FEATURES[self.probe_subtype]["IMRO_format"]
+        self.gain_settings_section.visible = imro_fmt in IMRO_FORMATS_WITH_GAINS
 
     def update_electrode_counter(self):
         """Update status information"""

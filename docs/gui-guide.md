@@ -42,9 +42,11 @@ The **Reference** dropdown sets which electrode is used as the common reference 
 On-shank reference electrodes (at positions 192, 576, and 960 for NP 1.0) are defined in the IMRO specification but are not currently exposed in the GUI. Use `External` or `Tip` for standard recordings.
 :::
 
-### Neuropixels 1.0 only: filtering and gain settings
+### Filtering and gain settings (1.0-format IMRO tables only)
 
-These three settings are encoded directly in the IMRO table and apply **only to Neuropixels 1.0 probes**. NP 2.0 probes have hardwired gains and no software-selectable on-board filter, so these fields are ignored for 2.0+ probes.
+These three settings are encoded directly in the IMRO table of **probes that use the Neuropixels 1.0 IMRO format**: standard 1.0 probes, and the primate (NHP) probes built on the same electronics, such as NP1010–NP1014. NP 2.0 and later probes have hardwired gains and no software-selectable on-board filter, so their IMRO tables have no field for them.
+
+This section of the panel therefore **appears only when version 1.0 probes are selected**.
 
 | Setting | Default | Description |
 |---|---|---|

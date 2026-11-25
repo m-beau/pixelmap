@@ -73,6 +73,14 @@ REF_ELECTRODES = {
 }
 
 # ---------------------------------------------------------------------------
+# IMRO formats whose table carries the AP gain, LF gain and hardware
+# high-pass filter: the 1.0 format, shared by every probe built on the 1.0
+# ASIC (NHP, UHD, Opto, NXT-passive part numbers included), and UHD2's.
+# 2.0 and later probes have fixed gains, absent from their IMRO tables.
+# ---------------------------------------------------------------------------
+IMRO_FORMATS_WITH_GAINS = ("imro_np1000", "imro_np1110")
+
+# ---------------------------------------------------------------------------
 # Bank encoding  (keyed by internal probe type)
 # ---------------------------------------------------------------------------
 REF_BANKS = {

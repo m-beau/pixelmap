@@ -15,6 +15,7 @@ from matplotlib import cm, patches
 from matplotlib.collections import PolyCollection
 
 from .constants import (
+    IMRO_FORMATS_WITH_GAINS,
     LEGACY_INT_TO_IMRO_FORMAT,
     LEGACY_PROBE_TYPE_MAP,
     PROBE_FEATURES,
@@ -237,7 +238,7 @@ def format_imro_string(electrodes, wiring_df, probe_type, probe_subtype, referen
     # Generate entries based on IMRO format (the actual determinant of wire format)
     entries = []
 
-    if imro_fmt in ("imro_np1000", "imro_np1110"):
+    if imro_fmt in IMRO_FORMATS_WITH_GAINS:
         # Format: (channel_id bank ref ap_gain lf_gain hp_filter)
         ref_value = REF_ELECTRODES[imro_fmt][reference_id]
         for (shank_id, electrode_id), (row, col) in zip(electrodes, df_coordinates):
