@@ -36,6 +36,8 @@ regardless of how the shank line is oriented around the probe shaft.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
@@ -78,6 +80,92 @@ def bregma_to_atlas_um(
     return (b_ap - ap_r, b_ml + ml_b, b_dv + dv_r)
 
 
+def atlas_to_bregma_um(
+    coords_atlas: tuple[float, float, float],
+    *,
+    bregma_um: tuple[float, float, float],
+    dv_squish: float = 1.0,
+    tilt_deg: float = 0.0,
+) -> tuple[float, float, float]:
+    """Exact inverse of :func:`bregma_to_atlas_um`.
+
+    Needed whenever a coordinate computed in the atlas frame has to be shown
+    back to the user in whichever frame they are typing in (e.g. the
+    insertion point derived from a bregma-relative tip).
+
+    Args:
+        coords_atlas: ``(AP, ML, DV)`` in canonical atlas µm.
+        bregma_um: bregma position in canonical atlas ``(AP, ML, DV)`` µm.
+        dv_squish: as in :func:`bregma_to_atlas_um`.
+        tilt_deg: as in :func:`bregma_to_atlas_um`.
+
+    Returns:
+        ``(ap, ml, dv)`` µm from bregma, in the sign conventions
+        :func:`bregma_to_atlas_um` takes.
+    """
+    a_ap, a_ml, a_dv = (float(c) for c in coords_atlas)
+    b_ap, b_ml, b_dv = (float(c) for c in bregma_um)
+    # Undo the placement, then un-rotate the nose-up tilt.
+    ap_r, dv_r = b_ap - a_ap, a_dv - b_dv
+    theta = np.deg2rad(tilt_deg)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    ap_b = ap_r * cos_t - dv_r * sin_t
+    dv_s = ap_r * sin_t + dv_r * cos_t
+    # Mirror the forward's truthiness guard: dv_squish == 0 passes through
+    # unscaled there, so it must here too or the round trip breaks at 0.
+    dv_b = dv_s * dv_squish if dv_squish else dv_s
+    return (ap_b, a_ml - b_ml, dv_b)
+
+
+@dataclass(frozen=True)
+class AtlasWarp:
+    """The stereotaxic correction of an atlas: per-axis squish + AP tilt about bregma.
+
+    Two frames share the canonical ``(AP, ML, DV)`` µm axes:
+
+    * the **atlas** frame, the annotation volume as published;
+    * the **stereotaxic** frame, the atlas after it has been squashed and
+      tilted about bregma to match a flat-skull preparation. The probe is
+      straight in this frame, it is the frame the coordinate fields are typed
+      in, and it is what the locator figure draws.
+
+    ``from_atlas`` is the very affine map the locator applies to the brain
+    image (:func:`pixelmap.anatomy.schematic.render_locator`): scale each axis
+    about bregma, then rotate the ``(AP, DV)`` plane by ``tilt_deg``. Anything
+    that has to agree with the *drawn* brain — where its surface is, how deep
+    the tip sits below it — must sample the annotation through ``to_atlas``.
+    """
+
+    bregma_um: tuple[float, float, float]
+    ap_squish: float = 1.0
+    ml_squish: float = 1.0
+    dv_squish: float = 1.0
+    tilt_deg: float = 0.0
+
+    @property
+    def is_identity(self) -> bool:
+        return (self.ap_squish == 1.0 and self.ml_squish == 1.0
+                and self.dv_squish == 1.0 and self.tilt_deg == 0.0)
+
+    def _matrix(self) -> np.ndarray:
+        """Linear part of atlas → stereotaxic, acting on ``(AP, ML, DV)`` offsets."""
+        theta = np.deg2rad(self.tilt_deg)
+        c, s = np.cos(theta), np.sin(theta)
+        rotate = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]])
+        return rotate @ np.diag([self.ap_squish, self.ml_squish, self.dv_squish])
+
+    def from_atlas(self, points_atlas) -> np.ndarray:
+        """Atlas-frame ``(..., 3)`` µm → stereotaxic frame."""
+        b = np.asarray(self.bregma_um, dtype=float)
+        return (np.asarray(points_atlas, dtype=float) - b) @ self._matrix().T + b
+
+    def to_atlas(self, points_stereo) -> np.ndarray:
+        """Stereotaxic-frame ``(..., 3)`` µm → atlas frame. Inverse of ``from_atlas``."""
+        b = np.asarray(self.bregma_um, dtype=float)
+        inv = np.linalg.inv(self._matrix())
+        return (np.asarray(points_stereo, dtype=float) - b) @ inv.T + b
+
+
 def _R_pitch(pitch_rad: float) -> np.ndarray:
     """AP tilt — rotation around world ML axis. ``probe-y`` rotates -DV → +AP."""
     cp, sp = np.cos(pitch_rad), np.sin(pitch_rad)
@@ -108,6 +196,87 @@ def probe_axis_up(pitch_deg: float = 0.0, yaw_deg: float = 0.0) -> np.ndarray:
     """
     R = _R_yaw(np.deg2rad(yaw_deg)) @ _R_pitch(np.deg2rad(pitch_deg))
     return R @ np.array([0.0, 0.0, -1.0])
+
+
+# Depth reference
+# ---------------
+# ``tip_atlas`` everywhere in this module is the *lowest electrode* (the
+# ``yp = 0`` reference), because that is what the electrode geometry is
+# measured from. Insertion depth, however, is read off a manipulator as
+# travel of the *physical shank tip*, which sits ``tip_length_um`` of
+# inactive silicon below the lowest electrode (209 µm on NP 1.0, 206 µm on
+# NP 2.0 — see ``tip_length_um`` in ``PROBE_FEATURES``). The three functions
+# below take that offset so callers can work in manipulator depth; pass
+# ``0.0`` to measure to the lowest electrode instead.
+
+
+def tip_to_insertion(
+    tip_atlas: np.ndarray | tuple[float, float, float],
+    depth_um: float,
+    pitch_deg: float = 0.0,
+    yaw_deg: float = 0.0,
+    tip_length_um: float = 0.0,
+) -> np.ndarray:
+    """Insertion point for a probe whose shank tip is ``depth_um`` deep.
+
+    Args:
+        tip_atlas: atlas ``(AP, ML, DV)`` µm of the *lowest electrode*.
+        depth_um: travel along the shank from the insertion point to the
+            *physical shank tip*.
+        pitch_deg, yaw_deg: pose — see module docstring.
+        tip_length_um: physical-tip-to-lowest-electrode offset. ``0.0``
+            measures ``depth_um`` to the lowest electrode instead.
+
+    Returns:
+        Atlas ``(AP, ML, DV)`` µm of the insertion point.
+    """
+    tip = np.asarray(tip_atlas, dtype=float).reshape(3)
+    reach = float(depth_um) - float(tip_length_um)
+    return tip + reach * probe_axis_up(pitch_deg, yaw_deg)
+
+
+def insertion_to_tip(
+    insertion_atlas: np.ndarray | tuple[float, float, float],
+    depth_um: float,
+    pitch_deg: float = 0.0,
+    yaw_deg: float = 0.0,
+    tip_length_um: float = 0.0,
+) -> np.ndarray:
+    """Lowest-electrode position for a probe lowered ``depth_um`` from an entry point.
+
+    Inverse of :func:`tip_to_insertion`. ``depth_um`` is travel *along the
+    shank* (what the manipulator advances), not a vertical DV drop, so this
+    stays well defined at any pitch/yaw — including ±90°, where a
+    vertical-depth parameterisation would divide by zero.
+
+    A ``depth_um`` smaller than ``tip_length_um`` is meaningful, not an
+    error: the shank tip has entered the brain but the lowest electrode has
+    not yet, so the returned point sits above the insertion point.
+    """
+    entry = np.asarray(insertion_atlas, dtype=float).reshape(3)
+    reach = float(depth_um) - float(tip_length_um)
+    return entry - reach * probe_axis_up(pitch_deg, yaw_deg)
+
+
+def insertion_depth_um(
+    tip_atlas: np.ndarray | tuple[float, float, float],
+    insertion_atlas: np.ndarray | tuple[float, float, float],
+    pitch_deg: float = 0.0,
+    yaw_deg: float = 0.0,
+    tip_length_um: float = 0.0,
+) -> float:
+    """Signed along-shank travel from the insertion point to the shank tip.
+
+    Positive when the tip is below the insertion point (the normal case).
+    **Negative** when the whole shank sits above it — the probe has not
+    reached that point yet — which is why this projects onto the axis rather
+    than taking a norm: a norm would report a healthy positive depth for a
+    probe that never entered the tissue.
+    """
+    tip = np.asarray(tip_atlas, dtype=float).reshape(3)
+    entry = np.asarray(insertion_atlas, dtype=float).reshape(3)
+    reach = float(np.dot(entry - tip, probe_axis_up(pitch_deg, yaw_deg)))
+    return reach + float(tip_length_um)
 
 
 def probe_to_atlas(

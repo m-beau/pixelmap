@@ -21,6 +21,10 @@ PROBE_FEATURES : dict[str, dict]
       vertical_pitch         – electrode vertical pitch (µm)
       layout_geometry        – "staggered", "linear", etc.
       num_shanks             – number of shanks
+      tip_length_um          – distance from the physical shank tip up to the
+                               lowest electrode. PixelMap measures electrode
+                               positions from the lowest electrode, so this is
+                               the offset to manipulator (shank-tip) depth.
       pixelmap_probe_type    – PixelMap internal type string, or None if unknown.
 
 PROBE_TYPE_MAP : dict[str, list[str]]
@@ -373,6 +377,7 @@ def _build(source_json_path: Path) -> dict:
             "vertical_pitch":        float(data["electrode_pitch_vert_um"]),
             "layout_geometry":       data["electrode_layout_type"],
             "num_shanks":            n_shanks,
+            "tip_length_um":         float(data["tip_length_um"]),
             "pixelmap_probe_type":   ptype,
         }
     return result
