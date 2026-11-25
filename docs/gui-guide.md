@@ -95,7 +95,7 @@ Type electrode ranges directly, e.g. `1-10,20-25`, to add them to the current se
 
 #### 3 - Interactive selection with single clicks and dragged boxes
 
-You can hover over any electrode to see its ID, shank, depth (Z position), and current status in a tooltip. Clicking a single electrode (de)selects it.
+You can hover over any electrode to see its ID, shank, depth (Z position), current status, survey value and brain region in a tooltip (the last two read `NaN` until a survey is loaded and an anatomical overlay computed). Clicking a single electrode (de)selects it.
 
 You can also drag boxes to (de)select ranges of electrodes with one of six box tools (select the active tool from the toolbar on the right of the probe plot):
 
@@ -178,6 +178,19 @@ Once you've selected the **target number of electrodes** for your probe type (e.
 - An **`.imro` file** — load this in SpikeGLX
 - A **PDF rendering** — a visual record of your electrode configuration
 - A **Kilosort channelmap file** — a text file that formats the channelmap to feed it to Kilosort
+
+A fourth button, **Table**, is available at any time, whether or not the selection is complete. It downloads a `.csv` file with **one row per electrode of the probe** (all of them, not only the selected ones) and one column per field:
+
+| Column | Description |
+|---|---|
+| `shank`, `electrode` | The electrode's shank and its index on that shank. |
+| `channel`, `bank` | The readout channel the electrode is hardwired to, and its bank — the numbers its entry in an `.imro` file is made of. Every electrode has them, selected or not. |
+| `x_um`, `z_um` | Position on the probe in µm; `z` runs up the shank from the lowest electrode. |
+| `status` | `Selected`, `Unselected`, or `Unavailable` (blocked by a selected electrode sharing its readout line). The rows with `Selected` are the recorded channels. |
+| `survey_value` | The electrode's value in the loaded [activity survey](#power-feature-1-spikeglx-activity-survey-overlay); `NaN` if none is loaded or the survey has no value for it. |
+| `region_acronym` | The atlas region the electrode sits in, from the [anatomical overlay](#power-feature-2-anatomical-overlay); `NaN` if no overlay is computed or the electrode is outside the brain. |
+
+These are the fields the hover tooltip shows for one electrode, for the whole probe at once.
 
 ### Shareable link
 
@@ -315,14 +328,14 @@ A depth on its own does not place a probe — infinitely many positions sit the 
 
 ### Move probe tip to a region
 
-Inside the anatomical overlay box, between the bregma fields and **Atlas transformation**, **Move probe tip to...** appears once an overlay has been computed (hover its **?** for a reminder of what it does). It places the tip in a brain region by name instead of by coordinates.
+Inside the anatomical overlay box, between the bregma fields and **Atlas transformation**, **Move probe tip to...** appears once an overlay has been computed (hover its **?** for a reminder of what it does). It places the probe in a brain region by name instead of by coordinates.
 
 1. Type in the search field. The regions of the currently selected atlas are matched by **acronym** (`VISp`, `CA1`) or by **plain-English name** (`primary visual`, `hippocampal`). The search is forgiving: case, word order and punctuation do not matter, half-typed words match, and typos are tolerated (`cerebelum` finds the cerebellum).
-2. Click a result. The tip (Tip AP / ML / DV) moves to the centre of that region.
+2. Click a result. The probe moves so that **shank 0 passes through the centre of that region**, with the tip (Tip AP / ML / DV, the lowest electrode) **at the bottom of the region** along the shank. The whole stretch of the region the shank crosses is then on the electrodes, starting from the lowest one. The status line under the list says how long that stretch is.
 
-**Pitch, yaw and roll are left as they are** — only the tip moves, and the insertion point and probe insertion depth follow it as usual. If you were in Insertion mode, the switch goes to Tip, since the tip is what was placed.
+**Pitch, yaw and roll are left as they are** — only the tip moves, and the insertion point and probe insertion depth follow it as usual. The bottom of the region is found along the shank at those angles, so tilting the probe first changes how much of the region it crosses: a thin sheet-like structure crossed at a right angle shows up as a thin band however it is targeted. If you were in Insertion mode, the switch goes to Tip, since the tip is what was placed.
 
-The target is the centre of the region **in the hemisphere the tip is already in**, snapped to the nearest point that really lies inside the region (the plain centre of a curved structure such as the hippocampus can fall outside it). Picking a parent structure such as *Isocortex* or *Thalamus* targets the centre of all its subdivisions taken together. Regions that exist in the atlas's hierarchy but are not drawn in its annotation cannot be targeted, and say so.
+The centre is that of the region **in the hemisphere the tip is already in**, snapped to the nearest point that really lies inside the region (the plain centre of a curved structure such as the hippocampus can fall outside it). Picking a parent structure such as *Isocortex* or *Thalamus* targets the centre of all its subdivisions taken together. Regions that exist in the atlas's hierarchy but are not drawn in its annotation cannot be targeted, and say so.
 
 The search needs the atlas's region list, so it is disabled until the atlas has been downloaded (the first **Compute anatomical overlay** fetches it). Locating a region scans the whole atlas volume, which takes about a second on a 25 µm atlas and several on a 10 µm one.
 
@@ -338,14 +351,14 @@ The landmark position is set by:
 
 #### Atlas transformation
 
-Some volumes, like the Allen mouse atlas, are not in stereotaxic coordinates: they are designed for post-hoc registration rather than pre-surgery trajectory planning. You may therefore find that you need to consistently apply some tilt and squish to the volume. The fields under **Atlas transformation** do that. They are always editable and always applied, **whether or not your coordinates are relative to bregma**; the atlas is squished and tilted about the bregma position above. The defaults for the mouse Allen atlas were settled on by Julie Fabre in the Harris and Carandini lab.
+Some volumes, like the Allen mouse atlas, are not in stereotaxic coordinates: they are designed for post-hoc registration rather than pre-surgery trajectory planning. You may therefore find that you need to consistently apply some tilt and squish to the volume. The fields under **Atlas transformation** do that. They are always editable and always applied, **whether or not your coordinates are relative to bregma**; the atlas is squished and tilted about the bregma position above. The defaults for the mouse Allen atlas were settled on by Julie Fabre in the Harris and Carandini lab (see [AtlasScaling.md](https://github.com/Julie-Fabre/awesome_neuropixels/blob/main/AtlasScaling.md)).
 
 | Field | Description |
 |---|---|
 | **DV squish / AP squish / ML squish** | Scale factors applied to the atlas along each axis, about bregma. The Allen CCF is known to be dorsoventrally compressed relative to real tissue: the default DV squish of **0.885** (from the Toronto MRI scaling used by the [Neuropixels Trajectory Explorer](https://neuropixels-trajectory-explorer.vercel.app)) corrects this so that atlas DV distances match stereotaxic DV distances. Leave at 1.0 if your atlas is already stereotaxically calibrated. |
 | **AP tilt°** | Nose-up tilt of the stereotaxic frame about the ML axis, in degrees. The Allen CCF was constructed with the skull tilted relative to flat-skull stereotaxic convention; the default of **13°** for Allen atlases aligns it with a flat-skull stereotax. |
 
-The transformation reshapes the brain drawn in the locator figure and moves the brain surface used for the insertion point and the probe insertion depth, so those match the drawn brain. It does not shift the region lookup along the probe.
+The transformation reshapes the brain the probe sits in, and everything that shows the probe against the anatomy follows it together: the brain drawn in the locator figure, the brain surface used for the insertion point and the probe insertion depth, and the regions drawn along the shanks. The region at any depth on a shank is always the region under that point of the shank in the locator figure.
 
 #### Pre-filled bregma estimates
 

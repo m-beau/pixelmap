@@ -1,0 +1,74 @@
+name: Usage stats graph
+
+# Redraws the graph of unique visitors per week of the hosted GUI.
+#
+# The visitor database lives on the server, so the server publishes the weekly
+# counts at /usage-stats (pixelmap/usage_stats.py) and this workflow fetches
+# them. The graph and its CSV are committed to the `usage-stats` branch, not
+# to main: a weekly bot commit would otherwise need to get past main's branch
+# protection, and would make main drift from dev.
+#
+#   https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors.png
+#
+# GitHub only runs schedules from the default branch, so this starts firing
+# once it is on main.
+
+on:
+  schedule:
+    # Mondays 06:17 UTC: weeks run Monday to Sunday in UTC, so the week that
+    # just ended is complete. Off the hour, when scheduled runs start late.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: write
+
+concurrency:
+  group: usage-stats
+  cancel-in-progress: false
+
+env:
+  USAGE_STATS_URL: https://pixelmap.pni.princeton.edu/usage-stats
+  STATS_BRANCH: usage-stats
+
+jobs:
+  update-graph:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # The stats branch shares no history with the code: it holds the CSV and
+    # the PNG only. The first run creates it.
+    - name: Check out the stats branch
+      run: |
+        if git ls-remote --exit-code --heads origin "$STATS_BRANCH" > /dev/null; then
+          git fetch --depth 1 origin "$STATS_BRANCH"
+          git worktree add -B "$STATS_BRANCH" stats FETCH_HEAD
+        else
+          git worktree add --orphan -b "$STATS_BRANCH" stats
+        fi
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v10.3.3  # no floating major tags since v8
+      with:
+        cache-suffix: usage-stats
+
+    # The script declares its own dependencies (matplotlib), so uv runs it in
+    # an environment of its own instead of installing the whole project.
+    - name: Fetch the weekly counts and redraw the graph
+      run: uv run scripts/update_usage_graph.py --url "$USAGE_STATS_URL" --out-dir stats
+
+    - name: Commit the graph
+      working-directory: stats
+      run: |
+        git add --all
+        if git diff --cached --quiet; then
+          echo "No new complete week: nothing to commit."
+          exit 0
+        fi
+        git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Update weekly unique visitors"
+        git push origin "HEAD:refs/heads/$STATS_BRANCH"

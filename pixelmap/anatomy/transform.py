@@ -329,3 +329,61 @@ def probe_to_atlas(
         + np.outer(electrode_xy[:, 1], probe_y)
     )
     return tip + displacements
+
+
+@dataclass(frozen=True)
+class ProbePlacement:
+    """Where the probe sits in the brain: *the* probe-local → brain mapping.
+
+    One instance is the single source of truth for a placed probe. Everything
+    that shows the probe against the anatomy has to derive its positions from
+    the same instance, so that no two of them can disagree about where the
+    shanks are:
+
+    * :meth:`to_stereotaxic` is where a point of the probe is **drawn** — the
+      shank lines of the locator figure
+      (:func:`pixelmap.anatomy.schematic.render_locator`);
+    * :meth:`to_atlas` is the voxel that same point **reads** — the region
+      bands along each shank
+      (:func:`pixelmap.anatomy.visualization.compute_region_bands`).
+
+    The two differ only by ``warp``, and ``to_atlas`` is defined as
+    ``to_stereotaxic`` followed by it, so they cannot drift apart.
+
+    Attributes:
+        tip_um: ``(AP, ML, DV)`` µm of the shank-0 lowest electrode, in the
+            *stereotaxic* frame (see :class:`AtlasWarp`) — the frame the
+            probe is straight in and coordinates are typed in. Without a
+            ``warp`` that is the atlas frame itself.
+        pitch_deg, yaw_deg, shank_orientation_deg: pose — see module docstring.
+        warp: stereotaxic correction of the atlas (squish + tilt about
+            bregma), or ``None`` for the atlas as published.
+    """
+
+    tip_um: tuple[float, float, float]
+    pitch_deg: float = 0.0
+    yaw_deg: float = 0.0
+    shank_orientation_deg: float = 0.0
+    warp: AtlasWarp | None = None
+
+    def to_stereotaxic(self, electrode_xy: np.ndarray) -> np.ndarray:
+        """Probe-local ``(N, 2)`` µm → ``(N, 3)`` µm in the stereotaxic frame.
+
+        The frame the probe is straight in, and the one the locator draws.
+        """
+        return probe_to_atlas(
+            electrode_xy, self.tip_um,
+            pitch_deg=self.pitch_deg,
+            yaw_deg=self.yaw_deg,
+            shank_orientation_deg=self.shank_orientation_deg,
+        )
+
+    def to_atlas(self, electrode_xy: np.ndarray) -> np.ndarray:
+        """Probe-local ``(N, 2)`` µm → ``(N, 3)`` µm in the atlas as published.
+
+        These are the coordinates to look regions up at: under a ``warp`` the
+        brain the probe sits in is the squished/tilted one, so each point is
+        carried back into the annotation volume before it is read.
+        """
+        points = self.to_stereotaxic(electrode_xy)
+        return points if self.warp is None else self.warp.to_atlas(points)

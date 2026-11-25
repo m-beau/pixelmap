@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pixelmap.anatomy.regions import regions_for_positions
+from pixelmap.anatomy.atlas import lookup_regions
+from pixelmap.anatomy.transform import ProbePlacement
 
 
 @dataclass(frozen=True)
@@ -31,10 +32,7 @@ def compute_region_bands(
     shank_positions: dict[int, float],
     y_range: tuple[float, float],
     *,
-    tip_atlas: tuple[float, float, float],
-    pitch_deg: float,
-    yaw_deg: float,
-    shank_orientation_deg: float = 0.0,
+    placement: ProbePlacement,
     atlas_name: str,
     step_um: float = 25.0,
 ) -> list[RegionBand]:
@@ -44,9 +42,10 @@ def compute_region_bands(
         shank_positions: ``{shank_id: probe_xp}`` map giving each shank's
             position along the probe-local x axis (µm).
         y_range: ``(y_min, y_max)`` to sample along each shank (probe-local µm).
-        tip_atlas: ``(AP, ML, DV)`` of shank-0 lowest electrode in atlas µm.
-        pitch_deg, yaw_deg, shank_orientation_deg: insertion pose — see
-            :mod:`pixelmap.anatomy.transform`.
+        placement: where the probe sits — tip, angles and the atlas warp in
+            force. Pass the very instance given to
+            :func:`pixelmap.anatomy.schematic.render_locator`, so the bands
+            are the regions under the shanks that figure draws.
         atlas_name: brainglobe atlas identifier.
         step_um: sampling stride along each shank. Match or undercut the
             atlas resolution to avoid skipping thin regions.
@@ -66,14 +65,7 @@ def compute_region_bands(
         electrode_xy = np.column_stack(
             [np.full_like(y_samples, probe_xp, dtype=float), y_samples]
         )
-        regions = regions_for_positions(
-            electrode_xy,
-            tip_atlas=tip_atlas,
-            pitch_deg=pitch_deg,
-            yaw_deg=yaw_deg,
-            shank_orientation_deg=shank_orientation_deg,
-            atlas_name=atlas_name,
-        )
+        regions = lookup_regions(atlas_name, placement.to_atlas(electrode_xy))
         bands.extend(_collapse_to_bands(shank_id, probe_xp, y_samples, regions, step_um))
     return bands
 
@@ -125,4 +117,42 @@ def _collapse_to_bands(
             name=last_region.name,
             rgb=last_region.rgb,
         ))
+    return out
+
+
+def band_acronyms_at(bands: list[RegionBand], shank_ids, y_um) -> list[str | None]:
+    """The region each electrode sits in, read off the bands on its shank.
+
+    Deliberately *not* a second atlas lookup: an electrode's region is the
+    band drawn behind it, so what is reported per electrode (the hover
+    tooltip, the exported table) can never disagree with the picture.
+
+    Args:
+        bands: the output of :func:`compute_region_bands`.
+        shank_ids: shank of each electrode, length ``N``.
+        y_um: probe-local y of each electrode (µm), length ``N``.
+
+    Returns:
+        Length-``N`` list of acronyms; ``None`` where no band covers the
+        electrode (it is outside the brain, or its shank has no bands).
+    """
+    shank_ids = np.asarray(shank_ids)
+    y_um = np.asarray(y_um, dtype=float)
+    out: list[str | None] = [None] * len(y_um)
+
+    by_shank: dict[int, list[RegionBand]] = {}
+    for band in bands:
+        by_shank.setdefault(band.shank_id, []).append(band)
+
+    for shank_id, shank_bands in by_shank.items():
+        shank_bands.sort(key=lambda b: b.y_min)
+        lows = np.array([b.y_min for b in shank_bands])
+        highs = np.array([b.y_max for b in shank_bands])
+        rows = np.flatnonzero(shank_ids == shank_id)
+        # The band starting at or below each electrode; bands are half-open
+        # [y_min, y_max), so an electrode on a boundary belongs to the upper one.
+        which = np.searchsorted(lows, y_um[rows], side="right") - 1
+        covered = (which >= 0) & (y_um[rows] < highs[np.clip(which, 0, None)])
+        for row, band_idx in zip(rows[covered].tolist(), which[covered].tolist()):
+            out[row] = shank_bands[band_idx].acronym
     return out

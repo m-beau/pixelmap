@@ -303,6 +303,41 @@ def find_electrode_coordinates(electrodes, wiring_df):
     return coordinates
 
 
+def electrode_table(positions_df, wiring_df):
+    """Every electrode of a probe, with where it sits and how it is wired.
+
+    One row per physical electrode, in the order of ``positions_df``:
+
+    * ``shank``, ``electrode`` — the electrode's shank and its index on it;
+    * ``channel``, ``bank`` — the readout channel the electrode is hardwired
+      to, and the bank it belongs to: the two numbers an IMRO entry is made
+      of (``channel`` is the row of the wiring table, ``bank`` its column);
+    * ``x_um``, ``z_um`` — position on the probe, µm (``z`` up the shank from
+      the lowest electrode).
+
+    Each electrode is wired to exactly one channel, so this is the same for
+    every selection; which electrodes are *recorded* is the caller's to add.
+    """
+    _, _, index = _wiring_index(wiring_df)
+    channels = wiring_df["channel"].to_numpy()
+    banks = [int(column[-1]) for column in wiring_df.columns[1:]]
+
+    channel, bank = [], []
+    for shank_id, electrode_id in zip(positions_df["shank"].tolist(), positions_df["electrode"].tolist()):
+        row, col = index[(float(shank_id), float(electrode_id))]
+        channel.append(int(channels[row]))
+        bank.append(banks[col])
+
+    return pd.DataFrame({
+        "shank": positions_df["shank"].to_numpy(),
+        "electrode": positions_df["electrode"].to_numpy(),
+        "channel": channel,
+        "bank": bank,
+        "x_um": positions_df["x"].to_numpy(),
+        "z_um": positions_df["y"].to_numpy(),
+    })
+
+
 ###########################
 ## preset configurations ##
 ###########################

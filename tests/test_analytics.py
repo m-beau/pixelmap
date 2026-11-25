@@ -10,6 +10,7 @@ from pixelmap.analytics import (
     get_total_visits,
     get_unique_visitors,
     get_visitor_summary,
+    get_weekly_unique_visitors,
     initialize_database,
     record_session_end,
     record_visit,
@@ -153,6 +154,7 @@ def _assert_all_closed(connections):
         pytest.param(lambda db: get_total_visits(db), id="get_total_visits"),
         pytest.param(lambda db: get_unique_visitors(db), id="get_unique_visitors"),
         pytest.param(lambda db: get_visitor_summary("cookie:visitor-1", db), id="get_visitor_summary"),
+        pytest.param(lambda db: get_weekly_unique_visitors(db), id="get_weekly_unique_visitors"),
     ],
 )
 def test_helpers_close_every_connection(tmp_path, tracked_connections, call):
@@ -182,3 +184,63 @@ def test_connect_rolls_back_and_closes_on_error(tmp_path, tracked_connections):
 
     assert get_visitor_summary("k", db_path) is None
     _assert_all_closed(tracked_connections)
+
+
+def _visit(db_path, visitor_id, visited_at, user_agent="Mozilla/5.0 (Macintosh)", ip="198.51.100.12"):
+    request = SimpleNamespace(headers={"User-Agent": user_agent}, remote_ip=ip, path="/app")
+    record_visit(
+        visitor_id,
+        build_request_context(request, session_id="session"),
+        db_path=db_path,
+        visited_at=visited_at,
+    )
+
+
+def test_weekly_unique_visitors_bins_monday_to_sunday_in_utc(tmp_path):
+    db_path = tmp_path / "visitor_analytics.sqlite3"
+    # 2026-03-23 is a Monday; 2026-03-29 the Sunday that closes its week.
+    _visit(db_path, "visitor-1", "2026-03-23T00:00:00+00:00")
+    _visit(db_path, "visitor-1", "2026-03-25T12:00:00+00:00")  # same visitor, same week
+    _visit(db_path, "visitor-2", "2026-03-29T23:59:59+00:00")
+    _visit(db_path, "visitor-1", "2026-03-30T00:00:00+00:00")  # next Monday: counted again
+    # Sunday evening in New York is already Monday in UTC.
+    _visit(db_path, "visitor-3", "2026-04-05T20:30:00-04:00")
+
+    assert get_weekly_unique_visitors(db_path) == [
+        {"week_start": "2026-03-23", "unique_visitors": 2},
+        {"week_start": "2026-03-30", "unique_visitors": 1},
+        {"week_start": "2026-04-06", "unique_visitors": 1},
+    ]
+
+
+def test_weekly_unique_visitors_counts_automated_browsers(tmp_path):
+    db_path = tmp_path / "visitor_analytics.sqlite3"
+    week = "2026-03-23T10:00:00+00:00"
+    _visit(db_path, "human", week)
+    # Each headless hit arrives with a fresh cookie ID, and each is a visitor.
+    for index, user_agent in enumerate(
+        [
+            "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/117.0.5938.132 Safari/537.36",
+            "Mozilla/5.0 AppleWebKit/537.36 (compatible; bingbot/2.0) Chrome/116.0",
+        ]
+    ):
+        _visit(db_path, f"automated-{index}", week, user_agent=user_agent)
+
+    assert get_weekly_unique_visitors(db_path) == [{"week_start": "2026-03-23", "unique_visitors": 3}]
+
+
+def test_weekly_unique_visitors_keys_visitors_like_the_summary_table(tmp_path):
+    db_path = tmp_path / "visitor_analytics.sqlite3"
+    week = "2026-03-23T10:00:00+00:00"
+    # No cookie: keyed by IP, so two hits from one address are one visitor.
+    _visit(db_path, None, week, user_agent=None, ip="203.0.113.5")
+    _visit(db_path, None, week, user_agent=None, ip="203.0.113.5")
+    _visit(db_path, None, week, user_agent=None, ip="203.0.113.6")
+    _visit(db_path, "visitor-1", week, ip="203.0.113.5")
+
+    assert get_weekly_unique_visitors(db_path) == [{"week_start": "2026-03-23", "unique_visitors": 3}]
+    assert get_unique_visitors(db_path) == 3
+
+
+def test_weekly_unique_visitors_of_an_empty_database(tmp_path):
+    assert get_weekly_unique_visitors(tmp_path / "visitor_analytics.sqlite3") == []

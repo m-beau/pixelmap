@@ -7,7 +7,13 @@ import pytest
 
 from pixelmap.anatomy import atlas as atlas_module
 from pixelmap.anatomy import search as search_module
-from pixelmap.anatomy.search import RegionEntry, region_target_um, search_regions
+from pixelmap.anatomy.search import (
+    RegionEntry,
+    region_span_along_shank,
+    region_target_um,
+    search_regions,
+)
+from pixelmap.anatomy.transform import AtlasWarp, ProbePlacement
 
 ENTRIES = (
     RegionEntry(1, "VISp", "Primary visual area"),
@@ -162,3 +168,51 @@ class TestRegionTarget:
         search_module.region_target_um.cache_clear()
         assert region_target_um("two", 20) == (5 * 25.0, 30 * 25.0, 5 * 25.0)
         assert _label_at(two_sided_atlas, region_target_um("two", 11)) == 11
+
+
+class TestRegionSpanAlongShank:
+    """How much of a region shank 0 crosses, either side of the lowest electrode.
+
+    In ``two_sided_atlas`` leaf 11 is a back bar (AP voxels 4–5, DV 4–15) plus
+    a top bar (DV 4–5, AP 4–15); leaf 12 is the bottom bar (DV 14–15).
+    """
+
+    IN_BACK_BAR = (4 * 25.0, 5 * 25.0, 10 * 25.0)   # (AP, ML, DV) µm
+    IN_TOP_BAR = (10 * 25.0, 5 * 25.0, 4 * 25.0)
+
+    def test_a_vertical_shank_reaches_both_ends_of_the_region(self, two_sided_atlas):
+        span = region_span_along_shank("two", 11, ProbePlacement(self.IN_BACK_BAR))
+        # DV voxel 10 of 4–15: five voxels below, six above.
+        assert span == (-125.0, 150.0)
+
+    def test_the_span_follows_the_shank_axis(self, two_sided_atlas):
+        """Pitched to horizontal, up the shank is +AP: along the top bar."""
+        span = region_span_along_shank(
+            "two", 11, ProbePlacement(self.IN_TOP_BAR, pitch_deg=90.0))
+        np.testing.assert_allclose(span, (-150.0, 125.0))  # AP voxel 10 of 4–15
+
+    def test_it_stops_where_the_shank_first_leaves_the_region(self, two_sided_atlas):
+        """The parent is top bar + bottom bar; the filler between them ends the span."""
+        span = region_span_along_shank("two", 10, ProbePlacement(self.IN_TOP_BAR))
+        assert span == (-25.0, 0.0)  # DV voxels 4–5 only, not on to 14–15
+
+    def test_a_tip_outside_the_region_has_no_span(self, two_sided_atlas):
+        in_filler = (10 * 25.0, 5 * 25.0, 10 * 25.0)
+        assert region_span_along_shank("two", 11, ProbePlacement(in_filler)) == (0.0, 0.0)
+        assert region_span_along_shank("two", 30, ProbePlacement(self.IN_BACK_BAR)) == (0.0, 0.0)
+
+    def test_the_span_is_measured_in_the_warped_brain(self, two_sided_atlas):
+        """Squashed to half height, the same crossing is half as long."""
+        warp = AtlasWarp((0.0, 0.0, 0.0), dv_squish=0.5)
+        tip = tuple(warp.from_atlas(self.IN_BACK_BAR))
+        span = region_span_along_shank("two", 11, ProbePlacement(tip, warp=warp))
+        np.testing.assert_allclose(span, (-62.5, 75.0), atol=12.5)
+        # ... and both ends, carried back into the atlas, are still in the region.
+        ends = ProbePlacement(tip, warp=warp).to_atlas([[0.0, span[0]], [0.0, span[1]]])
+        assert [_label_at(two_sided_atlas, e) for e in ends] == [11, 11]
+
+    def test_reading_in_short_stretches_changes_nothing(self, two_sided_atlas, monkeypatch):
+        monkeypatch.setattr(search_module, "_SPAN_CHUNK", 2)
+        span = region_span_along_shank("two", 11, ProbePlacement(self.IN_BACK_BAR))
+        assert span == (-125.0, 150.0)
+

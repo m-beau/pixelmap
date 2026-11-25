@@ -16,6 +16,7 @@ import pytest
 from pixelmap.anatomy import atlas as atlas_module
 from pixelmap.anatomy import schematic as schematic_module
 from pixelmap.anatomy.schematic import render_locator
+from pixelmap.anatomy.transform import ProbePlacement
 
 
 class _FakeAtlas:
@@ -57,10 +58,7 @@ def fake_brainglobe(monkeypatch):
 def _render(shank_positions=None):
     return render_locator(
         "fake",
-        tip_atlas=(100.0, 100.0, 75.0),  # ap_idx=4, ml_idx=4 → inside the blob
-        pitch_deg=0.0,
-        yaw_deg=0.0,
-        shank_orientation_deg=0.0,
+        placement=ProbePlacement((100.0, 100.0, 75.0)),  # ap_idx=4, ml_idx=4 → inside the blob
         shank_positions=shank_positions or {0: 0.0, 1: 50.0},
         y_range=(0.0, 80.0),
     )
@@ -75,8 +73,8 @@ def test_render_has_three_slices_plus_legend_with_a_probe_per_shank(fake_braingl
 
 
 def test_bregma_dot_adds_one_marker_per_slice(fake_brainglobe):
-    common = {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
-              "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
+    common = {"placement": ProbePlacement((100.0, 100.0, 75.0)),
+              "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
     without = render_locator("fake", **common)
     with_bregma = render_locator("fake", bregma_um=(100.0, 100.0, 50.0), **common)
     for a_no, a_yes in zip(without.axes[:3], with_bregma.axes[:3]):
@@ -84,8 +82,8 @@ def test_bregma_dot_adds_one_marker_per_slice(fake_brainglobe):
 
 
 def test_insertion_point_adds_a_marker_and_a_path_per_slice(fake_brainglobe):
-    common = {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
-              "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
+    common = {"placement": ProbePlacement((100.0, 100.0, 75.0)),
+              "shank_positions": {0: 0.0}, "y_range": (0.0, 80.0)}
     without = render_locator("fake", **common)
     with_entry = render_locator("fake", entry_um=(100.0, 100.0, 10.0), **common)
     for a_no, a_yes in zip(without.axes[:3], with_entry.axes[:3]):
@@ -165,10 +163,7 @@ def test_outline_marks_region_boundaries(fake_brainglobe):
 def test_falls_back_to_silhouette_when_tip_outside_volume(fake_brainglobe):
     fig = render_locator(
         "fake",
-        tip_atlas=(1e6, 1e6, 1e6),  # clamps to an edge slice with no brain
-        pitch_deg=0.0,
-        yaw_deg=0.0,
-        shank_orientation_deg=0.0,
+        placement=ProbePlacement((1e6, 1e6, 1e6)),  # clamps to an edge slice with no brain
         shank_positions={0: 0.0},
         y_range=(0.0, 80.0),
     )
@@ -230,10 +225,7 @@ def test_rendering_many_atlases_keeps_one_annotation_resident(monkeypatch):
     for i in range(12):  # three times the old cache bound
         render_locator(
             f"atlas_{i}",
-            tip_atlas=(100.0, 100.0, 75.0),
-            pitch_deg=0.0,
-            yaw_deg=0.0,
-            shank_orientation_deg=0.0,
+            placement=ProbePlacement((100.0, 100.0, 75.0)),
             shank_positions={0: 0.0},
             y_range=(0.0, 80.0),
         )
@@ -277,10 +269,7 @@ class TestSilhouetteIsOnlyBuiltWhenNeeded:
         # Far outside the 8x6x10-voxel fake brain.
         render_locator(
             "fake",
-            tip_atlas=(50_000.0, 50_000.0, 50_000.0),
-            pitch_deg=0.0,
-            yaw_deg=0.0,
-            shank_orientation_deg=0.0,
+            placement=ProbePlacement((50_000.0, 50_000.0, 50_000.0)),
             shank_positions={0: 0.0},
             y_range=(0.0, 80.0),
         )
@@ -299,10 +288,7 @@ class TestFigureReuse:
         first = _render()
         second = render_locator(
             "fake",
-            tip_atlas=(100.0, 100.0, 75.0),
-            pitch_deg=0.0,
-            yaw_deg=0.0,
-            shank_orientation_deg=0.0,
+            placement=ProbePlacement((100.0, 100.0, 75.0)),
             shank_positions={0: 0.0, 1: 50.0},
             y_range=(0.0, 80.0),
             fig=first,
@@ -316,10 +302,7 @@ class TestFigureReuse:
         for _ in range(5):
             fig = render_locator(
                 "fake",
-                tip_atlas=(100.0, 100.0, 75.0),
-                pitch_deg=0.0,
-                yaw_deg=0.0,
-                shank_orientation_deg=0.0,
+                placement=ProbePlacement((100.0, 100.0, 75.0)),
                 shank_positions={0: 0.0, 1: 50.0},
                 y_range=(0.0, 80.0),
                 fig=fig,
@@ -427,13 +410,112 @@ class TestWarpedViewsAreTrueSections:
         assert entry[2] == pytest.approx(self._surface_dv(label, y_um), abs=30.0)
 
 
+class TestBandsMatchTheDrawnBrain:
+    """The regions along a shank are those under the shank the locator draws.
+
+    Regression: the locator drew the squished/tilted brain, while the bands on
+    the shanks were looked up in the atlas as published — at the same numbers,
+    so in a different place. Both now come from one ``ProbePlacement``.
+    """
+
+    BREGMA = (500.0, 1000.0, 500.0)
+    WARP_KW: ClassVar[dict] = {"ap_squish": 0.95, "dv_squish": 0.885, "tilt_deg": 13.0}
+
+    @pytest.fixture
+    def layers(self, monkeypatch):
+        """Seven 250 µm DV layers (ids 1–7) under 250 µm of nothing, 25 µm voxels."""
+        ann = np.zeros((80, 80, 80), dtype=np.uint32)
+        for dv in range(10, 80):
+            ann[:, dv, :] = dv // 10
+
+        class _Atlas:
+            def __init__(self, name, **_kw):
+                self.name, self.orientation = name, "asr"
+                self.resolution = (25.0, 25.0, 25.0)
+                self.annotation = ann
+                self.structures = {
+                    i: {"acronym": f"L{i}", "name": f"Layer {i}", "rgb_triplet": [i, i, i]}
+                    for i in range(1, 8)
+                }
+
+        clears = (atlas_module.release_atlas_memory, atlas_module.get_atlas.cache_clear,
+                  atlas_module.canonical_annotation.cache_clear,
+                  atlas_module._region_info_from_id.cache_clear)
+        for clear in clears:
+            clear()
+        monkeypatch.setattr(atlas_module, "BrainGlobeAtlas", _Atlas)
+        yield ann
+        for clear in clears:
+            clear()
+
+    def _placement(self, warp=True, **pose):
+        from pixelmap.anatomy.transform import AtlasWarp
+
+        return ProbePlacement(
+            (1500.0, 1000.0, 1500.0),
+            warp=AtlasWarp(self.BREGMA, **self.WARP_KW) if warp else None, **pose)
+
+    @staticmethod
+    def _bands(placement):
+        from pixelmap.anatomy.visualization import compute_region_bands
+
+        return compute_region_bands(
+            shank_positions={0: 0.0}, y_range=(0.0, 1000.0),
+            placement=placement, atlas_name="layers", step_um=25.0)
+
+    def test_each_band_is_the_region_drawn_under_the_shank(self, layers):
+        from pixelmap.anatomy.schematic import _warped_slice, canonical_annotation
+
+        placement = self._placement()
+        ann, res = canonical_annotation("layers")
+        # The coronal panel: the section of the warped brain at the tip's AP.
+        # A vertical shank lies in that plane, at the tip's ML.
+        tip_ap, tip_ml, _ = placement.tip_um
+        label, x_um, y_um = _warped_slice(ann, res, placement.warp, 0, tip_ap, 1, 2)
+        column = int(np.argmin(np.abs(x_um - tip_ml)))
+
+        compared = 0
+        for band in self._bands(placement):
+            if band.y_max - band.y_min < 100.0:
+                continue  # too thin for its midpoint to be clear of a boundary
+            mid = placement.to_stereotaxic([[0.0, (band.y_min + band.y_max) / 2]])[0]
+            drawn = label[int(np.argmin(np.abs(y_um - mid[2]))), column]
+            assert drawn == band.atlas_id, (band.acronym, band.y_min, band.y_max)
+            compared += 1
+        assert compared >= 3
+
+    def test_the_warp_changes_the_bands(self, layers):
+        """Guards the test above against passing because nothing is warped."""
+        def edges(bands):
+            return [(b.acronym, b.y_min) for b in bands]
+
+        assert edges(self._bands(self._placement())) != edges(
+            self._bands(self._placement(warp=False)))
+
+    def test_shank_ends_are_drawn_where_the_bands_were_read(self, layers):
+        """The locator's red lines end at the very points the bands sampled."""
+        placement = self._placement(pitch_deg=15.0, yaw_deg=-10.0, shank_orientation_deg=40.0)
+        fig = render_locator("layers", placement=placement,
+                             shank_positions={0: 0.0, 1: 250.0}, y_range=(0.0, 1000.0))
+        ends = placement.to_stereotaxic([[0.0, 0.0], [0.0, 1000.0], [250.0, 0.0], [250.0, 1000.0]])
+        # Sagittal panel: x = AP, y = DV. One solid line per shank.
+        lines = [ln for ln in fig.axes[0].get_lines() if ln.get_linestyle() == "-"
+                 and len(ln.get_xdata()) == 2]
+        drawn = np.array([[x, y] for ln in lines for x, y in zip(ln.get_xdata(), ln.get_ydata())])
+        np.testing.assert_allclose(drawn, ends[:, [0, 2]])
+        # ... and reading the atlas there is reading it under those lines.
+        np.testing.assert_allclose(
+            placement.warp.from_atlas(placement.to_atlas([[0.0, 0.0], [250.0, 1000.0]])),
+            ends[[0, 3]])
+
+
 class TestLegendCoordinates:
     """The legend can carry the tip and insertion-point coordinates."""
 
     @property
     def COMMON(self):
-        return {"tip_atlas": (100.0, 100.0, 75.0), "pitch_deg": 0.0, "yaw_deg": 0.0,
-                "shank_orientation_deg": 0.0, "shank_positions": {0: 0.0},
+        return {"placement": ProbePlacement((100.0, 100.0, 75.0)),
+                "shank_positions": {0: 0.0},
                 "y_range": (0.0, 80.0)}
 
     @staticmethod
