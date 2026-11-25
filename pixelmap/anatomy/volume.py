@@ -199,6 +199,39 @@ class CanonicalVolume:
         )
 
 
+    def sample_label_voxels(
+        self, ids, stride: int = 1
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Voxels labelled in ``ids`` on a coarse grid: every ``stride``-th per axis.
+
+        Returns canonical ``(AP, DV, ML)`` indices, like
+        :meth:`find_label_voxels` — which returns *every* voxel, and for a
+        large structure (isocortex on a 10 µm atlas) that is hundreds of
+        millions of indices and several GB. A regular grid keeps the sample
+        uniform, so its mean is still the structure's centre, while the
+        membership test and the result both shrink by ``stride**3``.
+
+        A structure thinner than the grid can be missed altogether; callers
+        fall back to ``stride=1``, which is cheap precisely for those.
+        """
+        ids = np.asarray(list(ids))
+        k = max(1, int(stride))
+        ap_out: list = []
+        dv_out: list = []
+        ml_out: list = []
+        for start, _stop, block in self._slabs():
+            offset = (-start) % k  # keep the AP grid aligned across slabs
+            ap, dv, ml = np.where(np.isin(block[offset::k, ::k, ::k], ids))
+            if ap.size:
+                ap_out.append(ap * k + offset + start)
+                dv_out.append(dv * k)
+                ml_out.append(ml * k)
+        if not ap_out:
+            empty = np.zeros(0, dtype=int)
+            return empty, empty.copy(), empty.copy()
+        return np.concatenate(ap_out), np.concatenate(dv_out), np.concatenate(ml_out)
+
+
 def _native_index(i: int, n: int, flip: bool) -> int:
     """Canonical position ``i`` as an index into a possibly-reversed native axis."""
     return n - 1 - i if flip else i

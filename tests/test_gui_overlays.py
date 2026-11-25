@@ -18,10 +18,10 @@ import time
 
 import numpy as np
 import pandas as pd
+import panel as pn
 import pytest
 
 from pixelmap.anatomy import atlas as atlas_module
-from pixelmap.anatomy import regions as regions_module
 from pixelmap.gui import gui as gui_module
 from pixelmap.gui.gui import ChannelmapGUI
 from pixelmap.types import Electrode
@@ -106,8 +106,17 @@ def layered_atlas(monkeypatch):
 @pytest.fixture
 def posed_gui(gui, layered_atlas):
     """GUI pointed at the fake atlas, tip 3 mm below its surface, vertical."""
+    # Tip entry first: in Insertion mode the tip fields are derived, and the
+    # writes below would be overwritten by the mirror.
+    gui.coord_mode_input.value = "Tip"
     gui.atlas_name_input.value = FAKE_ATLAS
     gui.bregma_relative_toggle.value = False
+    # The atlas transformation applies in either coordinate mode: start neutral.
+    for w in (gui.ap_squish_input, gui.ml_squish_input, gui.dv_squish_input):
+        w.value = 1.0
+    gui.tilt_input.value = 0.0
+    for w in (gui.bregma_ap_input, gui.bregma_ml_input, gui.bregma_dv_input):
+        w.value = 0.0
     gui.pitch_input.value = 0.0
     gui.yaw_input.value = 0.0
     gui.shank_orientation_input.value = 0.0
@@ -364,84 +373,81 @@ class TestAnatomyOverlayClearing:
         assert "No anatomical overlay computed yet" in posed_gui.anatomy_legend.object
 
 
-def _measured_depth(gui):
-    """The depth the overlay compute would measure for ``gui``'s current pose."""
-    return gui_module._measure_tip_depth(
-        gui._tip_atlas_um(),
-        float(gui.pitch_input.value),
-        float(gui.yaw_input.value),
-        gui._selected_atlas_name(),
-    )
+class TestTipDepthAlongShank:
+    """The greyed-out depth field: insertion point → tip, along the shank.
 
+    It replaced both the Entry DV field and the old read-only depth box.
+    The fake brain's surface is at DV ≈ 987.5 µm (see ``layered_atlas``).
+    """
 
-class TestTipDepthReadout:
-    """The readout is tied to the overlay: blank until Compute, blank after Clear."""
+    def test_it_is_derived_in_tip_mode_and_typed_in_insertion_mode(self, posed_gui):
+        assert posed_gui.tip_depth_input.name == "Probe insertion depth (µm)"
+        assert posed_gui.tip_depth_input.disabled
+        posed_gui.coord_mode_input.value = "Insertion"
+        assert not posed_gui.tip_depth_input.disabled
+        posed_gui.coord_mode_input.value = "Tip"
+        assert posed_gui.tip_depth_input.disabled
+        assert not hasattr(posed_gui, "tip_depth_readout")
+        assert not hasattr(posed_gui, "entry_dv_input")
 
-    def test_readout_is_blank_before_the_overlay_is_computed(self, posed_gui):
+    def test_it_needs_no_overlay(self, posed_gui):
         assert posed_gui._anatomy_overlay_active is False
-        assert "—" in posed_gui.tip_depth_readout.object
-        assert "compute the overlay" in posed_gui.tip_depth_readout.object
-        assert "µm" not in posed_gui.tip_depth_readout.object
-
-    def test_moving_the_tip_before_computing_does_not_fill_the_readout(self, posed_gui):
-        posed_gui.tip_dv_input.value = 3500.0
-        assert "compute the overlay" in posed_gui.tip_depth_readout.object
-
-    def test_computing_the_overlay_fills_the_readout(self, posed_gui):
-        posed_gui.compute_anatomy_overlay()
         # Surface at DV ≈ 987.5 µm, tip at DV = 4000 µm → ~3012 µm.
-        assert "3,0" in posed_gui.tip_depth_readout.object
-        assert "3.01 mm" in posed_gui.tip_depth_readout.object
+        assert posed_gui.tip_depth_input.value == pytest.approx(3012.5, abs=25.0)
 
-    def test_clearing_the_overlay_blanks_the_readout_again(self, posed_gui):
-        posed_gui.compute_anatomy_overlay()
-        assert "µm" in posed_gui.tip_depth_readout.object
+    def test_it_follows_the_tip(self, posed_gui):
+        posed_gui.tip_dv_input.value = 2000.0
+        assert posed_gui.tip_depth_input.value == pytest.approx(1012.5, abs=25.0)
 
-        posed_gui.clear_anatomy_overlay()
-
-        assert "compute the overlay" in posed_gui.tip_depth_readout.object
-        assert "µm" not in posed_gui.tip_depth_readout.object
-
-    def test_readout_follows_the_tip_once_an_overlay_exists(self, posed_gui):
-        posed_gui.compute_anatomy_overlay()
-        posed_gui.tip_dv_input.value = 2000.0  # 1 mm below the fake surface
-        assert "1,0" in posed_gui.tip_depth_readout.object
-        assert _measured_depth(posed_gui) == pytest.approx(1012.5, abs=25.0)
-
-    def test_tilting_the_probe_lengthens_the_measured_path(self, posed_gui):
-        posed_gui.compute_anatomy_overlay()
-        vertical = _measured_depth(posed_gui)
+    def test_tilting_the_probe_lengthens_the_path(self, posed_gui):
+        vertical = posed_gui.tip_depth_input.value
         posed_gui.pitch_input.value = 30.0
-        tilted = _measured_depth(posed_gui)
-        assert tilted > vertical
+        tilted = posed_gui.tip_depth_input.value
         assert tilted == pytest.approx(vertical / np.cos(np.deg2rad(30.0)), abs=30.0)
 
-    def test_tip_above_the_brain_is_reported_as_outside(self, posed_gui):
-        posed_gui.compute_anatomy_overlay()
+    def test_typing_it_in_insertion_mode_places_the_tip(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.tip_depth_input.value = 1000.0
+        # Vertical probe: straight down from the surface at DV ≈ 987.5 µm.
+        np.testing.assert_allclose(
+            _triplet(posed_gui._tip_inputs), (2500.0, 2500.0, SURFACE_DV + 1000.0), atol=25.0)
+        assert posed_gui.tip_depth_input.value == 1000.0  # never rewritten
+
+    def test_in_insertion_mode_it_is_kept_when_the_probe_is_tilted(self, posed_gui):
+        """The depth is travel along the shank, so a tilt shortens the DV reached."""
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.tip_depth_input.value = 1000.0
+        posed_gui.pitch_input.value = 60.0
+        assert posed_gui.tip_depth_input.value == 1000.0
+        entry = np.array(posed_gui._entry_atlas_um())
+        tip = np.array(posed_gui._tip_atlas_um())
+        assert np.linalg.norm(tip - entry) == pytest.approx(1000.0, abs=0.2)
+        assert tip[2] - entry[2] == pytest.approx(500.0, abs=0.2)  # cos 60°
+
+    def test_a_horizontal_probe_is_placed_too(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.tip_depth_input.value = 1000.0
+        posed_gui.pitch_input.value = 90.0
+        entry = np.array(posed_gui._entry_atlas_um())
+        tip = np.array(posed_gui._tip_atlas_um())
+        assert tip[2] == pytest.approx(entry[2], abs=0.2)
+        assert abs(tip[0] - entry[0]) == pytest.approx(1000.0, abs=0.2)
+
+    def test_a_tip_above_the_brain_reads_negative(self, posed_gui):
         posed_gui.tip_dv_input.value = 100.0
-        assert _measured_depth(posed_gui) is None
-        assert "outside the brain" in posed_gui.tip_depth_readout.object
+        assert posed_gui.tip_depth_input.value == pytest.approx(-887.5, abs=25.0)
 
-    @pytest.mark.parametrize("depth", [None, 0.0, 1012.5])
-    def test_refreshing_the_readout_never_reads_the_atlas(
-        self, posed_gui, monkeypatch, depth
-    ):
-        """The readout runs on the event loop, so it must only format a depth
-        the off-loop compute already measured — never touch the atlas, which
-        could mean a tens-of-MB download."""
-        posed_gui.compute_anatomy_overlay()
+    def test_it_is_blank_without_an_insertion_point(self, posed_gui):
+        posed_gui.tip_ml_input.value = 99_999.0  # the trajectory misses the brain
+        assert posed_gui.tip_depth_input.value is None
 
-        def _boom(*args, **kwargs):
-            raise AssertionError("the readout read the atlas")
-
-        monkeypatch.setattr(atlas_module, "is_downloaded", _boom)
-        # regions.py imports the symbol directly, so patch it where it's used.
-        monkeypatch.setattr(regions_module, "canonical_annotation", _boom)
-
-        posed_gui._update_tip_depth_readout(depth)
-
-        expected = "outside the brain" if depth is None else f"{depth:,.0f} µm"
-        assert expected in posed_gui.tip_depth_readout.object
+    def test_it_is_the_distance_between_the_two_markers(self, posed_gui):
+        posed_gui.pitch_input.value = 20.0
+        posed_gui.yaw_input.value = -10.0
+        tip = np.array(posed_gui._tip_atlas_um())
+        entry = np.array(posed_gui._entry_atlas_um())
+        assert posed_gui.tip_depth_input.value == pytest.approx(
+            np.linalg.norm(tip - entry), abs=0.2)
 
 
 class TestBothOverlaysTogether:
@@ -861,7 +867,7 @@ class TestOverlayComputeRunsOffTheEventLoop:
                 return fn(*args, **kwargs)
             return wrapper
 
-        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+        for label in ("compute_region_bands", "render_locator", "surface_point_um"):
             monkeypatch.setattr(gui_module, label, _tracing(label, getattr(gui_module, label)))
         return seen
 
@@ -872,11 +878,11 @@ class TestOverlayComputeRunsOffTheEventLoop:
 
         posed_gui.tip_dv_input.value = 2200.0
 
-        for label in ("compute_region_bands", "render_locator", "tip_depth_below_surface_um"):
+        for label in ("compute_region_bands", "render_locator", "surface_point_um"):
             _assert_off_loop(threads.get(label), label)
         assert list(posed_gui.region_band_source.data["y"]) != before
         # 2200 µm tip, surface at ≈ 987.5 µm → ≈ 1212 µm below it.
-        assert "1,2" in posed_gui.tip_depth_readout.object
+        assert posed_gui.tip_depth_input.value == pytest.approx(1212.5, abs=25.0)
 
     def test_clicking_compute_on_a_cached_atlas_computes_off_the_loop(self, served, threads):
         gui, session = served
@@ -960,7 +966,7 @@ class TestAnteriorCommissureOriginIsLocatedOffTheEventLoop:
     def _assert_origin_filled(self, gui):
         assert (gui.bregma_ap_input.value, gui.bregma_ml_input.value,
                 gui.bregma_dv_input.value) == self.AC_ORIGIN
-        assert "anterior commissure (defined)" in gui.bregma_estimate_header.object
+        assert "anterior commissure (defined)" in gui.bregma_hint.value
 
     def test_switching_to_a_cached_ac_atlas_derives_it_off_the_loop(self, ac_threads):
         gui, seen = ac_threads
@@ -1068,3 +1074,658 @@ class TestLocatorFigureIsReusedAcrossRenders:
         assert posed_gui._locator_fig is None, (
             "an idle session is still holding a matplotlib canvas"
         )
+
+
+# ==========================================================================
+# Tip / insertion-point coordinate entry
+# ==========================================================================
+
+SURFACE_DV = 987.5  # the fake brain's surface (see ``layered_atlas``)
+
+
+def _entry(gui):
+    """The insertion point as displayed: Entry AP, Entry ML and its (hidden) DV."""
+    vals = (gui.entry_ap_input.value, gui.entry_ml_input.value, gui._entry_dv)
+    return np.array([np.nan if v is None else float(v) for v in vals])
+
+
+def _triplet(widgets):
+    return np.array([np.nan if w.value is None else float(w.value) for w in widgets])
+
+
+class TestCoordinateEntryModes:
+    """Which fields are typed, which are derived, and what an angle pivots around."""
+
+    def test_mode_switch_swaps_which_fields_are_editable(self, posed_gui):
+        assert all(not w.disabled for w in posed_gui._tip_inputs)
+        assert posed_gui.entry_ap_input.disabled and posed_gui.entry_ml_input.disabled
+        assert posed_gui.tip_depth_input.disabled
+        posed_gui.coord_mode_input.value = "Insertion"
+        # The whole tip is derived; the craniotomy and the depth are typed.
+        assert all(w.disabled for w in posed_gui._tip_inputs)
+        assert not posed_gui.entry_ap_input.disabled
+        assert not posed_gui.entry_ml_input.disabled
+        assert not posed_gui.tip_depth_input.disabled
+
+    def test_there_is_no_separate_depth_input(self, posed_gui):
+        """One depth field does both jobs: readout in Tip mode, input in Insertion."""
+        assert not hasattr(posed_gui, "insertion_depth_input")
+        assert not hasattr(posed_gui, "snap_surface_button")
+
+    @pytest.mark.parametrize("pitch, yaw", [(0.0, 0.0), (17.0, -11.0)])
+    def test_repeated_toggling_does_not_move_the_probe(self, posed_gui, pitch, yaw):
+        posed_gui.pitch_input.value = pitch
+        posed_gui.yaw_input.value = yaw
+        tip = _triplet(posed_gui._tip_inputs)
+        entry = _entry(posed_gui)
+        for _ in range(10):
+            posed_gui.coord_mode_input.value = "Insertion"
+            posed_gui.coord_mode_input.value = "Tip"
+        np.testing.assert_allclose(_triplet(posed_gui._tip_inputs), tip, atol=0.11)
+        np.testing.assert_array_equal(_entry(posed_gui), entry)
+
+    def test_toggling_never_rewrites_tip_dv(self, posed_gui):
+        """A value typed with more precision than the display rounding survives."""
+        posed_gui.pitch_input.value = 17.0
+        posed_gui.tip_dv_input.value = 4000.04
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.coord_mode_input.value = "Tip"
+        assert posed_gui.tip_dv_input.value == 4000.04
+
+    def test_insertion_mode_puts_the_tip_down_the_shank_from_the_entry(self, posed_gui):
+        from pixelmap.anatomy.transform import probe_axis_up
+
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.pitch_input.value = 20.0
+        posed_gui.yaw_input.value = -10.0
+        posed_gui.entry_ap_input.value = 3000.0
+        posed_gui.entry_ml_input.value = 2000.0
+        posed_gui.tip_depth_input.value = 2500.0
+
+        entry = np.array(posed_gui._entry_atlas_um())
+        tip = np.array(posed_gui._tip_atlas_um())
+        np.testing.assert_allclose(entry[:2], (3000.0, 2000.0))
+        np.testing.assert_allclose(
+            tip, entry - 2500.0 * probe_axis_up(20.0, -10.0), atol=0.1)
+
+    def test_moving_the_craniotomy_keeps_the_depth(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        depth = posed_gui.tip_depth_input.value
+        posed_gui.entry_ap_input.value = 3000.0
+        assert posed_gui.tip_depth_input.value == depth
+        assert posed_gui.tip_ap_input.value == pytest.approx(3000.0, abs=0.05)
+
+    def test_insertion_mode_pivots_around_the_entry_point(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        entry = _entry(posed_gui)
+        tip = _triplet(posed_gui._tip_inputs)
+        depth = posed_gui.tip_depth_input.value
+        posed_gui.pitch_input.value = 30.0
+        np.testing.assert_array_equal(_entry(posed_gui), entry)
+        assert posed_gui.tip_depth_input.value == depth
+        assert posed_gui.tip_ap_input.value != tip[0]
+        assert posed_gui.tip_dv_input.value < tip[2]  # same travel, less of it downward
+
+    def test_tip_mode_pivots_around_the_tip(self, posed_gui):
+        tip = _triplet(posed_gui._tip_inputs)
+        entry = _entry(posed_gui)
+        posed_gui.pitch_input.value = 30.0
+        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), tip)
+        assert not np.allclose(_entry(posed_gui), entry)
+
+    def test_a_cleared_field_does_not_raise(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.entry_ap_input.value = None  # what the browser sends on clear
+        posed_gui.tip_depth_input.value = None
+        posed_gui.coord_mode_input.value = "Tip"
+        posed_gui.tip_ap_input.value = None
+
+    def test_one_coordinate_edit_computes_once_with_the_derived_tip(
+        self, posed_gui, monkeypatch
+    ):
+        """Deriving the tip must finish before the overlay snapshots it."""
+        posed_gui.compute_anatomy_overlay()
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.pitch_input.value = 20.0
+        requests = []
+        original = posed_gui._compute_anatomy
+
+        def _spy(req):
+            requests.append(req)
+            return original(req)
+
+        monkeypatch.setattr(posed_gui, "_compute_anatomy", _spy)
+        posed_gui.entry_ap_input.value = 2800.0
+
+        assert len(requests) == 1
+        np.testing.assert_allclose(requests[0].tip, posed_gui._tip_atlas_um())
+        np.testing.assert_allclose(requests[0].entry, posed_gui._entry_atlas_um())
+        assert requests[0].entry[0] == 2800.0
+
+
+class TestEntryFollowsSurface:
+    """The insertion point is always on the brain surface, in both modes."""
+
+    def _assert_on_surface(self, gui):
+        assert gui._entry_atlas_um()[2] == pytest.approx(SURFACE_DV, abs=25.0)
+
+    def test_entry_is_blank_until_the_surface_has_been_read(self):
+        fresh = gui_module.ChannelmapGUI()  # the module's GUI has been posed already
+        assert fresh.entry_ap_input.value is None and fresh.entry_ml_input.value is None
+        assert fresh.tip_depth_input.value is None
+        assert fresh._entry_atlas_um() is None
+
+    def test_tip_mode_entry_sits_where_the_trajectory_crosses_the_surface(self, posed_gui):
+        from pixelmap.anatomy.transform import probe_axis_up
+
+        posed_gui.pitch_input.value = 20.0
+        entry = np.array(posed_gui._entry_atlas_um())
+        tip = np.array(posed_gui._tip_atlas_um())
+        self._assert_on_surface(posed_gui)
+        along = (entry - tip) / np.linalg.norm(entry - tip)
+        np.testing.assert_allclose(along, probe_axis_up(20.0, 0.0), atol=1e-4)
+
+    def test_tip_mode_entry_follows_every_tip_edit(self, posed_gui):
+        """Regression: the entry kept the DV it had been given in Insertion mode."""
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.coord_mode_input.value = "Tip"
+
+        posed_gui.tip_ap_input.value = 3100.0
+        posed_gui.tip_ml_input.value = 1900.0
+        posed_gui.tip_dv_input.value = 2000.0
+        np.testing.assert_allclose(
+            _entry(posed_gui), (3100.0, 1900.0, SURFACE_DV), atol=25.0
+        )
+        # Moving the tip deeper must not drag the entry off the surface.
+        posed_gui.tip_dv_input.value = 4500.0
+        self._assert_on_surface(posed_gui)
+
+    def test_tip_mode_entry_follows_the_surface_relief(self, posed_gui, layered_atlas):
+        """A taller brain at another AP: the entry DV has to move with it."""
+        layered_atlas[120:, 20:40, :] = 2  # surface 500 µm higher from AP 3000
+        atlas_module.release_atlas_memory()
+        posed_gui.tip_ap_input.value = 3500.0
+        assert posed_gui._entry_atlas_um()[2] == pytest.approx(SURFACE_DV - 500.0, abs=25.0)
+        posed_gui.tip_ap_input.value = 2500.0
+        self._assert_on_surface(posed_gui)
+
+    def test_a_trajectory_that_misses_the_brain_has_no_entry(self, posed_gui):
+        posed_gui.tip_ml_input.value = 99_999.0
+        assert posed_gui._entry_atlas_um() is None
+        assert np.isnan(_entry(posed_gui)).all()
+        posed_gui.compute_anatomy_overlay()  # and the locator copes without one
+
+    def test_insertion_mode_entry_drops_onto_the_surface_whatever_the_tilt(self, posed_gui):
+        posed_gui.pitch_input.value = 20.0
+        posed_gui.yaw_input.value = -10.0
+        posed_gui.coord_mode_input.value = "Insertion"
+
+        posed_gui.entry_ap_input.value = 3000.0
+        posed_gui.entry_ml_input.value = 2000.0
+
+        assert posed_gui.entry_ap_input.value == 3000.0
+        assert posed_gui.entry_ml_input.value == 2000.0
+        self._assert_on_surface(posed_gui)
+
+    def test_no_brain_below_the_entry_blanks_its_dv(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.entry_ml_input.value = 99_999.0  # far outside the volume
+        assert posed_gui._entry_dv is None
+
+    def test_without_a_local_atlas_compute_settles_the_entry(self, posed_gui, monkeypatch):
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: False)
+        posed_gui.tip_ap_input.value = 2600.0
+        stale = posed_gui.entry_ap_input.value
+        assert stale != 2600.0  # could not be read yet
+
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: True)
+        posed_gui.compute_anatomy_overlay()
+
+        assert posed_gui.entry_ap_input.value == pytest.approx(2600.0, abs=0.05)
+        self._assert_on_surface(posed_gui)
+
+    def test_the_surface_is_read_off_the_event_loop(self, posed_gui, monkeypatch):
+        threads = []
+        original = gui_module.surface_point_um
+
+        def _spy(*args, **kwargs):
+            threads.append(threading.current_thread())
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(gui_module, "surface_point_um", _spy)
+        posed_gui.tip_ap_input.value = 2700.0
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.entry_ap_input.value = 2800.0
+        assert threads and all(t is not threading.main_thread() for t in threads)
+
+    def test_an_edit_during_the_lookup_discards_the_result(self, posed_gui, monkeypatch):
+        """A surface found for the old pose must not be written over a new one."""
+        original = gui_module.surface_point_um
+        seen = []
+
+        def _slow(point, **kwargs):
+            seen.append(point)
+            if len(seen) == 1:
+                posed_gui.tip_ap_input.value = 3300.0  # the user keeps typing
+            return original(point, **kwargs)
+
+        monkeypatch.setattr(gui_module, "surface_point_um", _slow)
+        posed_gui.tip_ap_input.value = 3200.0
+        assert posed_gui.entry_ap_input.value == pytest.approx(3300.0, abs=0.05)
+
+    @pytest.mark.parametrize("pitch", [0.0, 20.0])
+    def test_computing_after_the_switch_does_not_nudge_the_tip(self, posed_gui, pitch):
+        """Tip mode finds the surface along the shank, Insertion mode straight
+        down; their sampling grids differ by up to a voxel, which must not
+        move the probe."""
+        posed_gui.pitch_input.value = pitch
+        tip = _triplet(posed_gui._tip_inputs)
+        posed_gui.coord_mode_input.value = "Insertion"
+        posed_gui.compute_anatomy_overlay()
+        np.testing.assert_allclose(_triplet(posed_gui._tip_inputs), tip, atol=0.11)
+
+
+class TestEntryHonoursTheAtlasWarp:
+    """Squish / tilt reshape the drawn brain; the entry must sit on *that* surface.
+
+    Regression: the surface was read from the unwarped atlas, so in bregma
+    mode the marker floated above (or sank into) the brain in the locator.
+    """
+
+    @pytest.fixture
+    def bregma_gui(self, posed_gui):
+        posed_gui.bregma_relative_toggle.value = True
+        # Bregma well inside the fake volume, 1 mm below its surface.
+        posed_gui.bregma_ap_input.value = 2500.0
+        posed_gui.bregma_ml_input.value = 2500.0
+        posed_gui.bregma_dv_input.value = SURFACE_DV + 1000.0
+        for w in (posed_gui.ap_squish_input, posed_gui.ml_squish_input,
+                  posed_gui.dv_squish_input):
+            w.value = 1.0
+        posed_gui.tilt_input.value = 0.0
+        yield posed_gui
+        posed_gui.bregma_relative_toggle.value = False
+
+    def test_unwarped_entry_is_one_mm_above_bregma(self, bregma_gui):
+        np.testing.assert_allclose(_entry(bregma_gui), (0, 0, -1000.0), atol=25.0)
+
+    @pytest.mark.parametrize("mode", ["Tip", "Insertion"])
+    def test_dv_squish_moves_the_surface_toward_bregma(self, bregma_gui, mode):
+        bregma_gui.coord_mode_input.value = mode
+        bregma_gui.dv_squish_input.value = 0.8
+        # The brain is squashed about bregma: 1000 µm above it becomes 800.
+        assert bregma_gui._entry_dv == pytest.approx(-800.0, abs=25.0)
+        bregma_gui.dv_squish_input.value = 1.0
+        assert bregma_gui._entry_dv == pytest.approx(-1000.0, abs=25.0)
+
+    @pytest.mark.parametrize("mode", ["Tip", "Insertion"])
+    def test_tilt_moves_the_surface(self, bregma_gui, mode):
+        """A flat surface tilted about bregma is higher on one side of it."""
+        bregma_gui.coord_mode_input.value = mode
+        bregma_gui.tilt_input.value = 10.0
+        field = bregma_gui.tip_ap_input if mode == "Tip" else bregma_gui.entry_ap_input
+        field.value = 1000.0
+        ahead = bregma_gui._entry_dv
+        field.value = -1000.0
+        behind = bregma_gui._entry_dv
+        # Plane through (0, -1000/cos t) with slope tan t along AP.
+        expected = 2 * 1000.0 * np.tan(np.deg2rad(10.0))
+        assert abs(ahead - behind) == pytest.approx(expected, abs=40.0)
+
+    def test_entry_lands_on_the_surface_the_locator_draws(self, bregma_gui):
+        """The entry, mapped back into the atlas, is on the annotation's surface."""
+        bregma_gui.dv_squish_input.value = 0.85
+        bregma_gui.ap_squish_input.value = 0.95
+        bregma_gui.tilt_input.value = 13.0
+        bregma_gui.tip_ap_input.value = 600.0
+        in_atlas = bregma_gui._atlas_warp().to_atlas(bregma_gui._entry_atlas_um())
+        assert in_atlas[2] == pytest.approx(SURFACE_DV, abs=30.0)
+
+    def test_a_landmark_edit_moves_the_entry(self, bregma_gui):
+        bregma_gui.bregma_dv_input.value = SURFACE_DV + 1500.0
+        assert bregma_gui._entry_dv == pytest.approx(-1500.0, abs=25.0)
+
+    def test_the_depth_is_measured_to_the_warped_surface(self, bregma_gui):
+        bregma_gui.dv_squish_input.value = 0.8
+        bregma_gui.tip_dv_input.value = 1500.0
+        # 1500 below bregma + the squashed 800 above it; unwarped would be 2500.
+        assert bregma_gui.tip_depth_input.value == pytest.approx(2300.0, abs=25.0)
+
+
+class TestAtlasTransformationWithoutBregmaMode:
+    """Squish / tilt are editable and applied whichever frame coordinates use."""
+
+    def test_the_fields_are_always_editable(self, posed_gui):
+        fields = (posed_gui.dv_squish_input, posed_gui.ap_squish_input,
+                  posed_gui.ml_squish_input, posed_gui.tilt_input)
+        assert posed_gui.bregma_relative_toggle.value is False
+        assert all(not w.disabled for w in fields)
+        posed_gui.bregma_relative_toggle.value = True
+        assert all(not w.disabled for w in fields)
+        posed_gui.bregma_relative_toggle.value = False
+        assert all(not w.disabled for w in fields)
+
+    def test_section_is_titled_and_explained(self, posed_gui):
+        assert "Atlas transformation" in posed_gui.atlas_transform_title.object
+        assert "Julie Fabre" in posed_gui.atlas_transform_hint.value
+
+    def test_neutral_values_mean_no_warp(self, posed_gui):
+        assert posed_gui._atlas_warp() is None
+
+    def test_dv_squish_moves_the_surface_in_absolute_coordinates(self, posed_gui):
+        posed_gui.bregma_dv_input.value = SURFACE_DV + 1000.0
+        try:
+            posed_gui.dv_squish_input.value = 0.8
+            # Squashed about the landmark: 1000 µm above it becomes 800.
+            assert posed_gui._entry_dv == pytest.approx(SURFACE_DV + 200.0, abs=25.0)
+            posed_gui.compute_anatomy_overlay()  # and the overlay draws with it
+        finally:
+            posed_gui.dv_squish_input.value = 1.0
+            posed_gui.bregma_dv_input.value = 0.0
+        assert posed_gui._entry_dv == pytest.approx(SURFACE_DV, abs=25.0)
+
+
+class TestMoveProbeTipToRegion:
+    """Search the atlas for a region and drop the tip in the middle of it.
+
+    The fake brain has "SUP" (DV voxels 40–79) above "DEEP" (80 and below).
+    """
+
+    @staticmethod
+    def _pick(gui, query):
+        gui.region_search_input.value_input = query
+        ids = list(gui.region_results.options.values())
+        assert ids, f"no result for {query!r}"
+        gui.region_results.value = [ids[0]]
+
+    def _region_at_tip(self, gui):
+        return atlas_module.lookup_regions(FAKE_ATLAS, [gui._tip_atlas_um()])[0].acronym
+
+    def test_typing_lists_matches_by_acronym_or_name(self, posed_gui):
+        posed_gui.region_search_input.value_input = "deep"
+        assert list(posed_gui.region_results.options) == ["DEEP — Deep region"]
+        posed_gui.region_search_input.value_input = "superficial"
+        assert list(posed_gui.region_results.options) == ["SUP — Superficial region"]
+        assert posed_gui.region_results.visible
+
+    def test_a_typo_still_finds_the_region(self, posed_gui):
+        posed_gui.region_search_input.value_input = "superfical regon"
+        assert list(posed_gui.region_results.options) == ["SUP — Superficial region"]
+
+    def test_typing_never_moves_the_tip(self, posed_gui):
+        tip = _triplet(posed_gui._tip_inputs)
+        for query in ("d", "de", "deep", "sup", ""):
+            posed_gui.region_search_input.value_input = query
+        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), tip)
+
+    def test_no_match_says_so(self, posed_gui):
+        posed_gui.region_search_input.value_input = "zzzzzz"
+        assert not posed_gui.region_results.visible
+        assert "No region matches" in posed_gui.region_search_status.object
+
+    @pytest.mark.parametrize("query, acronym", [("SUP", "SUP"), ("deep region", "DEEP")])
+    def test_picking_a_region_moves_the_tip_into_it(self, posed_gui, query, acronym):
+        self._pick(posed_gui, query)
+        assert self._region_at_tip(posed_gui) == acronym
+        assert acronym in posed_gui.region_search_status.object
+
+    def test_the_same_region_can_be_picked_again(self, posed_gui):
+        """Regression: it stayed selected, so a second click was not a change."""
+        self._pick(posed_gui, "SUP")
+        there = _triplet(posed_gui._tip_inputs)
+        posed_gui.tip_dv_input.value = 4000.0  # wander off by hand
+        self._pick(posed_gui, "SUP")
+        np.testing.assert_array_equal(_triplet(posed_gui._tip_inputs), there)
+
+    def test_the_angles_are_kept(self, posed_gui):
+        posed_gui.pitch_input.value = 17.0
+        posed_gui.yaw_input.value = -8.0
+        posed_gui.shank_orientation_input.value = 45.0
+        self._pick(posed_gui, "SUP")
+        assert (posed_gui.pitch_input.value, posed_gui.yaw_input.value,
+                posed_gui.shank_orientation_input.value) == (17.0, -8.0, 45.0)
+
+    def test_the_tip_stays_in_its_hemisphere(self, posed_gui):
+        midline = 199 / 2 * 25.0
+        posed_gui.tip_ml_input.value = 1000.0
+        self._pick(posed_gui, "SUP")
+        assert posed_gui.tip_ml_input.value < midline
+        posed_gui.tip_ml_input.value = 4000.0
+        self._pick(posed_gui, "DEEP")
+        assert posed_gui.tip_ml_input.value > midline
+
+    def test_the_insertion_point_and_depth_follow(self, posed_gui):
+        self._pick(posed_gui, "DEEP")
+        assert posed_gui.entry_ap_input.value == posed_gui.tip_ap_input.value
+        assert posed_gui._entry_atlas_um()[2] == pytest.approx(SURFACE_DV, abs=25.0)
+        assert posed_gui.tip_depth_input.value == pytest.approx(
+            posed_gui.tip_dv_input.value - SURFACE_DV, abs=25.0)
+
+    def test_from_insertion_mode_it_switches_to_tip_entry(self, posed_gui):
+        posed_gui.coord_mode_input.value = "Insertion"
+        self._pick(posed_gui, "SUP")
+        assert posed_gui.coord_mode_input.value == "Tip"
+        assert self._region_at_tip(posed_gui) == "SUP"
+
+    def test_it_lands_in_the_region_under_an_atlas_transformation(self, posed_gui):
+        posed_gui.bregma_relative_toggle.value = True
+        try:
+            posed_gui.bregma_ap_input.value = 2500.0
+            posed_gui.bregma_ml_input.value = 2500.0
+            posed_gui.bregma_dv_input.value = 1500.0
+            posed_gui.dv_squish_input.value = 0.8
+            posed_gui.tilt_input.value = 10.0
+            self._pick(posed_gui, "SUP")
+            in_atlas = posed_gui._atlas_warp().to_atlas(posed_gui._tip_atlas_um())
+            assert atlas_module.lookup_regions(FAKE_ATLAS, [in_atlas])[0].acronym == "SUP"
+        finally:
+            posed_gui.bregma_relative_toggle.value = False
+
+    def test_an_active_overlay_is_redrawn_at_the_new_tip(self, posed_gui, monkeypatch):
+        posed_gui.compute_anatomy_overlay()
+        requests = []
+        original = posed_gui._compute_anatomy
+
+        def _spy(req):
+            requests.append(req)
+            return original(req)
+
+        monkeypatch.setattr(posed_gui, "_compute_anatomy", _spy)
+        self._pick(posed_gui, "SUP")
+        assert requests
+        np.testing.assert_allclose(requests[-1].tip, posed_gui._tip_atlas_um())
+
+    def test_the_volume_is_scanned_off_the_event_loop(self, posed_gui, monkeypatch):
+        threads = []
+        original = gui_module.region_target_um
+
+        def _spy(*args, **kwargs):
+            threads.append(threading.current_thread())
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(gui_module, "region_target_um", _spy)
+        self._pick(posed_gui, "DEEP")
+        assert threads and threads[0] is not threading.main_thread()
+
+    def test_search_waits_for_the_atlas_to_be_local(self, posed_gui, monkeypatch):
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: False)
+        posed_gui._refresh_compute_button()
+        assert posed_gui.region_search_input.disabled
+        assert "Download the atlas" in posed_gui.region_search_input.placeholder
+        monkeypatch.setattr(atlas_module, "is_downloaded", lambda name=None: True)
+        posed_gui._refresh_compute_button()
+        assert not posed_gui.region_search_input.disabled
+
+
+class TestAnatomyPanelCollapsesWithoutAnOverlay:
+    """No overlay: just the atlas dropdown and Compute. The rest appears with it."""
+
+    def _extras(self, gui):
+        return (gui.anatomy_pose_section, gui.clear_anatomy_button)
+
+    def test_a_fresh_gui_shows_only_the_atlas_and_compute(self):
+        fresh = gui_module.ChannelmapGUI()
+        fresh.create_layout()
+        assert all(not w.visible for w in self._extras(fresh))
+        assert fresh.atlas_name_input.visible and fresh.compute_anatomy_button.visible
+        # ... which are not inside the collapsed section.
+        assert fresh.atlas_name_input not in fresh.anatomy_pose_section
+        assert fresh.tip_ap_input in list(fresh.anatomy_pose_section.select(pn.widgets.FloatInput))
+
+    def test_computing_reveals_the_controls_and_the_region_search(self, posed_gui):
+        posed_gui.create_layout()
+        assert all(not w.visible for w in self._extras(posed_gui))
+        posed_gui.compute_anatomy_overlay()
+        assert all(w.visible for w in self._extras(posed_gui))
+
+    def test_clearing_collapses_it_again(self, posed_gui):
+        posed_gui.create_layout()
+        posed_gui.compute_anatomy_overlay()
+        posed_gui.clear_anatomy_overlay()
+        assert all(not w.visible for w in self._extras(posed_gui))
+
+    def test_the_region_search_sits_between_bregma_and_the_transformation(self, posed_gui):
+        posed_gui.create_layout()
+        objects = posed_gui.anatomy_pose_section.objects
+        at = objects.index(posed_gui.region_search_section)
+        assert posed_gui.bregma_ap_input in objects[at - 1].objects
+        assert posed_gui.atlas_transform_title in objects[at + 1].objects
+
+    def test_the_region_search_help_sits_behind_its_title(self, posed_gui):
+        posed_gui.create_layout()
+        title_row = posed_gui.region_search_section.objects[0]
+        assert title_row.objects == [posed_gui.region_search_title, posed_gui.region_search_hint]
+        assert "Move probe tip to... 🎯" in posed_gui.region_search_title.object
+        # Same font as the "Atlas transformation" title.
+        style = 'style="font-size: 12px; font-weight: bold;"'
+        assert style in posed_gui.region_search_title.object
+        assert style in posed_gui.atlas_transform_title.object
+        assert "centre of that region" in posed_gui.region_search_hint.value
+        assert not hasattr(posed_gui, "region_search_help")
+
+
+class TestLocatorTitlesSpeakTheTypedCoordinates:
+    """Regression: the panel titles quoted atlas µm even in bregma-relative mode."""
+
+    @staticmethod
+    def _titles(gui):
+        return [ax.get_title() for ax in gui._locator_fig.axes[:3]]
+
+    def test_absolute_mode_quotes_atlas_coordinates(self, posed_gui):
+        posed_gui.compute_anatomy_overlay()
+        assert self._titles(posed_gui) == [
+            "Sagittal · AP 2500 µm", "Coronal · ML 2500 µm", "Horizontal · DV 4000 µm"]
+
+    def test_bregma_mode_quotes_coordinates_relative_to_bregma(self, posed_gui):
+        posed_gui.bregma_relative_toggle.value = True
+        try:
+            posed_gui.bregma_ap_input.value = 2000.0
+            posed_gui.bregma_ml_input.value = 2400.0
+            posed_gui.bregma_dv_input.value = 1000.0
+            posed_gui.tip_ap_input.value = -700.0
+            posed_gui.tip_ml_input.value = 300.0
+            posed_gui.tip_dv_input.value = 1500.0
+            posed_gui.compute_anatomy_overlay()
+            assert self._titles(posed_gui) == [
+                "Sagittal · AP -700 µm", "Coronal · ML 300 µm", "Horizontal · DV 1500 µm"]
+        finally:
+            posed_gui.bregma_relative_toggle.value = False
+
+
+class TestBregmaRelativeByDefault:
+    """Coordinates start relative to the landmark whenever the atlas has one."""
+
+    def test_an_atlas_with_a_bregma_estimate_starts_ticked(self):
+        fresh = gui_module.ChannelmapGUI()
+        assert fresh._selected_atlas_name().startswith("allen_mouse")
+        assert fresh.bregma_relative_toggle.value is True
+        # ... with the bregma-relative default tip: at bregma, 4 mm deep.
+        assert [w.value for w in fresh._tip_inputs] == [0.0, 0.0, 4000.0]
+
+    def test_an_atlas_without_a_landmark_is_left_in_atlas_coordinates(self, posed_gui):
+        assert posed_gui._selected_atlas_name() == FAKE_ATLAS
+        assert posed_gui._landmark_known(FAKE_ATLAS) is False
+        posed_gui.bregma_relative_toggle.value = True
+        posed_gui.atlas_name_input.value = "allen_mouse_25um"
+        posed_gui.atlas_name_input.value = FAKE_ATLAS
+        assert posed_gui.bregma_relative_toggle.value is False
+
+    def test_switching_to_an_atlas_with_bregma_ticks_it(self, posed_gui, monkeypatch):
+        assert posed_gui.bregma_relative_toggle.value is False
+        calls = []
+        monkeypatch.setattr(posed_gui, "_refresh_probe_placement", lambda: calls.append(1))
+        posed_gui.atlas_name_input.value = "whs_sd_rat_39um"
+        try:
+            assert posed_gui.bregma_relative_toggle.value is True
+            assert [w.value for w in posed_gui._tip_inputs] == [0.0, 0.0, 4000.0]
+            assert calls == []  # one refresh for the switch, by the atlas handler
+        finally:
+            posed_gui.atlas_name_input.value = FAKE_ATLAS
+
+
+class TestLocatorLegendQuotesTheFields:
+    """The legend writes the tip and insertion point exactly as the fields show them."""
+
+    @staticmethod
+    def _labels(gui):
+        return [t.get_text() for t in gui._locator_fig.axes[3].get_legend().get_texts()]
+
+    def test_tip_and_entry_coordinates_match_the_fields(self, posed_gui):
+        posed_gui.pitch_input.value = 20.0
+        posed_gui.compute_anatomy_overlay()
+        tip, entry = self._labels(posed_gui)[:2]
+        fields = [w.value for w in posed_gui._tip_inputs]
+        assert tip.endswith(", ".join(f"{v:.0f}" for v in fields))
+        shown = (posed_gui.entry_ap_input.value, posed_gui.entry_ml_input.value,
+                 posed_gui.tip_depth_input.value)
+        assert "depth along shank" in entry
+        assert entry.endswith(", ".join(f"{v:.0f}" for v in shown))
+
+    def test_coordinate_fields_carry_their_unit(self, posed_gui):
+        for w in (posed_gui.entry_ap_input, posed_gui.entry_ml_input, posed_gui.tip_depth_input):
+            assert w.name.endswith("(µm)")
+
+
+class TestExplanationsSitBehindHoverIcons:
+    """Help text is on "?" hover icons, not printed in the panel."""
+
+    def test_the_inline_notes_are_gone(self, posed_gui):
+        for attr in ("anatomy_coord_note", "anatomy_help", "bregma_estimate_header",
+                     "atlas_transform_note"):
+            assert not hasattr(posed_gui, attr)
+
+    def test_atlas_dropdown_carries_the_coordinate_note(self, posed_gui):
+        text = posed_gui.atlas_name_input.description
+        assert "fixed CCF / atlas frame" in text
+        assert f"<b>{FAKE_ATLAS}</b> native voxel orientation" in text
+
+    def test_the_coordinate_note_follows_the_atlas(self, posed_gui):
+        posed_gui.atlas_name_input.value = "whs_sd_rat_39um"
+        try:
+            assert "<b>whs_sd_rat_39um</b>" in posed_gui.atlas_name_input.description
+        finally:
+            posed_gui.atlas_name_input.value = FAKE_ATLAS
+
+    def test_each_angle_explains_itself(self, posed_gui):
+        assert posed_gui.pitch_input.name == "Pitch (AP tilt; °)"
+        assert posed_gui.yaw_input.name == "Yaw (ML tilt; °)"
+        assert posed_gui.shank_orientation_input.name == "Roll (rotation; °)"
+        assert "forward / backward" in posed_gui.pitch_input.description
+        assert "left / right" in posed_gui.yaw_input.description
+        assert "shanks 0→3" in posed_gui.shank_orientation_input.description
+
+    def test_the_bregma_note_sits_beside_the_toggle_and_follows_the_atlas(self, posed_gui):
+        layout = posed_gui.create_layout()
+        rows = [r for r in layout.select(pn.Row) if posed_gui.bregma_hint in r.objects]
+        assert len(rows) == 1 and rows[0].objects[0] is posed_gui.bregma_relative_toggle
+        posed_gui.atlas_name_input.value = "allen_mouse_25um"
+        try:
+            assert "Bregma estimate (rough)" in posed_gui.bregma_hint.value
+            assert "Julie Fabre" in posed_gui.bregma_hint.value
+        finally:
+            posed_gui.atlas_name_input.value = FAKE_ATLAS
+
+    def test_the_transformation_note_sits_beside_its_title(self, posed_gui):
+        layout = posed_gui.create_layout()
+        rows = [r for r in layout.select(pn.Row) if posed_gui.atlas_transform_hint in r.objects]
+        assert len(rows) == 1 and rows[0].objects[0] is posed_gui.atlas_transform_title

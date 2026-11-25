@@ -11,14 +11,30 @@ bulky arrays lazily (see :mod:`pixelmap.anatomy.atlas`).
 """
 
 from pixelmap.anatomy.atlas import RegionInfo, list_atlases
-from pixelmap.anatomy.regions import regions_for_positions, tip_depth_below_surface_um
-from pixelmap.anatomy.transform import probe_axis_up, probe_to_atlas
+from pixelmap.anatomy.regions import (
+    regions_for_positions,
+    surface_point_um,
+    tip_depth_below_surface_um,
+)
+from pixelmap.anatomy.transform import (
+    AtlasWarp,
+    insertion_depth_um,
+    insertion_to_tip,
+    probe_axis_up,
+    probe_to_atlas,
+    tip_to_insertion,
+)
 
 __all__ = [
+    "AtlasWarp",
     "RegionInfo",
+    "insertion_depth_um",
+    "insertion_to_tip",
     "list_atlases",
     "probe_axis_up",
     "probe_to_atlas",
     "regions_for_positions",
+    "surface_point_um",
     "tip_depth_below_surface_um",
+    "tip_to_insertion",
 ]
