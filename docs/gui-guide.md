@@ -248,7 +248,7 @@ A **locator figure** above the legend shows three orthogonal brain-atlas slices 
 ### Example workflow
 
 1. Design your channelmap as usual (presets, drag tools, etc.).
-2. Open the **Anatomical overlay** panel on the right side of the GUI. Until an overlay has been computed it shows only the atlas dropdown and the Compute button. Explanations in this panel sit behind the small **?** icons: hover one (next to *Atlas*, each angle, the bregma toggle and *Atlas transformation*) to read it.
+2. Open the **Anatomical overlay** panel on the right side of the GUI. Until an overlay has been computed it shows only the atlas dropdown and the Compute button. Explanations in this panel sit behind the small **?** icons: hover one (next to *Atlas*, each angle, the bregma toggle, *Move probe tip to...* and *Atlas transformation*) to read it.
 3. Choose your **atlas** (e.g. `allen_mouse_25um`; first use downloads it — a few MB of compressed OME-Zarr).
 4. Click **Compute anatomical overlay 🧠**. The colored bands, labels, and locator figure appear, computed for a default probe position, and the panel expands to show the probe-placement controls. (**Clear overlay** collapses it again.)
 5. Pick whether you want to place the probe by its **Tip** or by its **Insertion** point (see [Tip vs. insertion-point entry](#tip-vs-insertion-point-entry) below), then type the coordinates in atlas µm. The tip is the lowest electrode of shank 0; the insertion point is where that shank enters the brain.
@@ -313,7 +313,7 @@ A depth on its own does not place a probe — infinitely many positions sit the 
 
 ### Move probe tip to a region
 
-On the right-hand side, below the locator figure and region legend, **Move probe tip to...** appears once an overlay has been computed. It places the tip in a brain region by name instead of by coordinates.
+Inside the anatomical overlay box, between the bregma fields and **Atlas transformation**, **Move probe tip to...** appears once an overlay has been computed (hover its **?** for a reminder of what it does). It places the tip in a brain region by name instead of by coordinates.
 
 1. Type in the search field. The regions of the currently selected atlas are matched by **acronym** (`VISp`, `CA1`) or by **plain-English name** (`primary visual`, `hippocampal`). The search is forgiving: case, word order and punctuation do not matter, half-typed words match, and typos are tolerated (`cerebelum` finds the cerebellum).
 2. Click a result. The tip (Tip AP / ML / DV) moves to the centre of that region.

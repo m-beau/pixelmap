@@ -1561,7 +1561,7 @@ class TestAnatomyPanelCollapsesWithoutAnOverlay:
     """No overlay: just the atlas dropdown and Compute. The rest appears with it."""
 
     def _extras(self, gui):
-        return (gui.anatomy_pose_section, gui.clear_anatomy_button, gui.region_search_section)
+        return (gui.anatomy_pose_section, gui.clear_anatomy_button)
 
     def test_a_fresh_gui_shows_only_the_atlas_and_compute(self):
         fresh = gui_module.ChannelmapGUI()
@@ -1584,15 +1584,24 @@ class TestAnatomyPanelCollapsesWithoutAnOverlay:
         posed_gui.clear_anatomy_overlay()
         assert all(not w.visible for w in self._extras(posed_gui))
 
-    def test_the_region_search_sits_under_the_locator_on_the_right(self, posed_gui):
-        layout = posed_gui.create_layout()
-        columns = [c for c in layout.select(pn.Column)
-                   if posed_gui.anatomy_locator_section in c.objects]
-        assert len(columns) == 1
-        objects = columns[0].objects
-        assert (objects.index(posed_gui.region_search_section)
-                > objects.index(posed_gui.anatomy_legend)
-                > objects.index(posed_gui.anatomy_locator_section))
+    def test_the_region_search_sits_between_bregma_and_the_transformation(self, posed_gui):
+        posed_gui.create_layout()
+        objects = posed_gui.anatomy_pose_section.objects
+        at = objects.index(posed_gui.region_search_section)
+        assert posed_gui.bregma_ap_input in objects[at - 1].objects
+        assert posed_gui.atlas_transform_title in objects[at + 1].objects
+
+    def test_the_region_search_help_sits_behind_its_title(self, posed_gui):
+        posed_gui.create_layout()
+        title_row = posed_gui.region_search_section.objects[0]
+        assert title_row.objects == [posed_gui.region_search_title, posed_gui.region_search_hint]
+        assert "Move probe tip to... 🎯" in posed_gui.region_search_title.object
+        # Same font as the "Atlas transformation" title.
+        style = 'style="font-size: 12px; font-weight: bold;"'
+        assert style in posed_gui.region_search_title.object
+        assert style in posed_gui.atlas_transform_title.object
+        assert "centre of that region" in posed_gui.region_search_hint.value
+        assert not hasattr(posed_gui, "region_search_help")
 
 
 class TestLocatorTitlesSpeakTheTypedCoordinates:

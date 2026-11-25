@@ -1337,11 +1337,11 @@ class ChannelmapGUI(param.Parameterized):
         """Turn the live overlay on or off, and the controls that only matter with it.
 
         Without an overlay the panel is collapsed to the atlas dropdown and
-        the Compute button: the probe-placement fields, and the region search
-        on the right, would be positioning a probe nothing is drawn for.
+        the Compute button: the probe-placement fields, region search
+        included, would be positioning a probe nothing is drawn for.
         """
         self._anatomy_overlay_active = active
-        for attr in ("anatomy_pose_section", "clear_anatomy_button", "region_search_section"):
+        for attr in ("anatomy_pose_section", "clear_anatomy_button"):
             if hasattr(self, attr):
                 getattr(self, attr).visible = active
 
@@ -3224,21 +3224,24 @@ class ChannelmapGUI(param.Parameterized):
         self._listing_regions = False
         self.region_search_input = pn.widgets.TextInput(
             name="", placeholder=self._REGION_SEARCH_PROMPT,
-            sizing_mode="stretch_width", margin=(0, 0, 4, 0),
+            sizing_mode="stretch_width", margin=(0, 2, 4, 2),
         )
         self.region_results = pn.widgets.MultiSelect(
             name="", options={}, value=[], size=6, visible=False,
-            sizing_mode="stretch_width", margin=(0, 0, 2, 0),
+            sizing_mode="stretch_width", margin=(0, 2, 2, 2),
         )
-        self.region_search_status = pn.pane.HTML("", sizing_mode="stretch_width", margin=(0, 0))
-        self.region_search_help = pn.pane.HTML(
-            '<div style="font-size: 11px; color: #555; padding: 0 0 4px 0; text-align: justify;">'
-            "Search the selected atlas for a region by acronym or name, then "
-            "click a result: the tip moves to the centre of that region, in "
-            "the hemisphere it is already in. Pitch, yaw and roll "
-            "are kept."
-            "</div>",
-            sizing_mode="stretch_width", margin=(0, 0),
+        self.region_search_status = pn.pane.HTML("", sizing_mode="stretch_width", margin=(0, 2))
+        self.region_search_title = pn.pane.HTML(
+            '<div style="font-size: 12px; font-weight: bold;">Move probe tip to... 🎯</div>',
+            margin=(8, 0, 2, 0),
+        )
+        self.region_search_hint = pn.widgets.TooltipIcon(
+            value=(
+                "Search the selected atlas for a region by acronym or name, then "
+                "click a result: the tip moves to the centre of that region, in "
+                "the hemisphere it is already in. Pitch, yaw and roll are kept."
+            ),
+            margin=(6, 0, 0, 4),
         )
         self.region_search_input.param.watch(self._on_region_query, "value_input")
         self.region_results.param.watch(self._on_region_picked, "value")
@@ -3472,21 +3475,6 @@ class ChannelmapGUI(param.Parameterized):
     def create_layout(self):
         """Create the main Panel layout"""
 
-        # "Move probe tip to...", under the locator on the right. Shown only
-        # while an overlay is up (see _set_anatomy_overlay_active).
-        self.region_search_section = pn.Column(
-            pn.pane.Markdown("## Move probe tip to... 🎯", margin=(-5, 0, 0, 0)),
-            self.region_search_help,
-            self.region_search_input,
-            self.region_results,
-            self.region_search_status,
-            styles={"background": "#e6e6e6", "padding": "10px", "border-radius": "5px",
-                    "max-height": "none"},
-            margin=(10, 10, 10, 10),
-            sizing_mode="stretch_width",
-            visible=self._anatomy_overlay_active,
-        )
-
         # Counter and Downloader (fixed on the right)
         right_column = pn.Column(
             self.undo_keyboard_pane,
@@ -3512,7 +3500,6 @@ class ChannelmapGUI(param.Parameterized):
             pn.pane.Markdown("## Anatomical overlay", margin=(15, 0, -5, 30)),
             self.anatomy_locator_section,
             self.anatomy_legend,
-            self.region_search_section,
 
             pn.pane.Markdown("## PixelMap [documentation](https://pixelmap-neuropixels.readthedocs.io/en/latest/)", margin=(10, 0, -5, 10)),
             pn.pane.HTML("""
@@ -3550,6 +3537,16 @@ class ChannelmapGUI(param.Parameterized):
         # Compute button. Shown only while an overlay is up (see
         # _set_anatomy_overlay_active): until then the panel is just
         # "pick an atlas, compute".
+        # "Move probe tip to...": part of the pose section, so it comes and
+        # goes with it.
+        self.region_search_section = pn.Column(
+            pn.Row(self.region_search_title, self.region_search_hint, margin=(0, 0)),
+            self.region_search_input,
+            self.region_results,
+            self.region_search_status,
+            sizing_mode="stretch_width", margin=(0, 0),
+            styles={"max-height": "none"},
+        )
         self.anatomy_pose_section = pn.Column(
             self.coord_mode_input,
             pn.Row(self.tip_ap_input, self.tip_ml_input, self.tip_dv_input, sizing_mode="stretch_width"),
@@ -3557,6 +3554,7 @@ class ChannelmapGUI(param.Parameterized):
             pn.Row(self.pitch_input, self.yaw_input, self.shank_orientation_input, sizing_mode="stretch_width"),
             pn.Row(self.bregma_relative_toggle, self.bregma_hint, margin=(0, 0)),
             pn.Row(self.bregma_ap_input, self.bregma_ml_input, self.bregma_dv_input, sizing_mode="stretch_width"),
+            self.region_search_section,
             pn.Row(self.atlas_transform_title, self.atlas_transform_hint, margin=(0, 0)),
             pn.Row(self.dv_squish_input, self.ap_squish_input, self.ml_squish_input,
                    self.tilt_input, sizing_mode="stretch_width"),
