@@ -7,6 +7,7 @@
 [![Documentation](https://readthedocs.org/projects/pixelmap-neuropixels/badge/?version=latest)](https://pixelmap-neuropixels.readthedocs.io/en/latest/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Unique users of the online GUI](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fm-beau%2Fpixelmap%2Fusage-stats%2Funique_visitors_badge.json)](https://pixelmap.pni.princeton.edu/app)
 
 <div align="center">
 
@@ -78,12 +79,6 @@ See the [full documentation](https://pixelmap-neuropixels.readthedocs.io) for th
 
 UHD and Opto are not currently on our roadmap — [open an issue](https://github.com/m-beau/pixelmap/issues) if you need support for these.
 
-## Usage of the online GUI
-
-![Unique visitors of the online GUI per week](https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors.png)
-
-Updated every Monday by a [GitHub workflow](.github/workflows/usage-stats.yml); the numbers are in [`weekly_unique_visitors.csv`](https://github.com/m-beau/pixelmap/blob/usage-stats/weekly_unique_visitors.csv).
-
 ## Contributing
 
 Bug reports and feature requests are welcome via [GitHub Issues](https://github.com/m-beau/pixelmap/issues). Pull requests are also welcome — please open an issue first to discuss significant changes.
@@ -97,3 +92,10 @@ If you use PixelMap in your research, please cite our paper in the Journal of Op
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE.txt).
+
+## App usage statistics
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors_dark.svg">
+  <img src="https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors_light.svg" alt="Unique visitors of the online GUI per week" width="480">
+</picture>
