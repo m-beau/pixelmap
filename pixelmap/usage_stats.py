@@ -1,10 +1,11 @@
-"""``/usage-stats``: weekly unique-visitor counts of the hosted GUI, as JSON.
+"""``/usage-stats``: unique-visitor counts of the hosted GUI, as JSON.
 
 The visitor database lives on the server, where GitHub cannot reach it. This
-endpoint publishes the one aggregate the usage graph needs, so that
-``.github/workflows/usage-stats.yml`` can fetch it and redraw the graph
-(``scripts/update_usage_graph.py``). It returns counts per week and nothing
-else: no visitor IDs, IP addresses or user agents leave the server.
+endpoint publishes the aggregates the README needs, so that
+``.github/workflows/usage-stats.yml`` can fetch them and redraw the usage
+graph and badge (``scripts/update_usage_graph.py``). It returns the count per
+week and the all-time count, and nothing else: no visitor IDs, IP addresses or
+user agents leave the server.
 
 ``entrypoint.sh`` loads this module through ``panel serve --plugins``, which
 adds ``ROUTES`` to the server. Like ``/liveness``, a request builds no Bokeh
@@ -21,7 +22,7 @@ from typing import Any
 from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler
 
-from pixelmap.analytics import get_weekly_unique_visitors
+from pixelmap.analytics import get_unique_visitors, get_weekly_unique_visitors
 
 ENDPOINT = "/usage-stats"
 
@@ -39,6 +40,8 @@ def build_payload() -> dict[str, Any]:
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "week_starts_on": "monday",
         "timezone": "UTC",
+        # Not the sum of the weeks: a visitor who returns counts once here.
+        "total_unique_visitors": get_unique_visitors(),
         "weeks": get_weekly_unique_visitors(),
     }
 

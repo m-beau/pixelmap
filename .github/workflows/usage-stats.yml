@@ -1,14 +1,17 @@
 name: Usage stats graph
 
-# Redraws the graph of unique visitors per week of the hosted GUI.
+# Redraws the README's usage graph (unique visitors per week of the hosted
+# GUI) and its badge (unique visitors of all time).
 #
-# The visitor database lives on the server, so the server publishes the weekly
-# counts at /usage-stats (pixelmap/usage_stats.py) and this workflow fetches
-# them. The graph and its CSV are committed to the `usage-stats` branch, not
-# to main: a weekly bot commit would otherwise need to get past main's branch
-# protection, and would make main drift from dev.
+# The visitor database lives on the server, so the server publishes the counts
+# at /usage-stats (pixelmap/usage_stats.py) and this workflow fetches them.
+# The results are committed to the `usage-stats` branch, not to main: a weekly
+# bot commit would otherwise need to get past main's branch protection, and
+# would make main drift from dev. The README reads them from there:
 #
-#   https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors.png
+#   https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors_light.svg
+#   https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/weekly_unique_visitors_dark.svg
+#   https://raw.githubusercontent.com/m-beau/pixelmap/usage-stats/unique_visitors_badge.json
 #
 # GitHub only runs schedules from the default branch, so this starts firing
 # once it is on main.
@@ -39,8 +42,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # The stats branch shares no history with the code: it holds the CSV and
-    # the PNG only. The first run creates it.
+    # The stats branch shares no history with the code: it holds the script's
+    # output only. The first run creates it.
     - name: Check out the stats branch
       run: |
         if git ls-remote --exit-code --heads origin "$STATS_BRANCH" > /dev/null; then
@@ -50,25 +53,19 @@ jobs:
           git worktree add --orphan -b "$STATS_BRANCH" stats
         fi
 
-    - name: Set up uv
-      uses: astral-sh/setup-uv@v10.3.3  # no floating major tags since v8
-      with:
-        cache-suffix: usage-stats
+    # Standard library only, so the runner's own Python is enough.
+    - name: Fetch the counts and redraw the graph and badge
+      run: python3 scripts/update_usage_graph.py --url "$USAGE_STATS_URL" --out-dir stats
 
-    # The script declares its own dependencies (matplotlib), so uv runs it in
-    # an environment of its own instead of installing the whole project.
-    - name: Fetch the weekly counts and redraw the graph
-      run: uv run scripts/update_usage_graph.py --url "$USAGE_STATS_URL" --out-dir stats
-
-    - name: Commit the graph
+    - name: Commit the graph and badge
       working-directory: stats
       run: |
         git add --all
         if git diff --cached --quiet; then
-          echo "No new complete week: nothing to commit."
+          echo "Nothing changed since the last run: nothing to commit."
           exit 0
         fi
         git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -m "Update weekly unique visitors"
+            commit -m "Update usage graph and badge"
         git push origin "HEAD:refs/heads/$STATS_BRANCH"

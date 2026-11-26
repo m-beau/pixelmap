@@ -5,9 +5,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 from tornado.testing import AsyncHTTPTestCase
@@ -78,6 +79,7 @@ def test_payload_is_cached_between_requests(analytics_db):
 
     assert usage_stats.get_cached_payload() is first
     assert first["weeks"] == [{"week_start": "2026-03-23", "unique_visitors": 1}]
+    assert first["total_unique_visitors"] == 1
 
 
 class TestUsageStatsHandler(AsyncHTTPTestCase):
@@ -95,6 +97,7 @@ class TestUsageStatsHandler(AsyncHTTPTestCase):
         assert response.headers["Content-Type"].startswith("application/json")
         payload = json.loads(response.body)
         assert payload["weeks"] == [{"week_start": "2026-03-23", "unique_visitors": 1}]
+        assert payload["total_unique_visitors"] == 1
         # The script reads the endpoint's own output.
         assert update_usage_graph.parse_weeks(payload["weeks"]) == {date(2026, 3, 23): 1}
         body = response.body.decode()
@@ -119,25 +122,89 @@ def test_parse_weeks_rejects_a_week_that_does_not_start_on_monday():
         update_usage_graph.parse_weeks([{"week_start": "2026-03-24", "unique_visitors": 3}])
 
 
-def test_script_writes_the_table_and_the_graph(tmp_path):
+def _serve(tmp_path, weeks, **extra):
+    """A file standing in for the endpoint; returns its URL."""
     payload = tmp_path / "usage-stats.json"
-    payload.write_text(
-        json.dumps(
-            {
-                "weeks": [
-                    {"week_start": "2026-03-23", "unique_visitors": 27},
-                    {"week_start": "2026-03-30", "unique_visitors": 32},
-                ]
-            }
-        )
-    )
+    rows = [{"week_start": week, "unique_visitors": count} for week, count in weeks.items()]
+    payload.write_text(json.dumps({"weeks": rows, **extra}))
+    return payload.as_uri()
+
+
+def _run_script(url, out_dir):
+    assert update_usage_graph.main(["--url", url, "--out-dir", str(out_dir)]) == 0
+    return {path.name: path.read_text() for path in out_dir.iterdir()}
+
+
+def test_script_writes_the_table_the_graphs_and_the_badge(tmp_path):
+    url = _serve(tmp_path, {"2026-03-23": 27, "2026-03-30": 32}, total_unique_visitors=1234)
     out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / update_usage_graph.LEGACY_PNG_NAME).write_text("the graph of an earlier version")
 
-    assert update_usage_graph.main(["--url", payload.as_uri(), "--out-dir", str(out_dir)]) == 0
+    files = _run_script(url, out_dir)
 
-    csv_text = (out_dir / update_usage_graph.CSV_NAME).read_text()
-    assert csv_text == "week_start,unique_visitors\n2026-03-23,27\n2026-03-30,32\n"
-    assert (out_dir / update_usage_graph.PNG_NAME).read_bytes().startswith(b"\x89PNG")
-    # A second run reads its own CSV back and changes nothing.
-    assert update_usage_graph.main(["--url", payload.as_uri(), "--out-dir", str(out_dir)]) == 0
-    assert (out_dir / update_usage_graph.CSV_NAME).read_text() == csv_text
+    assert set(files) == {
+        "weekly_unique_visitors.csv",
+        "weekly_unique_visitors_light.svg",
+        "weekly_unique_visitors_dark.svg",
+        "unique_visitors_badge.json",
+    }
+    assert files["weekly_unique_visitors.csv"] == "week_start,unique_visitors\n2026-03-23,27\n2026-03-30,32\n"
+    # Not the 59 the weeks add up to: the server counts a returning visitor once.
+    assert json.loads(files["unique_visitors_badge.json"]) == {
+        "schemaVersion": 1,
+        "label": "unique users",
+        "message": "1,234",
+        "color": "blue",
+    }
+    # A second run reads its own CSV back and changes nothing, so nothing is committed.
+    assert _run_script(url, out_dir) == files
+
+
+def test_graphs_are_valid_svg_and_differ_only_in_colour(tmp_path):
+    files = _run_script(_serve(tmp_path, {"2026-03-23": 27, "2026-03-30": 32}), tmp_path / "out")
+    light, dark = (files[f"weekly_unique_visitors_{theme}.svg"] for theme in ("light", "dark"))
+
+    for svg in (light, dark):
+        root = ElementTree.fromstring(svg)
+        assert root.tag == "{http://www.w3.org/2000/svg}svg"
+        # No background: the graph sits on GitHub's page colour in either scheme.
+        assert root.find("{http://www.w3.org/2000/svg}rect") is None
+        assert ">32<" in svg  # the latest week is labelled
+    assert light != dark
+    for theme, svg in (("light", light), ("dark", dark)):
+        for color in update_usage_graph.THEMES[theme].values():
+            svg = svg.replace(color, "COLOR")
+        assert "#" not in svg, f"{theme} graph has a colour outside its theme"
+
+
+def test_a_week_without_visitors_is_a_gap_not_a_missing_slot(tmp_path):
+    weeks = {date(2026, 3, 23): 27, date(2026, 4, 6): 30}  # nothing in the week of March 30
+
+    svg = update_usage_graph.render_svg(weeks, "light")
+
+    bars = ElementTree.fromstring(svg).find("{http://www.w3.org/2000/svg}path").get("d")
+    lefts = [float(move.split(",")[0]) for move in bars.split("M")[1:]]
+    slot = (update_usage_graph.PLOT_RIGHT - update_usage_graph.PLOT_LEFT) / 3
+    assert len(lefts) == 2
+    assert lefts[1] - lefts[0] == pytest.approx(2 * slot, abs=0.2)
+
+
+def test_month_labels_thin_out_and_mark_the_year_as_the_graph_grows():
+    slots = [date(2026, 3, 23) + timedelta(weeks=i) for i in range(4 * 52)]
+
+    labels = update_usage_graph._month_labels(slots)
+
+    assert len(labels) <= update_usage_graph.MAX_MONTH_LABELS
+    assert {"2027", "2028", "2029"} <= set(labels.values())
+
+
+def test_a_server_without_the_total_leaves_the_badge_alone(tmp_path, capsys):
+    out_dir = tmp_path / "out"
+    _run_script(_serve(tmp_path, {"2026-03-23": 27}, total_unique_visitors=400), out_dir)
+
+    files = _run_script(_serve(tmp_path, {"2026-03-23": 27, "2026-03-30": 32}), out_dir)
+
+    assert json.loads(files["unique_visitors_badge.json"])["message"] == "400"
+    assert "2026-03-30,32" in files["weekly_unique_visitors.csv"]
+    assert "badge not updated" in capsys.readouterr().err

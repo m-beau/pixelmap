@@ -79,12 +79,13 @@ once per window, default 60; `0` sends every one).
 :::{note}
 **Usage statistics**: the server records each visit (an anonymous cookie ID,
 IP address, user agent and timestamp) in the SQLite database at
-`ANALYTICS_DB_PATH`, which stays on the server. `/usage-stats` publishes one
-aggregate of it as JSON: the number of unique visitors per week (Monday to
-Sunday, UTC), automated browsers included. The `Usage stats graph` GitHub
-workflow fetches it every Monday and commits
-`weekly_unique_visitors.png` and `.csv` to the `usage-stats` branch. For
-another deployment, point the workflow's `USAGE_STATS_URL` at your server.
+`ANALYTICS_DB_PATH`, which stays on the server. `/usage-stats` publishes two
+aggregates of it as JSON: the number of unique visitors per week (Monday to
+Sunday, UTC) and of all time, automated browsers included. The `Usage stats
+graph` GitHub workflow fetches them every Monday and commits the README's
+graph and badge to the `usage-stats` branch, with the weekly numbers in
+`weekly_unique_visitors.csv`. For another deployment, point the workflow's
+`USAGE_STATS_URL` at your server.
 :::
 
 ## Quick Start
