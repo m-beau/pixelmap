@@ -29,6 +29,7 @@ Configuration (environment, read by :func:`install`):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -45,14 +46,24 @@ _install_lock = threading.Lock()
 
 
 def _env_float(name: str, default: float) -> float:
+    """Read a threshold from the environment; blank or unset means ``default``.
+
+    Finite zero and negatives are returned as-is (callers treat them as "off").
+    ``nan`` and ``±inf`` parse as floats but aren't usable thresholds -- NaN
+    breaks every comparison, and infinity silently disables the check -- so they
+    are rejected like any other non-number.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        log.warning("[watchdog] ignoring %s=%r: not a number, using %s", name, raw, default)
+        value = math.nan
+    if not math.isfinite(value):
+        log.warning("[watchdog] ignoring %s=%r: not a finite number, using %s", name, raw, default)
         return default
+    return value
 
 
 def _rss_mb() -> float:
